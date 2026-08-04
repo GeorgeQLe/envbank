@@ -58,6 +58,18 @@ func (a *API) ApproveEnrollment(deviceID string, envelope secure.WrappedKey) err
 		protocol.EnrollmentApproval{Envelope: envelope}, nil, true)
 }
 
+func (a *API) ListDevices() ([]protocol.DeviceStatus, error) {
+	var response []protocol.DeviceStatus
+	err := a.do(http.MethodGet, a.vaultPath()+"/devices", nil, &response, true)
+	return response, err
+}
+
+func (a *API) RevokeDevice(deviceID string) (protocol.DeviceStatus, error) {
+	var response protocol.DeviceStatus
+	err := a.do(http.MethodDelete, a.vaultPath()+"/devices/"+url.PathEscape(deviceID), nil, &response, true)
+	return response, err
+}
+
 func (a *API) ListRecords() ([]protocol.Record, error) {
 	var response []protocol.Record
 	err := a.do(http.MethodGet, a.vaultPath()+"/records", nil, &response, true)
@@ -67,6 +79,23 @@ func (a *API) ListRecords() ([]protocol.Record, error) {
 func (a *API) PutRecord(recordID string, request protocol.PutRecordRequest) (protocol.Record, error) {
 	var response protocol.Record
 	err := a.do(http.MethodPut, a.vaultPath()+"/records/"+url.PathEscape(recordID), request, &response, true)
+	return response, err
+}
+
+func (a *API) ListAccessEvents(limit int, before string) (protocol.AccessEventPage, error) {
+	var response protocol.AccessEventPage
+	values := url.Values{}
+	if limit != 0 {
+		values.Set("limit", fmt.Sprint(limit))
+	}
+	if before != "" {
+		values.Set("before", before)
+	}
+	path := a.vaultPath() + "/access-events"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	err := a.do(http.MethodGet, path, nil, &response, true)
 	return response, err
 }
 

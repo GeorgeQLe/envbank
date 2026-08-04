@@ -57,6 +57,12 @@ func run(args []string) error {
 		return enrollApprove(args[1:])
 	case "enroll-accept":
 		return enrollAccept(args[1:])
+	case "device-list":
+		return deviceList(args[1:])
+	case "device-revoke":
+		return deviceRevoke(args[1:])
+	case "event-list":
+		return eventList(args[1:])
 	case "set":
 		return setSecret(args[1:], false)
 	case "rotate":
@@ -96,12 +102,15 @@ func usage() {
 	fmt.Fprint(os.Stderr, `EnvBank: encrypted, multi-device environment variables
 
 Usage:
-  envbank serve [--listen 127.0.0.1:7337] [--state PATH]
+  envbank serve [--listen 127.0.0.1:7337] [--database PATH]
   envbank init --server URL --vault NAME --device NAME [auth flags]
   envbank enroll-request --server URL --vault-id ID --device NAME [auth flags]
   envbank enroll-list [auth flags]
   envbank enroll-approve --fingerprint HEX [auth flags] DEVICE_ID
   envbank enroll-accept [auth flags]
+  envbank device-list [auth flags]
+  envbank device-revoke --fingerprint HEX [--allow-self] [auth flags] DEVICE_ID
+  envbank event-list [--limit N] [--before CURSOR] [auth flags]
   envbank set [--rotate-days N] [auth flags] NAME       # value from stdin
   envbank rotate [--bytes 32] [auth flags] NAME         # generated value
   envbank list [auth flags]
@@ -140,14 +149,22 @@ func addAuthFlags(fs *flag.FlagSet) *authFlags {
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	listen := fs.String("listen", "127.0.0.1:7337", "listen address")
-	state := fs.String("state", "envbank-server.json", "server state file")
+	database := fs.String("database", "envbank-server.db", "SQLite database file")
+	legacyState := fs.String("state", "", "deprecated alias for --database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	service, err := server.Open(*state)
+	if *legacyState != "" {
+		if *database != "envbank-server.db" {
+			return errors.New("--database and --state cannot be used together")
+		}
+		*database = *legacyState
+	}
+	service, err := server.Open(*database)
 	if err != nil {
 		return err
 	}
+	defer service.Close()
 	httpServer := &http.Server{
 		Addr: *listen, Handler: service,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -266,11 +283,144 @@ func enrollList(args []string) error {
 	}
 	for _, enrollment := range enrollments {
 		status := "pending"
-		if enrollment.Approved {
+		if enrollment.RevokedAt != "" {
+			status = "revoked"
+		} else if enrollment.Approved {
 			status = "approved"
 		}
 		fmt.Printf("%s\t%s\t%s\t%s\n", enrollment.Device.ID, enrollment.Device.Name,
 			enrollment.Device.Fingerprint, status)
+	}
+	return nil
+}
+
+func deviceList(args []string) error {
+	fs := flag.NewFlagSet("device-list", flag.ContinueOnError)
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("device-list accepts no positional arguments")
+	}
+	api, _, err := unlockedAPI(auth)
+	if err != nil {
+		return err
+	}
+	devices, err := api.ListDevices()
+	if err != nil {
+		return err
+	}
+	for _, device := range devices {
+		status := "active"
+		if device.RevokedAt != "" {
+			status = "revoked"
+		}
+		fmt.Printf("%s\t%s\t%s\t%s\t%s\n", device.Device.ID, device.Device.Name,
+			device.Device.Fingerprint, status, device.RevokedAt)
+	}
+	return nil
+}
+
+func deviceRevoke(args []string) error {
+	fs := flag.NewFlagSet("device-revoke", flag.ContinueOnError)
+	fingerprint := fs.String("fingerprint", "", "fingerprint verified out of band")
+	allowSelf := fs.Bool("allow-self", false, "confirm revocation of this configured device")
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || strings.TrimSpace(*fingerprint) == "" {
+		return errors.New("DEVICE_ID and --fingerprint are required")
+	}
+	api, _, err := unlockedAPI(auth)
+	if err != nil {
+		return err
+	}
+	targetID := fs.Arg(0)
+	devices, err := api.ListDevices()
+	if err != nil {
+		return err
+	}
+	var target *protocol.DeviceStatus
+	for i := range devices {
+		if devices[i].Device.ID == targetID {
+			target = &devices[i]
+			break
+		}
+	}
+	if target == nil {
+		return errors.New("device not found")
+	}
+	if target.RevokedAt != "" {
+		return errors.New("device is already revoked")
+	}
+	if !strings.EqualFold(target.Device.Fingerprint, strings.TrimSpace(*fingerprint)) {
+		return errors.New("fingerprint does not match; revocation cancelled")
+	}
+	self := targetID == api.Config.DeviceID
+	if self && !*allowSelf {
+		return errors.New("refusing to revoke the current device without --allow-self")
+	}
+	revoked, err := api.RevokeDevice(targetID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("revoked device %s (%s) at %s\n",
+		revoked.Device.ID, revoked.Device.Name, revoked.RevokedAt)
+	if self {
+		fmt.Fprintln(os.Stderr, "warning: this device can no longer access the vault; its local config and Keychain entry were preserved")
+	}
+	return nil
+}
+
+func eventList(args []string) error {
+	fs := flag.NewFlagSet("event-list", flag.ContinueOnError)
+	limit := fs.Int("limit", 0, "events to return (default 100, maximum 500)")
+	before := fs.String("before", "", "opaque pagination cursor")
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("event-list accepts no positional arguments")
+	}
+	var limitSet bool
+	fs.Visit(func(current *flag.Flag) {
+		if current.Name == "limit" {
+			limitSet = true
+		}
+	})
+	if limitSet && (*limit < 1 || *limit > 500) {
+		return errors.New("--limit must be between 1 and 500")
+	}
+	api, _, err := unlockedAPI(auth)
+	if err != nil {
+		return err
+	}
+	page, err := api.ListAccessEvents(*limit, *before)
+	if err != nil {
+		return err
+	}
+	for _, event := range page.Events {
+		identityID := event.IdentityID
+		if identityID == "" {
+			identityID = "-"
+		}
+		reason := event.Reason
+		if reason == "" {
+			reason = "-"
+		}
+		targetID := event.TargetIdentityID
+		if targetID == "" {
+			targetID = "-"
+		}
+		fmt.Printf("%s\t%s\t%t\t%s\t%s\t%s\t%s\n",
+			event.Timestamp, identityID, event.IdentityVerified, event.Operation,
+			event.Outcome, reason, targetID)
+	}
+	if page.NextCursor != "" {
+		fmt.Fprintf(os.Stderr, "next cursor: %s\n", page.NextCursor)
 	}
 	return nil
 }

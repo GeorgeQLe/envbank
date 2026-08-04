@@ -75,6 +75,61 @@ The wrapping envelope uses ephemeral X25519, an HMAC-SHA-256 extract/expand
 construction, and AES-256-GCM with vault and device IDs as authenticated
 context.
 
+## Device revocation
+
+Approved devices have an optional server-side revocation timestamp. Device
+listing includes public identity metadata and active/revoked state, but no
+vault key, encrypted record contents, or other secret material. A revocation
+authenticates the caller, counts active devices, marks the target revoked, and
+deletes the target's stored replay nonces in one immediate transaction. The
+same transaction refuses to revoke the final active device, so concurrent
+cross-revocation through multiple service processes still leaves one device
+active.
+
+Authentication verifies a known identity's signature before applying device
+state authorization. A valid signature from a pending or revoked identity can
+therefore be truthfully attributed while access remains denied. Invalid
+signatures may be associated with an existing claimed identity, but an unknown
+attacker-provided identity is never copied into access history. Pending
+enrollments may access only their own enrollment status; an approved
+enrollment-status request also requires the corresponding device to remain
+active. Revoked identities and wrapped enrollment envelopes remain stored for
+history, and the local CLI deliberately preserves its encrypted config and
+Keychain entry.
+
+This is access revocation, not cryptographic recall. A revoked device may retain
+the vault key and ciphertext it obtained earlier, so it can continue to decrypt
+that cached material offline. Vault rekeying and record re-encryption are out
+of scope for this workflow.
+
+## Access events
+
+The server maintains a privacy-preserving operational history for recognized
+enrollment, device-management, record, and access-event routes. Successful
+operations, verified business rejections, authentication failures, and public
+enrollment requests receive random public event IDs and a server-side sequence
+for deterministic newest-first pagination. Events contain only the vault,
+timestamp, operation, outcome, bounded reason, optional known acting identity
+and verification state, and optional target device identity.
+
+Events never contain request bodies, ciphertext, record identifiers, secret
+names or values, signatures, nonces, IP addresses, forwarded headers, or
+User-Agent strings. Vault creation, health checks, unknown routes, and requests
+for nonexistent vaults are omitted. The service prunes each vault
+transactionally after 90 days and maintains independent caps of 10,000
+verified-identity events and 2,000 unverified events, so unauthenticated traffic
+cannot evict verified history.
+
+Nonce consumption, a verified operation or policy rejection, and its event
+commit together. A verified read or mutation fails closed if its event cannot
+be persisted. Accepted public enrollment requests also commit with their event;
+unverified authentication failures and rejected public enrollment requests
+retain their original response when event persistence is unavailable.
+
+This history supports operator review and future risk scoring. It is not
+encrypted, signed, append-only, tamper-proof, or rollback-resistant. Signed
+audit checkpoints remain a separate later hardening item.
+
 ## Rotation workflow
 
 Records may specify `rotate_every_days`. `envbank due` reports names and age,
@@ -122,11 +177,20 @@ threat.
 
 ## Server persistence and deployment
 
-The initial service uses an atomically replaced JSON state file protected by an
-in-process mutex. It is suitable for a single-process personal/team deployment.
-Production must place it behind TLS, restrict network access, back up the state
-file, and run exactly one writer. A transactional database adapter is the next
-step for multi-instance service operation.
+The service stores ciphertext, public metadata, and bounded access events in a
+normalized SQLite database. Enrollment approval, optimistic record revision
+checks, replay nonce consumption, and verified access-event persistence execute
+in the same `BEGIN IMMEDIATE` transaction as their associated operation. WAL
+journaling and a busy timeout allow multiple service processes on one host to
+share the database safely. SQLite files must remain on a local filesystem;
+multi-host deployments should use a client/server database adapter instead.
+
+An existing version-1 JSON state file is imported transactionally on first
+startup, and the source is retained as a `.json.bak` recovery copy. Version-1
+and version-2 SQLite databases migrate in place to version 3; their existing
+devices remain active and their access history starts empty. Production must
+still place the service behind TLS, restrict network access, and back up the
+database.
 
 ## Cryptographic agility
 

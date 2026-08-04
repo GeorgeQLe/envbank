@@ -26,6 +26,11 @@ type PublicDevice struct {
 	CreatedAt      string `json:"created_at"`
 }
 
+type DeviceStatus struct {
+	Device    PublicDevice `json:"device"`
+	RevokedAt string       `json:"revoked_at,omitempty"`
+}
+
 type CreateVaultRequest struct {
 	Name   string       `json:"name"`
 	Device PublicDevice `json:"device"`
@@ -47,9 +52,10 @@ type EnrollmentApproval struct {
 }
 
 type EnrollmentStatus struct {
-	Device   PublicDevice       `json:"device"`
-	Approved bool               `json:"approved"`
-	Envelope *secure.WrappedKey `json:"envelope,omitempty"`
+	Device    PublicDevice       `json:"device"`
+	Approved  bool               `json:"approved"`
+	Envelope  *secure.WrappedKey `json:"envelope,omitempty"`
+	RevokedAt string             `json:"revoked_at,omitempty"`
 }
 
 type Record struct {
@@ -62,6 +68,23 @@ type Record struct {
 type PutRecordRequest struct {
 	ExpectedRevision int64       `json:"expected_revision"`
 	Blob             secure.Blob `json:"blob"`
+}
+
+type AccessEvent struct {
+	ID               string `json:"id"`
+	VaultID          string `json:"vault_id"`
+	Timestamp        string `json:"timestamp"`
+	IdentityID       string `json:"identity_id,omitempty"`
+	IdentityVerified bool   `json:"identity_verified"`
+	TargetIdentityID string `json:"target_identity_id,omitempty"`
+	Operation        string `json:"operation"`
+	Outcome          string `json:"outcome"`
+	Reason           string `json:"reason,omitempty"`
+}
+
+type AccessEventPage struct {
+	Events     []AccessEvent `json:"events"`
+	NextCursor string        `json:"next_cursor,omitempty"`
 }
 
 type SecretRecord struct {

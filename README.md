@@ -10,11 +10,19 @@ managed KMS or enterprise secrets manager. Read the
 [architecture and threat model](docs/architecture.md) before using real
 production credentials.
 
+## Roadmap
+
+See the [product roadmap](docs/roadmap.md) for the ordered path from today's
+zero-knowledge foundation to safe recovery and provider-backed API-key
+rotation.
+
 ## What works
 
 - AES-256-GCM encrypted records with hidden, keyed record identifiers
 - Ed25519-authenticated client/server requests and persisted replay protection
 - X25519 vault-key wrapping for explicitly approved devices
+- Soft device revocation with an atomic last-active-device safeguard
+- Privacy-preserving device-access history with bounded retention
 - Passphrase-encrypted `0600` local device identity
 - Optimistic revisions to prevent silent concurrent overwrites
 - Rotation policy reporting, local macOS notifications, and generated rotation
@@ -22,7 +30,7 @@ production credentials.
 - Direct child-process environment injection without writing a `.env` file
 - Exact-origin browser authorization stored inside each encrypted record
 - A macOS Keychain-gated Chrome native host and dependency-free MV3 extension
-- A dependency-free Go binary and single-process self-hosted sync service
+- A transactional SQLite sync service that supports multiple service processes
 
 ## Build and test
 
@@ -39,7 +47,7 @@ node --test extension/test/*.test.js
 Start the service locally:
 
 ```sh
-./envbank serve --listen 127.0.0.1:7337 --state .envbank/server.json
+./envbank serve --listen 127.0.0.1:7337 --database .envbank/server.db
 ```
 
 Create a passphrase file. Keep it outside the repository, back it up securely,
@@ -121,6 +129,60 @@ Back on the second device:
   --config /secure/path/workstation.json \
   --passphrase-file /secure/path/workstation-passphrase
 ```
+
+## Revoke a device
+
+List every active and revoked device from an active device:
+
+```sh
+./envbank device-list \
+  --config /secure/path/laptop.json \
+  --passphrase-file /secure/path/laptop-passphrase
+```
+
+Verify the target fingerprint over a trusted channel, then revoke it:
+
+```sh
+./envbank device-revoke \
+  --fingerprint VERIFIED_FINGERPRINT \
+  --config /secure/path/laptop.json \
+  --passphrase-file /secure/path/laptop-passphrase \
+  DEVICE_ID
+```
+
+Revoking the currently configured device also requires `--allow-self`. EnvBank
+preserves that device's local config and Keychain entry, but the server rejects
+all of its future authenticated requests. The server will not revoke the final
+active device.
+
+Revocation blocks future synchronization and approved enrollment-status
+access. It cannot recall a vault key or ciphertext that the device already
+downloaded. Re-enrollment therefore requires a new device identity; rotating
+the vault key and re-encrypting existing records is a separate recovery
+operation that EnvBank does not yet provide.
+
+## Review access history
+
+Authenticated devices can inspect the newest access events:
+
+```sh
+./envbank event-list --limit 100 \
+  --config /secure/path/laptop.json \
+  --passphrase-file /secure/path/laptop-passphrase
+```
+
+The tab-separated output contains the timestamp, acting identity (or `-`),
+whether its signature was verified, operation, outcome, bounded reason (or
+`-`), and target device identity (or `-`). When more history exists, the CLI
+prints an opaque `--before` cursor hint to standard error.
+
+The server records recognized enrollment, device-management, record, and event
+listing operations, including verified policy rejections and authentication
+failures. It never puts request bodies, ciphertext, record identifiers, secret
+names or values, signatures, nonces, network addresses, forwarded headers, or
+User-Agent strings into events. History is operational telemetry for review and
+future risk scoring, not a signed, append-only, or rollback-resistant audit
+log.
 
 ## Rotation
 
@@ -204,11 +266,21 @@ docker run --read-only --init \
 ```
 
 Put the service behind an authenticated private network and a TLS reverse
-proxy. Back up `/data/server.json`; it contains encrypted records and device
-metadata, not plaintext values. Run only one service instance against a state
-file. Set up a separate encrypted recovery copy or keep two approved devices,
-because the service cannot recover a lost vault key.
+proxy. Back up `/data/envbank.db` with SQLite's online backup API or while all
+service processes are stopped; it contains encrypted records, public device
+metadata, and bounded access events, not plaintext values. SQLite transactions,
+WAL journaling, and atomic nonce consumption allow multiple service processes
+on one host to share the database. Do not place the database on a network
+filesystem; use a client/server database before scaling across hosts. Set up a
+separate encrypted recovery copy or keep two approved devices, because the
+service cannot recover a lost vault key.
 
-Before broader production use, add a transactional database backend,
-device revocation, signed audit checkpoints/rollback detection, rate limiting,
-platform keychain support, and an external cryptographic review.
+On first startup, `--database` also accepts an existing version-1 JSON state
+file. EnvBank imports it transactionally and preserves the original beside it
+as `PATH.json.bak`. The deprecated `--state` flag remains as an alias for this
+migration. Existing version-1 and version-2 SQLite databases are upgraded in
+place to schema version 3, with all existing devices remaining active and an
+initially empty access history.
+
+See the [product roadmap](docs/roadmap.md) for production-readiness and future
+work.

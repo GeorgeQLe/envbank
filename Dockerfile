@@ -14,4 +14,4 @@ USER 65532:65532
 VOLUME ["/data"]
 EXPOSE 7337
 ENTRYPOINT ["/envbank"]
-CMD ["serve", "--listen", "0.0.0.0:7337", "--state", "/data/server.json"]
+CMD ["serve", "--listen", "0.0.0.0:7337", "--database", "/data/envbank.db"]
