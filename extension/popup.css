@@ -1,0 +1,15 @@
+:root { color-scheme: light dark; font: 13px system-ui; }
+body { margin: 0; width: 360px; background: #111827; color: #e5e7eb; }
+main { padding: 14px; }
+header { display: flex; align-items: center; justify-content: space-between; font-size: 17px; }
+button, input { font: inherit; }
+button { cursor: pointer; border: 1px solid #526079; border-radius: 6px; padding: 5px 8px; background: #263247; color: #fff; }
+#origin { color: #9ca3af; overflow-wrap: anywhere; }
+#search { box-sizing: border-box; width: 100%; padding: 8px; border: 1px solid #526079; border-radius: 7px; background: #172032; color: inherit; }
+#status { color: #fca5a5; }
+.record { display: grid; grid-template-columns: 1fr auto; gap: 5px 10px; padding: 10px 0; border-top: 1px solid #334155; }
+.meta { color: #9ca3af; font-size: 12px; }
+.due { color: #fbbf24; }
+.blocked { opacity: .72; }
+dialog { max-width: 310px; border: 1px solid #526079; border-radius: 10px; background: #172032; color: #fff; }
+menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; }

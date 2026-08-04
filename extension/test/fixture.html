@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><title>EnvBank acceptance fixture</title>
+<label>Text <input id="text" type="text"></label>
+<label>Password <input id="password" type="password"></label>
+<label>Hidden <input id="hidden" type="hidden"></label>
+<label>File <input id="file" type="file"></label>
+<label>Textarea <textarea id="textarea"></textarea></label>
+<iframe srcdoc="<input type=password>"></iframe>
+<script>for (const id of ["text","password","textarea"]) { const el=document.getElementById(id); el.addEventListener("input",()=>el.dataset.input="yes"); el.addEventListener("change",()=>el.dataset.change="yes"); }</script>

@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>EnvBank Fill</title>
+<link rel="stylesheet" href="popup.css">
+<main>
+  <header><strong>EnvBank</strong><button id="lock">Lock</button></header>
+  <p id="origin"></p>
+  <input id="search" type="search" placeholder="Search variable names" autocomplete="off">
+  <p id="status">Loading…</p>
+  <section id="records"></section>
+</main>
+<dialog id="confirm"><form method="dialog"><h2>Allow on this site?</h2><p id="confirm-text"></p><menu><button value="cancel">Cancel</button><button id="confirm-allow" value="default">Allow exact origin</button></menu></form></dialog>
+<script src="core.js"></script><script src="popup.js"></script>

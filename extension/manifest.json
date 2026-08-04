@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "EnvBank Fill",
+  "version": "0.1.0",
+  "description": "Fill explicitly selected fields from EnvBank.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxNjV2RX9ymbN8g2RDjSpkoLDGt1vl5OZR1frfwHkHahBAtzoHrHr/kMwtvIGqyVuy6ZrWKVItBb5nWcNPorMNPwEaUSkdTGMHx7kodNr0c/mKGiqu9wWLSS36JCDjv56/4YELL9LppoEZGqgZcJiy5Wk4vcGijazMNjcFS5bVrm1gHMVCyKp5Lv2k0X4xuupSVuc3DSHc97u6sP8clKn1XtWzLjVaSo36zT6DgoY9I/H95RSF5+JmZiBt6eLZ5ARKwcLDGEehE9Fl5J2WWCNzxYM58w/3H0kjvSuBin/NA2Nq1kdyDvU9bSkNOTZubI8m7H5KetWyvjJojHjmtA6kwIDAQAB",
+  "permissions": ["activeTab", "scripting", "nativeMessaging"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "EnvBank Fill" }
+}

@@ -1,0 +1,9 @@
+{
+  "project_type": "business-app",
+  "enabled_packs": [],
+  "skill_pack_version": 1,
+  "enabled_skills": {
+    "guide": "guided-walkthrough",
+    "ship-end": "exec-loop"
+  }
+}

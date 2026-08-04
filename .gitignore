@@ -1,0 +1,5 @@
+/envbank
+/.envbank/
+*.tmp
+*.test
+coverage.out
