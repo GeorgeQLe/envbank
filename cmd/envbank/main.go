@@ -89,6 +89,18 @@ func run(args []string) error {
 		return browserInstall(args[1:])
 	case "browser-uninstall":
 		return browserUninstall(args[1:])
+	case "recovery-export":
+		return recoveryExport(args[1:])
+	case "recovery-verify":
+		return recoveryVerify(args[1:])
+	case "recovery-list":
+		return recoveryList(args[1:])
+	case "recovery-get":
+		return recoveryGet(args[1:])
+	case "recovery-run":
+		return recoveryRun(args[1:])
+	case "recovery-restore":
+		return recoveryRestore(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -124,13 +136,21 @@ Usage:
   envbank native-host [--config PATH]
   envbank browser-install [--config PATH]
   envbank browser-uninstall [--delete-keychain]
+  envbank recovery-export --output PATH --recovery-passphrase-file PATH [auth flags]
+  envbank recovery-verify --artifact PATH [recovery auth flags]
+  envbank recovery-list --artifact PATH [recovery auth flags]
+  envbank recovery-get --artifact PATH [recovery auth flags] NAME
+  envbank recovery-run --artifact PATH [recovery auth flags] -- COMMAND [ARGS...]
+  envbank recovery-restore --artifact PATH --server URL --vault NAME --device NAME [recovery auth flags] [auth flags]
+  envbank recovery-restore --resume --artifact PATH [recovery auth flags] [auth flags]
 
 Auth flags:
   --config PATH           encrypted device config
   --passphrase-file PATH  file containing the local passphrase
 
 If --passphrase-file is omitted, ENVBANK_PASSPHRASE is used. Secret values are
-never accepted as command-line arguments.
+never accepted as command-line arguments. If --recovery-passphrase-file is
+omitted, ENVBANK_RECOVERY_PASSPHRASE is used.
 `)
 }
 
@@ -764,13 +784,7 @@ func runCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(command[0], command[1:]...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = append([]string(nil), os.Environ()...)
-	for _, record := range records {
-		cmd.Env = setEnv(cmd.Env, record.Name, record.Value)
-	}
-	return cmd.Run()
+	return executeWithRecords(command, records)
 }
 
 func unlockedAPI(auth *authFlags) (*client.API, secure.DeviceSecrets, error) {
@@ -835,10 +849,14 @@ func requireVaultKey(secrets secure.DeviceSecrets) ([]byte, error) {
 }
 
 func readPassphrase(path string) ([]byte, error) {
+	return readSecretPassphrase(path, "ENVBANK_PASSPHRASE", "--passphrase-file")
+}
+
+func readSecretPassphrase(path, environmentName, flagName string) ([]byte, error) {
 	if path == "" {
-		value := os.Getenv("ENVBANK_PASSPHRASE")
+		value := os.Getenv(environmentName)
 		if value == "" {
-			return nil, errors.New("--passphrase-file or ENVBANK_PASSPHRASE is required")
+			return nil, fmt.Errorf("%s or %s is required", flagName, environmentName)
 		}
 		return []byte(value), nil
 	}
@@ -882,6 +900,17 @@ func setEnv(environment []string, name, value string) []string {
 		}
 	}
 	return append(environment, prefix+value)
+}
+
+func unsetEnv(environment []string, name string) []string {
+	prefix := name + "="
+	out := environment[:0]
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 func notifyDue(count int) error {

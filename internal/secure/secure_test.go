@@ -20,6 +20,18 @@ func TestSealRoundTripAndAAD(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsInvalidNonceLength(t *testing.T) {
+	key, _ := RandomBytes(32)
+	blob, err := Seal(key, []byte("secret"), []byte("context"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob.Nonce = Encode([]byte("short"))
+	if _, err := Open(key, blob, []byte("context")); err == nil {
+		t.Fatal("expected invalid nonce length to be rejected")
+	}
+}
+
 func TestWrapVaultKeyRoundTrip(t *testing.T) {
 	device, err := NewDeviceKeys()
 	if err != nil {

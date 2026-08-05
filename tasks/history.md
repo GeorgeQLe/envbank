@@ -2,6 +2,14 @@
 
 ## 2026-08-05
 
+- Added versioned AES-256-GCM recovery artifacts with a separate
+  PBKDF2-HMAC-SHA-256 recovery passphrase, strict format validation, bounded
+  reads, atomic `0600` creation, and overwrite refusal.
+- Added offline recovery verification, listing, value access, and child-process
+  execution without a service or device config.
+- Added new-vault restoration with new cryptographic identities, metadata
+  preservation, revision reset, config-before-upload durability, and safe
+  resume that rejects conflicting or unrelated target records.
 - Verified the online SQLite backup and isolated restore procedure with a
   disposable, localhost-only recovery drill covering encrypted device configs,
   device revocation, access-history continuity, recovery-point boundaries, and

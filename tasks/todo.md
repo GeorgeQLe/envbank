@@ -3,7 +3,7 @@
 ## Milestone 1: Safe access and recovery
 
 - [x] Verify backup and restore procedures with a documented recovery drill.
-- [ ] Add an encrypted recovery export.
+- [x] Add an encrypted recovery export.
 - [ ] Harden production deployment guidance and complete an external
   cryptographic review.
 
@@ -23,6 +23,8 @@ Later milestones are tracked in the [product roadmap](../docs/roadmap.md).
   confirmation, and an atomic final-active-device safeguard.
 - [x] Add bounded, privacy-preserving device-access events with authenticated
   pagination and transactional fail-closed persistence.
+- [x] Add encrypted offline recovery artifacts and resumable restoration into a
+  new vault, key, and device identity.
 
 ## Blockers
 

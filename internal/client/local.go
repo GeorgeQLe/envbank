@@ -11,16 +11,17 @@ import (
 )
 
 type Config struct {
-	Version         int         `json:"version"`
-	Server          string      `json:"server"`
-	VaultID         string      `json:"vault_id"`
-	DeviceID        string      `json:"device_id"`
-	DeviceName      string      `json:"device_name"`
-	SigningPublic   string      `json:"signing_public"`
-	WrappingPublic  string      `json:"wrapping_public"`
-	Salt            string      `json:"salt"`
-	Iterations      int         `json:"iterations"`
-	EncryptedSecret secure.Blob `json:"encrypted_secret"`
+	Version          int         `json:"version"`
+	Server           string      `json:"server"`
+	VaultID          string      `json:"vault_id"`
+	DeviceID         string      `json:"device_id"`
+	DeviceName       string      `json:"device_name"`
+	SigningPublic    string      `json:"signing_public"`
+	WrappingPublic   string      `json:"wrapping_public"`
+	RecoveryArtifact string      `json:"recovery_artifact,omitempty"`
+	Salt             string      `json:"salt"`
+	Iterations       int         `json:"iterations"`
+	EncryptedSecret  secure.Blob `json:"encrypted_secret"`
 }
 
 func NewConfig(server, vaultID, deviceID, deviceName string, keys secure.DeviceKeys, passphrase []byte) (*Config, error) {
@@ -97,5 +98,9 @@ func (c *Config) Lock(secrets secure.DeviceSecrets, passphrase []byte) error {
 }
 
 func (c *Config) localAAD() []byte {
-	return []byte("envbank.local.v1\x00" + c.Server + "\x00" + c.VaultID + "\x00" + c.DeviceID)
+	aad := "envbank.local.v1\x00" + c.Server + "\x00" + c.VaultID + "\x00" + c.DeviceID
+	if c.RecoveryArtifact != "" {
+		aad += "\x00recovery\x00" + c.RecoveryArtifact
+	}
+	return []byte(aad)
 }

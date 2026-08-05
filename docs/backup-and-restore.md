@@ -6,7 +6,7 @@ available.
 
 The procedure protects server-side ciphertext, enrollment state, revocation
 state, replay protection, and access history. It does not replace device-config
-backups or the planned encrypted recovery export.
+backups or an [encrypted recovery artifact](recovery.md).
 
 ## Practice the procedure
 
@@ -183,6 +183,6 @@ keys and decrypted vault key are lost. The sync service is deliberately
 zero-knowledge: its database contains encrypted records and device public keys,
 not the vault key needed to decrypt them.
 
-Preserve at least one approved, passphrase-protected device config in a
-separate secure backup until EnvBank provides the planned encrypted recovery
-export. Restoring only `server.db` cannot cross this cryptographic boundary.
+Preserve at least one approved, passphrase-protected device config or a current
+[encrypted recovery artifact](recovery.md) in a separate secure backup.
+Restoring only `server.db` cannot cross this cryptographic boundary.

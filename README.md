@@ -17,8 +17,9 @@ zero-knowledge foundation to safe recovery and provider-backed API-key
 rotation.
 
 Operators should also read the
-[backup and restore runbook](docs/backup-and-restore.md) and periodically run
-its disposable recovery drill.
+[backup and restore runbook](docs/backup-and-restore.md), periodically run its
+disposable recovery drill, and maintain a separate
+[encrypted recovery artifact](docs/recovery.md).
 
 ## What works
 
@@ -28,6 +29,7 @@ its disposable recovery drill.
 - Soft device revocation with an atomic last-active-device safeguard
 - Privacy-preserving device-access history with bounded retention
 - Passphrase-encrypted `0600` local device identity
+- Passphrase-encrypted offline recovery exports and new-vault restoration
 - Optimistic revisions to prevent silent concurrent overwrites
 - Rotation policy reporting, local macOS notifications, and generated rotation
   values
@@ -96,6 +98,38 @@ Use the variables without creating a plaintext file:
 The child process and its descendants can read the injected values. On some
 operating systems, privileged local users may also inspect process
 environments.
+
+## Recovery export
+
+Create a recovery passphrase that is separate from the device passphrase, save
+it in a private `0600` file, and export the current decrypted record snapshot
+into a new encrypted artifact:
+
+```sh
+./envbank recovery-export \
+  --output /secure/path/personal.recovery \
+  --recovery-passphrase-file /secure/path/recovery-passphrase \
+  --config .envbank/laptop.json \
+  --passphrase-file /secure/path/envbank-passphrase
+```
+
+The artifact supports `recovery-verify`, `recovery-list`, `recovery-get`, and
+`recovery-run` without the original service or any device config. Restoring
+synchronized access requires a replacement EnvBank service:
+
+```sh
+./envbank recovery-restore \
+  --artifact /secure/path/personal.recovery \
+  --recovery-passphrase-file /secure/path/recovery-passphrase \
+  --server https://replacement-envbank.example.com \
+  --vault personal-recovered \
+  --device replacement-laptop \
+  --config /secure/path/replacement.json \
+  --passphrase-file /secure/path/replacement-passphrase
+```
+
+See the [recovery guide](docs/recovery.md) for offline commands, interrupted
+restore resumption, format guarantees, and recovery boundaries.
 
 ## Add a second device
 
@@ -277,8 +311,9 @@ metadata, and bounded access events, not plaintext values. SQLite transactions,
 WAL journaling, and atomic nonce consumption allow multiple service processes
 on one host to share the database. Do not place the database on a network
 filesystem; use a client/server database before scaling across hosts. Set up a
-separate encrypted recovery copy or keep two approved devices, because the
-service cannot recover a lost vault key.
+current encrypted recovery artifact and keep its separate passphrase in an
+independent protected location. A service database backup alone cannot recover
+a lost vault key.
 
 On first startup, `--database` also accepts an existing version-1 JSON state
 file. EnvBank imports it transactionally and preserves the original beside it

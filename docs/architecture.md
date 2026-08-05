@@ -75,6 +75,29 @@ The wrapping envelope uses ephemeral X25519, an HMAC-SHA-256 extract/expand
 construction, and AES-256-GCM with vault and device IDs as authenticated
 context.
 
+## Recovery artifacts
+
+A version-1 recovery artifact contains a sorted snapshot of decrypted
+`SecretRecord` objects, including source revisions, inside a single
+AES-256-GCM payload. It deliberately excludes the vault key, device private
+keys, and server authorization or access-history data. A separate recovery
+passphrase derives the 256-bit artifact key using PBKDF2-HMAC-SHA-256, a random
+16-byte salt, and 600,000 iterations. The format version, KDF identifier, salt,
+and iteration count are additional authenticated data.
+
+Offline verify, list, get, and child-process execution decrypt only the local
+artifact. Synchronized restoration creates a new server vault, random vault
+key, and device identity; it re-encrypts records under the new vault ID and
+resets their optimistic revisions to 1. The encrypted local config is saved
+before uploads and bound to the exact artifact digest. Resume authenticates to
+the configured replacement service, verifies already uploaded records with the
+new vault key, skips identical records, and fails closed on changed or
+unrelated target records.
+
+This is a new authorization domain. Recovery cannot reproduce old device
+authorization, revocation history, replay state, access events, or the original
+vault key.
+
 ## Device revocation
 
 Approved devices have an optional server-side revocation timestamp. Device
@@ -194,7 +217,8 @@ database.
 
 ## Cryptographic agility
 
-Every encrypted object and local identity carries an explicit format version.
-Ciphertext formats are intentionally distinct for local identity, vault
-records, and device envelopes. Algorithm changes should add a version and a
-migration rather than reinterpret existing bytes.
+Every encrypted object, local identity, and recovery artifact carries an
+explicit format version. Ciphertext formats are intentionally distinct for
+local identity, vault records, device envelopes, and recovery snapshots.
+Algorithm or KDF changes should add a version and a migration rather than
+reinterpret existing bytes.

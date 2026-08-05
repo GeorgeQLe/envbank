@@ -123,6 +123,9 @@ func Open(key []byte, blob Blob, aad []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(nonce) != gcm.NonceSize() {
+		return nil, errors.New("invalid nonce length")
+	}
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
 		return nil, errors.New("decryption failed")
