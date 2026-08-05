@@ -16,6 +16,10 @@ See the [product roadmap](docs/roadmap.md) for the ordered path from today's
 zero-knowledge foundation to safe recovery and provider-backed API-key
 rotation.
 
+Operators should also read the
+[backup and restore runbook](docs/backup-and-restore.md) and periodically run
+its disposable recovery drill.
+
 ## What works
 
 - AES-256-GCM encrypted records with hidden, keyed record identifiers
@@ -40,6 +44,7 @@ Go 1.25 or later is required.
 go test ./...
 go build -o envbank ./cmd/envbank
 node --test extension/test/*.test.js
+make recovery-drill
 ```
 
 ## Quick start

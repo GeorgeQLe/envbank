@@ -2,7 +2,7 @@
 
 ## Milestone 1: Safe access and recovery
 
-- [ ] Verify backup and restore procedures with a documented recovery drill.
+- [x] Verify backup and restore procedures with a documented recovery drill.
 - [ ] Add an encrypted recovery export.
 - [ ] Harden production deployment guidance and complete an external
   cryptographic review.

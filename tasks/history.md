@@ -1,5 +1,15 @@
 # History
 
+## 2026-08-05
+
+- Verified the online SQLite backup and isolated restore procedure with a
+  disposable, localhost-only recovery drill covering encrypted device configs,
+  device revocation, access-history continuity, recovery-point boundaries, and
+  post-restore writes across a second restart.
+- Added the reusable recovery drill and operator runbook, including integrity,
+  schema, permission, truncated-backup, future-schema, WAL-sidecar quarantine,
+  RPO, and RTO checks.
+
 ## 2026-08-04
 
 - Added privacy-preserving access events for recognized vault operations,

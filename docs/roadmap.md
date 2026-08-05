@@ -33,7 +33,7 @@ frequency and lifecycle-API capability rather than chosen in advance.
 
 - [x] Revoke an enrolled device without disrupting remaining approved devices.
 - [x] Record device-access events without logging secret values.
-- [ ] Verify backup and restore procedures, including recovery drills.
+- [x] Verify backup and restore procedures, including recovery drills.
 - [ ] Export an encrypted recovery artifact that can restore access without help
   from the sync service.
 - [ ] Harden deployment guidance and complete an external cryptographic review
