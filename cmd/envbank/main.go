@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,9 +11,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GeorgeQLe/invisible-envs-bank/internal/browser"
@@ -22,6 +25,11 @@ import (
 	"github.com/GeorgeQLe/invisible-envs-bank/internal/protocol"
 	"github.com/GeorgeQLe/invisible-envs-bank/internal/secure"
 	"github.com/GeorgeQLe/invisible-envs-bank/internal/server"
+)
+
+const (
+	maxRequestHeaderBytes = 16 << 10
+	shutdownTimeout       = 10 * time.Second
 )
 
 func main() {
@@ -167,6 +175,16 @@ func addAuthFlags(fs *flag.FlagSet) *authFlags {
 }
 
 func serve(args []string) error {
+	ctx, stop := shutdownSignalContext()
+	defer stop()
+	return serveContext(ctx, args)
+}
+
+func shutdownSignalContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
+func serveContext(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	listen := fs.String("listen", "127.0.0.1:7337", "listen address")
 	database := fs.String("database", "envbank-server.db", "SQLite database file")
@@ -185,15 +203,47 @@ func serve(args []string) error {
 		return err
 	}
 	defer service.Close()
-	httpServer := &http.Server{
-		Addr: *listen, Handler: service,
+	httpServer := newHTTPServer(*listen, service)
+	fmt.Fprintf(os.Stderr, "EnvBank sync service listening on %s\n", *listen)
+	return runHTTPServer(ctx, httpServer, httpServer.ListenAndServe)
+}
+
+func runHTTPServer(ctx context.Context, httpServer *http.Server, listen func() error) error {
+	result := make(chan error, 1)
+	go func() {
+		result <- listen()
+	}()
+
+	select {
+	case err := <-result:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownContext); err != nil {
+			return fmt.Errorf("shut down sync service: %w", err)
+		}
+		err := <-result
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+func newHTTPServer(listen string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              listen,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    maxRequestHeaderBytes,
 	}
-	fmt.Fprintf(os.Stderr, "EnvBank sync service listening on %s\n", *listen)
-	return httpServer.ListenAndServe()
 }
 
 func initialize(args []string) error {

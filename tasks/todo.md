@@ -4,8 +4,9 @@
 
 - [x] Verify backup and restore procedures with a documented recovery drill.
 - [x] Add an encrypted recovery export.
-- [ ] Harden production deployment guidance and complete an external
-  cryptographic review.
+- [x] Prepare hardened single-host production deployment guidance.
+- [x] Prepare a cryptographic review packet.
+- [ ] Complete an independent cryptographic review and remediate its findings.
 
 Later milestones are tracked in the [product roadmap](../docs/roadmap.md).
 

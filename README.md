@@ -7,8 +7,10 @@ and an out-of-band fingerprint check.
 
 This is an initial, reviewable implementation—not yet a replacement for a
 managed KMS or enterprise secrets manager. Read the
-[architecture and threat model](docs/architecture.md) before using real
-production credentials.
+[architecture and threat model](docs/architecture.md) and
+[cryptographic review brief](docs/cryptographic-review.md) before evaluation.
+Independent review and remediation remain outstanding, so broader production
+use is not yet recommended.
 
 ## Roadmap
 
@@ -294,33 +296,14 @@ credential should also be removed.
 
 ## Production deployment
 
-Build the container:
+The supported baseline is one hardened non-root container, one local Docker
+volume, a loopback-only published port, and a TLS reverse proxy reachable only
+through an authenticated private network. Follow the copy-ready
+[production deployment runbook](docs/production-deployment.md) for preflight,
+container limits, proxy policy, backup/recovery, upgrades, monitoring, incident
+isolation, and the readiness checklist.
 
-```sh
-docker build -t envbank .
-docker run --read-only --init \
-  -p 127.0.0.1:7337:7337 \
-  -v envbank-data:/data \
-  envbank
-```
-
-Put the service behind an authenticated private network and a TLS reverse
-proxy. Back up `/data/envbank.db` with SQLite's online backup API or while all
-service processes are stopped; it contains encrypted records, public device
-metadata, and bounded access events, not plaintext values. SQLite transactions,
-WAL journaling, and atomic nonce consumption allow multiple service processes
-on one host to share the database. Do not place the database on a network
-filesystem; use a client/server database before scaling across hosts. Set up a
-current encrypted recovery artifact and keep its separate passphrase in an
-independent protected location. A service database backup alone cannot recover
-a lost vault key.
-
-On first startup, `--database` also accepts an existing version-1 JSON state
-file. EnvBank imports it transactionally and preserves the original beside it
-as `PATH.json.bak`. The deprecated `--state` flag remains as an alias for this
-migration. Existing version-1 and version-2 SQLite databases are upgraded in
-place to schema version 3, with all existing devices remaining active and an
-initially empty access history.
-
-See the [product roadmap](docs/roadmap.md) for production-readiness and future
-work.
+Deployment guidance and the review packet are prepared. An independent
+cryptographic review and remediation are still outstanding; do not recommend
+broader production use until that work is complete. See the
+[product roadmap](docs/roadmap.md) for status and deferred architecture.

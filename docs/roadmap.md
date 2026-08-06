@@ -36,7 +36,9 @@ frequency and lifecycle-API capability rather than chosen in advance.
 - [x] Verify backup and restore procedures, including recovery drills.
 - [x] Export an encrypted recovery artifact that can restore access without help
   from the sync service.
-- [ ] Harden deployment guidance and complete an external cryptographic review
+- [x] Prepare hardened single-host production deployment guidance.
+- [x] Prepare an immutable cryptographic review packet.
+- [ ] Complete an independent cryptographic review and remediate its findings
   before recommending broader production use.
 
 ### 2. Rotation engine

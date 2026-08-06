@@ -212,8 +212,12 @@ An existing version-1 JSON state file is imported transactionally on first
 startup, and the source is retained as a `.json.bak` recovery copy. Version-1
 and version-2 SQLite databases migrate in place to version 3; their existing
 devices remain active and their access history starts empty. Production must
-still place the service behind TLS, restrict network access, and back up the
-database.
+still follow the [single-host production runbook](production-deployment.md):
+place the service behind TLS on an authenticated private network, restrict its
+published port to loopback, and back up the database. The HTTP server limits
+headers to 16 KiB, applies bounded read/write/idle timeouts, marks API responses
+`no-store` and `nosniff`, and allows ten seconds for graceful SIGINT/SIGTERM
+shutdown.
 
 ## Cryptographic agility
 

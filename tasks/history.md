@@ -2,6 +2,18 @@
 
 ## 2026-08-05
 
+- Added a hardened single-host Docker production runbook covering a non-root
+  read-only container, resource limits, loopback-only exposure, private-network
+  TLS proxy controls, backup/recovery, upgrades, monitoring, and incidents.
+- Added a self-contained cryptographic review brief with immutable-revision
+  validation, threat model, exact primitives and constructions, code/test map,
+  limitations, reviewer questions, and private finding format.
+- Added a 16 KiB HTTP header limit, no-store/nosniff API headers, and graceful
+  SIGINT/SIGTERM shutdown with a ten-second deadline.
+- Fixed clean container builds to copy the dependency checksum file into the
+  build stage.
+- Split prepared deployment/review materials from the still-outstanding
+  independent review and remediation milestone.
 - Added versioned AES-256-GCM recovery artifacts with a separate
   PBKDF2-HMAC-SHA-256 recovery passphrase, strict format validation, bounded
   reads, atomic `0600` creation, and overwrite refusal.

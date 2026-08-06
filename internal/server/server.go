@@ -217,6 +217,8 @@ PRAGMA user_version = 3;`
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if r.URL.Path == "/healthz" && r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return

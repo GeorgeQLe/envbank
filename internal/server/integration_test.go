@@ -84,6 +84,24 @@ func createTwoDeviceVault(t *testing.T, handler http.Handler) vaultFixture {
 	}
 }
 
+func TestAPIResponsesDisableCachingAndSniffing(t *testing.T) {
+	service, err := server.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	response := httptest.NewRecorder()
+	service.ServeHTTP(response, request)
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if got := response.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+}
+
 func TestMultiDeviceEnrollmentAndRecordSync(t *testing.T) {
 	service, err := server.Open("")
 	if err != nil {
