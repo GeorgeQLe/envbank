@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -99,6 +100,49 @@ func TestAPIResponsesDisableCachingAndSniffing(t *testing.T) {
 	}
 	if got := response.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+}
+
+func TestCreationRoutesRejectMalformedAndNoncanonicalPublicKeys(t *testing.T) {
+	service, err := server.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	keys, err := secure.NewDeviceKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(path, body string) int {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		service.ServeHTTP(response, request)
+		return response.Code
+	}
+	badVault := `{"name":"bad","device":{"name":"bad","signing_public":"` +
+		keys.SigningPublic + `=","wrapping_public":"` + keys.WrappingPublic + `"}}`
+	if status := post("/v1/vaults", badVault); status != http.StatusBadRequest {
+		t.Fatalf("noncanonical create-vault key status = %d", status)
+	}
+	api := client.NewAPI("http://envbank.test")
+	api.HTTPClient = &http.Client{Transport: handlerTransport{handler: service}}
+	created, err := api.CreateVault("valid", protocol.PublicDevice{Name: "valid",
+		SigningPublic: keys.SigningPublic, WrappingPublic: keys.WrappingPublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	badEnrollment := `{"name":"bad","signing_public":"` + keys.SigningPublic +
+		`","wrapping_public":"` + secure.Encode(make([]byte, 32)) + `"}`
+	if status := post("/v1/vaults/"+created.VaultID+"/enrollments",
+		badEnrollment); status != http.StatusBadRequest {
+		t.Fatalf("invalid enrollment wrapping point status = %d", status)
+	}
+	badInvitation := `{"version":1,"name":"bad","signing_public":"` +
+		keys.SigningPublic + `","wrapping_public":"` + keys.WrappingPublic + `="}`
+	if status := post("/v1/vaults/"+created.VaultID+"/invitations",
+		badInvitation); status != http.StatusBadRequest {
+		t.Fatalf("noncanonical invitation key status = %d", status)
 	}
 }
 
@@ -609,8 +653,8 @@ PRAGMA user_version = 1;`
 	}
 	defer check.Close()
 	var version int
-	if err := check.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 4 {
-		t.Fatalf("schema version = %d, err %v; want 4", version, err)
+	if err := check.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 5 {
+		t.Fatalf("schema version = %d, err %v; want 5", version, err)
 	}
 }
 
@@ -720,21 +764,21 @@ func TestAccessEventsAttributeAuthenticationFailuresTruthfully(t *testing.T) {
 	path := "/v1/vaults/" + fixture.vaultID + "/devices"
 	now := time.Now().UTC().Format(time.RFC3339)
 	if status := signedStatus(t, service, http.MethodGet, path, fixture.firstID,
-		fixture.firstKeys.Secrets.SigningPrivate, now, "invalid-signature", nil, true); status != 401 {
+		fixture.firstKeys.Secrets.SigningPrivate, now, testNonce("invalid-signature"), nil, true); status != 401 {
 		t.Fatalf("invalid-signature status = %d", status)
 	}
 	if status := signedStatus(t, service, http.MethodGet, path, fixture.firstID,
 		fixture.firstKeys.Secrets.SigningPrivate,
 		time.Now().Add(-10*time.Minute).UTC().Format(time.RFC3339),
-		"stale", nil, false); status != 401 {
+		testNonce("stale"), nil, false); status != 401 {
 		t.Fatalf("stale status = %d", status)
 	}
 	if status := signedStatus(t, service, http.MethodGet, path, fixture.firstID,
-		fixture.firstKeys.Secrets.SigningPrivate, now, "replay", nil, false); status != 200 {
+		fixture.firstKeys.Secrets.SigningPrivate, now, testNonce("replay"), nil, false); status != 200 {
 		t.Fatalf("initial replay status = %d", status)
 	}
 	if status := signedStatus(t, service, http.MethodGet, path, fixture.firstID,
-		fixture.firstKeys.Secrets.SigningPrivate, now, "replay", nil, false); status != 401 {
+		fixture.firstKeys.Secrets.SigningPrivate, now, testNonce("replay"), nil, false); status != 401 {
 		t.Fatalf("replayed status = %d", status)
 	}
 
@@ -751,7 +795,7 @@ func TestAccessEventsAttributeAuthenticationFailuresTruthfully(t *testing.T) {
 	}
 	recordsPath := "/v1/vaults/" + fixture.vaultID + "/records"
 	if status := signedStatus(t, service, http.MethodGet, recordsPath, pending.Device.ID,
-		pendingKeys.Secrets.SigningPrivate, now, "pending", nil, false); status != 401 {
+		pendingKeys.Secrets.SigningPrivate, now, testNonce("pending"), nil, false); status != 401 {
 		t.Fatalf("pending status = %d", status)
 	}
 	unknownKeys, err := secure.NewDeviceKeys()
@@ -759,14 +803,14 @@ func TestAccessEventsAttributeAuthenticationFailuresTruthfully(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status := signedStatus(t, service, http.MethodGet, recordsPath, "attacker-chosen-id",
-		unknownKeys.Secrets.SigningPrivate, now, "unknown", nil, false); status != 401 {
+		unknownKeys.Secrets.SigningPrivate, now, testNonce("unknown"), nil, false); status != 401 {
 		t.Fatalf("unknown status = %d", status)
 	}
 	if _, err := fixture.firstAPI.RevokeDevice(fixture.secondID); err != nil {
 		t.Fatal(err)
 	}
 	if status := signedStatus(t, service, http.MethodGet, recordsPath, fixture.secondID,
-		fixture.secondKeys.Secrets.SigningPrivate, now, "revoked", nil, false); status != 401 {
+		fixture.secondKeys.Secrets.SigningPrivate, now, testNonce("revoked"), nil, false); status != 401 {
 		t.Fatalf("revoked status = %d", status)
 	}
 
@@ -799,6 +843,105 @@ func TestAccessEventsAttributeAuthenticationFailuresTruthfully(t *testing.T) {
 	}
 }
 
+func TestAuthenticationCanonicalHeadersAndReplayRetention(t *testing.T) {
+	service, err := server.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	fixture := createTwoDeviceVault(t, service)
+	path := "/v1/vaults/" + fixture.vaultID + "/devices"
+	now := time.Now().UTC().Truncate(time.Second)
+	nonce := testNonce("negative-offset")
+	offsetTimestamp := now.In(time.FixedZone("negative", -12*60*60)).Format(time.RFC3339)
+	if status := signedStatus(t, service, http.MethodGet, path, fixture.firstID,
+		fixture.firstKeys.Secrets.SigningPrivate, offsetTimestamp, nonce, nil, false); status != 401 {
+		t.Fatalf("negative-offset timestamp status = %d", status)
+	}
+	canonicalTimestamp := now.Format(time.RFC3339)
+	if status := signedStatus(t, service, http.MethodGet, path, fixture.firstID,
+		fixture.firstKeys.Secrets.SigningPrivate, canonicalTimestamp, nonce, nil, false); status != 200 {
+		t.Fatalf("canonical request after rejected offset status = %d", status)
+	}
+	if status := signedStatus(t, service, http.MethodGet, path, fixture.firstID,
+		fixture.firstKeys.Secrets.SigningPrivate, canonicalTimestamp, nonce, nil, false); status != 401 {
+		t.Fatalf("exact replay status = %d", status)
+	}
+	if status := signedStatus(t, service, http.MethodGet, path, fixture.firstID,
+		fixture.firstKeys.Secrets.SigningPrivate, now.Format("2006-01-02T15:04:05.000Z"),
+		testNonce("fraction"), nil, false); status != 401 {
+		t.Fatalf("fractional timestamp status = %d", status)
+	}
+	if status := signedStatus(t, service, http.MethodGet, path, fixture.firstID,
+		fixture.firstKeys.Secrets.SigningPrivate, canonicalTimestamp,
+		testNonce("padded")+"=", nil, false); status != 401 {
+		t.Fatalf("padded nonce status = %d", status)
+	}
+}
+
+func TestVersionFourNonceMigrationRemainsReplaySafe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "version-four.db")
+	service, err := server.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := secure.NewDeviceKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := client.NewAPI("http://envbank.test")
+	api.HTTPClient = &http.Client{Transport: handlerTransport{handler: service}}
+	created, err := api.CreateVault("migration", protocol.PublicDevice{Name: "device",
+		SigningPublic: keys.SigningPublic, WrappingPublic: keys.WrappingPublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	nonce := testNonce("v4-retained")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO nonces(vault_id, device_id, nonce, created_at)
+		VALUES (?, ?, ?, ?); PRAGMA user_version = 4;`,
+		created.VaultID, created.DeviceID, nonce, "2000-01-01T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := server.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	requestPath := "/v1/vaults/" + created.VaultID + "/devices"
+	if status := signedStatus(t, migrated, http.MethodGet, requestPath, created.DeviceID,
+		keys.Secrets.SigningPrivate, time.Now().UTC().Format(time.RFC3339), nonce, nil,
+		false); status != 401 {
+		t.Fatalf("migrated nonce replay status = %d", status)
+	}
+	check, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var version int
+	var refreshed string
+	if err := check.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.QueryRow(`SELECT created_at FROM nonces WHERE vault_id = ? AND
+		device_id = ? AND nonce = ?`, created.VaultID, created.DeviceID, nonce).Scan(&refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if version != 5 || refreshed == "2000-01-01T00:00:00Z" {
+		t.Fatalf("migration version=%d refreshed=%q", version, refreshed)
+	}
+}
+
 func signedStatus(
 	t *testing.T,
 	handler http.Handler,
@@ -828,6 +971,11 @@ func signedStatus(
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	return recorder.Code
+}
+
+func testNonce(label string) string {
+	sum := sha256.Sum256([]byte(label))
+	return secure.Encode(sum[:18])
 }
 
 type handlerTransport struct {

@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"crypto/ecdh"
-	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -567,14 +566,7 @@ func validEnvelope(envelope secure.WrappedKey) bool {
 }
 
 func validPublicDeviceKeys(signingPublic, wrappingPublic string) bool {
-	signing, signingErr := secure.Decode(signingPublic)
-	wrapping, wrappingErr := secure.Decode(wrappingPublic)
-	if signingErr != nil || wrappingErr != nil ||
-		len(signing) != ed25519.PublicKeySize || len(wrapping) != 32 {
-		return false
-	}
-	_, err := ecdh.X25519().NewPublicKey(wrapping)
-	return err == nil
+	return secure.ValidatePublicDeviceKeys(signingPublic, wrappingPublic) == nil
 }
 
 func decodeStrictJSON(body []byte, destination any) error {

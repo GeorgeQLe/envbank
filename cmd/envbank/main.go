@@ -530,7 +530,10 @@ func enrollApprove(args []string) error {
 	if selected.Approved {
 		return errors.New("device is already approved")
 	}
-	if !strings.EqualFold(selected.Device.Fingerprint, strings.TrimSpace(*fingerprint)) {
+	recomputed := secure.PublicFingerprint(selected.Device.SigningPublic, selected.Device.WrappingPublic)
+	if client.ValidateDeviceIdentity(selected.Device, selected.Device.SigningPublic,
+		selected.Device.WrappingPublic) != nil ||
+		!strings.EqualFold(recomputed, strings.TrimSpace(*fingerprint)) {
 		return errors.New("fingerprint does not match; approval cancelled")
 	}
 	envelope, err := secure.WrapVaultKey(vaultKey, selected.Device.WrappingPublic,
@@ -565,7 +568,7 @@ func enrollAccept(args []string) error {
 	if !status.Approved || status.Envelope == nil {
 		return errors.New("enrollment is still pending")
 	}
-	vaultKey, err := secure.UnwrapVaultKey(*status.Envelope, secrets.WrappingPrivate,
+	vaultKey, err := client.UnwrapEnrollmentVaultKey(status, secrets,
 		api.Config.VaultID, api.Config.DeviceID)
 	if err != nil {
 		return err

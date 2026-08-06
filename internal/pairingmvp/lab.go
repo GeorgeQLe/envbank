@@ -252,7 +252,9 @@ func (l *Lab) Import(encoded string) (State, error) {
 		return State{}, badRequest("payload does not identify a pending invitation")
 	}
 	recomputed := secure.PublicFingerprint(selected.Device.SigningPublic, selected.Device.WrappingPublic)
-	if recomputed != selected.Device.Fingerprint || payload.Fingerprint != recomputed ||
+	if client.ValidateDeviceIdentity(selected.Device, selected.Device.SigningPublic,
+		selected.Device.WrappingPublic) != nil ||
+		payload.Fingerprint != recomputed ||
 		payload.CreatedAt != selected.Device.CreatedAt {
 		return State{}, badRequest("payload does not match the server-returned enrollment identity")
 	}
@@ -276,6 +278,11 @@ func (l *Lab) Approve(fingerprint string) (State, error) {
 	}
 	if fresh.State != protocol.InvitationPending || fresh.Device != l.imported.Device {
 		return State{}, conflict("pending invitation changed; approval stopped")
+	}
+	recomputed := secure.PublicFingerprint(fresh.Device.SigningPublic, fresh.Device.WrappingPublic)
+	if client.ValidateDeviceIdentity(fresh.Device, fresh.Device.SigningPublic,
+		fresh.Device.WrappingPublic) != nil || fingerprint != recomputed {
+		return State{}, conflict("pending invitation identity is invalid; approval stopped")
 	}
 	envelope, err := secure.WrapVaultKey(l.vaultKey, fresh.Device.WrappingPublic, l.vaultID, fresh.Device.ID)
 	if err != nil {
@@ -311,11 +318,12 @@ func (l *Lab) Accept() (State, error) {
 	if status.State != protocol.InvitationApproved || status.Envelope == nil {
 		return State{}, conflict("invitation is not approved")
 	}
-	if status.Device != l.pending.Device || secure.PublicFingerprint(status.Device.SigningPublic,
-		status.Device.WrappingPublic) != l.pending.Device.Fingerprint {
+	if status.Device != l.pending.Device {
 		return State{}, errors.New("server-returned enrollment identity changed")
 	}
-	unwrapped, err := secure.UnwrapVaultKey(*status.Envelope, l.newKeys.Secrets.WrappingPrivate,
+	enrollmentStatus := protocol.EnrollmentStatus{Device: status.Device, Approved: true,
+		Envelope: status.Envelope}
+	unwrapped, err := client.UnwrapEnrollmentVaultKey(enrollmentStatus, l.newKeys.Secrets,
 		l.vaultID, l.pending.Device.ID)
 	if err != nil {
 		return State{}, fmt.Errorf("could not unwrap enrollment envelope: %w", err)

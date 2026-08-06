@@ -152,7 +152,7 @@ func SignatureMessage(method, path, timestamp, nonce string, body []byte) []byte
 
 func ValidateTimestamp(value string, now time.Time) error {
 	parsed, err := time.Parse(time.RFC3339, value)
-	if err != nil {
+	if err != nil || parsed.UTC().Format(time.RFC3339) != value {
 		return fmt.Errorf("invalid request timestamp")
 	}
 	delta := now.Sub(parsed)
@@ -161,6 +161,15 @@ func ValidateTimestamp(value string, now time.Time) error {
 	}
 	if delta > 5*time.Minute {
 		return fmt.Errorf("request timestamp outside allowed window")
+	}
+	return nil
+}
+
+func ValidateNonce(value string) error {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(decoded) != 18 ||
+		base64.RawURLEncoding.EncodeToString(decoded) != value {
+		return fmt.Errorf("invalid request nonce")
 	}
 	return nil
 }

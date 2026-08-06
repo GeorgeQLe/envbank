@@ -47,10 +47,16 @@ disposable recovery drill, and maintain a separate
 
 ## Build and test
 
-Go 1.25 or later is required.
+Go 1.25.12 or later is required. Install `govulncheck` separately with
+`go install golang.org/x/vuln/cmd/govulncheck@latest`; it is a review tool, not
+an application dependency.
 
 ```sh
+go version
+go mod verify
 go test ./...
+go vet ./...
+govulncheck ./...
 go build -o envbank ./cmd/envbank
 go run ./cmd/pairing-mvp
 node --test extension/test/*.test.js

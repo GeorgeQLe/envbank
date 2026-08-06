@@ -27,9 +27,11 @@ that detached revision. Record the Go and Node versions and reproduce:
 export GOCACHE="$(mktemp -d)"
 go version
 node --version
+go mod verify
 go test ./...
 go vet ./...
 go test -race ./...
+govulncheck ./...
 node --test extension/test/*.test.js
 go build -trimpath -o /tmp/envbank-review ./cmd/envbank
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
@@ -129,7 +131,7 @@ Go `crypto/rand`. See [the security core](../internal/secure/secure.go),
 | Device fingerprint | SHA-256 over domain and two encoded public keys; first 8 bytes as 16 lowercase hex characters | fingerprint v1 |
 | Request body binding | SHA-256 of exact HTTP body | 32 bytes before base64url |
 | Request nonce | random bytes | 18 bytes |
-| Pairing invitation | server-clock expiry at 10 minutes; five counted signed-transition failures | protocol v1, schema v4 |
+| Pairing invitation | server-clock expiry at 10 minutes; five counted signed-transition failures | protocol v1, schema v5 |
 | Recovery identity | SHA-256 of exact artifact file | 32 bytes, lowercase hex |
 
 Domain/context strings and constructions are exact:
@@ -168,9 +170,12 @@ signed message =
 `recovery` KDF/cipher names are exactly `pbkdf2-hmac-sha256` and
 `aes-256-gcm`. Recovery reads are capped at 256 MiB and server request bodies at
 1 MiB. HTTP request headers are capped at 16 KiB in the server configuration.
-Authenticated timestamps allow an absolute five-minute skew. A nonce is unique
-per vault/device in SQLite; accepted nonces older than ten minutes are pruned
-after authentication.
+Authenticated timestamps must be canonical UTC-second RFC3339 values and allow
+an absolute five-minute skew. Request nonces must be canonical unpadded
+base64url encodings of exactly 18 bytes. A nonce is unique per vault/device in
+SQLite; the server records one captured server time for validation, insertion,
+and pruning, and accepted nonces older than ten minutes are pruned after
+authentication.
 
 ## Key lifecycle and protocol flows
 

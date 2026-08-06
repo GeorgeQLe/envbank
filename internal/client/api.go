@@ -39,6 +39,10 @@ func (a *API) CreateVault(name string, device protocol.PublicDevice) (protocol.C
 func (a *API) RequestEnrollment(vaultID string, request protocol.EnrollmentRequest) (protocol.EnrollmentStatus, error) {
 	var response protocol.EnrollmentStatus
 	err := a.do(http.MethodPost, "/v1/vaults/"+url.PathEscape(vaultID)+"/enrollments", request, &response, false)
+	if err == nil {
+		err = validateCreatedIdentity(response.Device, request.Name,
+			request.SigningPublic, request.WrappingPublic)
+	}
 	return response, err
 }
 
@@ -63,6 +67,10 @@ func (a *API) CreateInvitation(vaultID string, request protocol.InvitationReques
 	var response protocol.InvitationStatus
 	err := a.do(http.MethodPost, "/v1/vaults/"+url.PathEscape(vaultID)+"/invitations",
 		request, &response, false)
+	if err == nil {
+		err = validateCreatedIdentity(response.Device, request.Name,
+			request.SigningPublic, request.WrappingPublic)
+	}
 	return response, err
 }
 
@@ -207,4 +215,68 @@ func (a *API) do(method, path string, request any, response any, authenticated b
 		}
 	}
 	return nil
+}
+
+func validateCreatedIdentity(
+	device protocol.PublicDevice,
+	expectedName, expectedSigning, expectedWrapping string,
+) error {
+	if device.ID == "" || device.Name != expectedName ||
+		device.SigningPublic != expectedSigning || device.WrappingPublic != expectedWrapping {
+		return errors.New("server-returned enrollment identity does not match locally generated identity")
+	}
+	if err := secure.ValidatePublicDeviceKeys(device.SigningPublic, device.WrappingPublic); err != nil {
+		return errors.New("server-returned enrollment identity is invalid")
+	}
+	fingerprint := secure.PublicFingerprint(device.SigningPublic, device.WrappingPublic)
+	if device.Fingerprint != fingerprint {
+		return errors.New("server-returned enrollment fingerprint is invalid")
+	}
+	return nil
+}
+
+// ValidateDeviceIdentity binds a server-returned identity to expected public
+// keys and its locally recomputed fingerprint.
+func ValidateDeviceIdentity(
+	device protocol.PublicDevice,
+	expectedSigning, expectedWrapping string,
+) error {
+	if device.SigningPublic != expectedSigning || device.WrappingPublic != expectedWrapping {
+		return errors.New("server-returned enrollment identity does not match local keys")
+	}
+	if err := secure.ValidatePublicDeviceKeys(device.SigningPublic, device.WrappingPublic); err != nil {
+		return errors.New("server-returned enrollment identity is invalid")
+	}
+	if device.Fingerprint != secure.PublicFingerprint(device.SigningPublic, device.WrappingPublic) {
+		return errors.New("server-returned enrollment fingerprint is invalid")
+	}
+	return nil
+}
+
+// UnwrapEnrollmentVaultKey verifies that the returned identity is derived from
+// local private keys before accepting a 256-bit vault key.
+func UnwrapEnrollmentVaultKey(
+	status protocol.EnrollmentStatus,
+	secrets secure.DeviceSecrets,
+	vaultID, deviceID string,
+) ([]byte, error) {
+	if status.Device.ID != deviceID || status.Envelope == nil {
+		return nil, errors.New("server-returned enrollment identity is incomplete")
+	}
+	signingPublic, wrappingPublic, err := secure.PublicKeysFromSecrets(secrets)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateDeviceIdentity(status.Device, signingPublic, wrappingPublic); err != nil {
+		return nil, err
+	}
+	vaultKey, err := secure.UnwrapVaultKey(*status.Envelope, secrets.WrappingPrivate,
+		vaultID, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if len(vaultKey) != 32 {
+		return nil, errors.New("unwrapped vault key has invalid length")
+	}
+	return vaultKey, nil
 }

@@ -1,6 +1,7 @@
 package secure
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
@@ -76,6 +77,60 @@ func NewDeviceKeys() (DeviceKeys, error) {
 func PublicFingerprint(signingPublic, wrappingPublic string) string {
 	sum := sha256.Sum256([]byte("envbank.device.fingerprint.v1\x00" + signingPublic + "\x00" + wrappingPublic))
 	return fmt.Sprintf("%x", sum[:8])
+}
+
+// ValidatePublicDeviceKeys requires canonical unpadded base64url encodings,
+// exact Ed25519/X25519 public-key lengths, and an X25519 point that can produce
+// a non-zero shared secret.
+func ValidatePublicDeviceKeys(signingPublic, wrappingPublic string) error {
+	signing, err := decodeCanonical(signingPublic, ed25519.PublicKeySize)
+	if err != nil {
+		return errors.New("invalid signing public key")
+	}
+	if len(signing) != ed25519.PublicKeySize {
+		return errors.New("invalid signing public key")
+	}
+	wrapping, err := decodeCanonical(wrappingPublic, 32)
+	if err != nil {
+		return errors.New("invalid wrapping public key")
+	}
+	publicKey, err := ecdh.X25519().NewPublicKey(wrapping)
+	if err != nil {
+		return errors.New("invalid wrapping public key")
+	}
+	validationPrivate := make([]byte, 32)
+	validationPrivate[0] = 1
+	privateKey, err := ecdh.X25519().NewPrivateKey(validationPrivate)
+	if err != nil {
+		return errors.New("invalid wrapping public key")
+	}
+	if _, err := privateKey.ECDH(publicKey); err != nil {
+		return errors.New("invalid wrapping public key")
+	}
+	return nil
+}
+
+// PublicKeysFromSecrets derives and canonically encodes the public identity
+// bound to locally stored private keys.
+func PublicKeysFromSecrets(secrets DeviceSecrets) (string, string, error) {
+	signing, err := decodeCanonical(secrets.SigningPrivate, ed25519.PrivateKeySize)
+	if err != nil {
+		return "", "", errors.New("invalid signing private key")
+	}
+	wrapping, err := decodeCanonical(secrets.WrappingPrivate, 32)
+	if err != nil {
+		return "", "", errors.New("invalid wrapping private key")
+	}
+	wrappingPrivate, err := ecdh.X25519().NewPrivateKey(wrapping)
+	if err != nil {
+		return "", "", errors.New("invalid wrapping private key")
+	}
+	derivedSigning := ed25519.NewKeyFromSeed(signing[:ed25519.SeedSize])
+	if !bytes.Equal(derivedSigning, signing) {
+		return "", "", errors.New("invalid signing private key")
+	}
+	signingPublic := derivedSigning.Public().(ed25519.PublicKey)
+	return encode(signingPublic), encode(wrappingPrivate.PublicKey().Bytes()), nil
 }
 
 func DeriveKey(passphrase, salt []byte, iterations int) []byte {
@@ -250,4 +305,12 @@ func encode(value []byte) string {
 
 func decode(value string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(value)
+}
+
+func decodeCanonical(value string, size int) ([]byte, error) {
+	decoded, err := decode(value)
+	if err != nil || len(decoded) != size || !bytes.Equal([]byte(value), []byte(encode(decoded))) {
+		return nil, errors.New("invalid canonical encoding")
+	}
+	return decoded, nil
 }

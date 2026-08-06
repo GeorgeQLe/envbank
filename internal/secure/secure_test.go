@@ -2,6 +2,7 @@ package secure
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -56,5 +57,52 @@ func TestPBKDF2Vector(t *testing.T) {
 	const want = "Eg-2z_z4syxD5yJSVsT4N6hlSMkszDVICAWYfLcL4Xs"
 	if Encode(got) != want {
 		t.Fatalf("unexpected vector %s", Encode(got))
+	}
+}
+
+func TestValidatePublicDeviceKeysRejectsMalformedAndNoncanonicalKeys(t *testing.T) {
+	keys, err := NewDeviceKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePublicDeviceKeys(keys.SigningPublic, keys.WrappingPublic); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		signing  string
+		wrapping string
+	}{
+		{"padded signing", keys.SigningPublic + "=", keys.WrappingPublic},
+		{"short signing", Encode(make([]byte, 31)), keys.WrappingPublic},
+		{"padded wrapping", keys.SigningPublic, keys.WrappingPublic + "="},
+		{"short wrapping", keys.SigningPublic, Encode(make([]byte, 31))},
+		{"low-order wrapping point", keys.SigningPublic, Encode(make([]byte, 32))},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ValidatePublicDeviceKeys(test.signing, test.wrapping); err == nil {
+				t.Fatal("invalid keys were accepted")
+			}
+		})
+	}
+}
+
+func TestPublicKeysFromSecrets(t *testing.T) {
+	keys, err := NewDeviceKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signing, wrapping, err := PublicKeysFromSecrets(keys.Secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signing != keys.SigningPublic || wrapping != keys.WrappingPublic {
+		t.Fatal("derived public keys do not match generated identity")
+	}
+	keys.Secrets.SigningPrivate += "="
+	if _, _, err := PublicKeysFromSecrets(keys.Secrets); err == nil ||
+		!strings.Contains(err.Error(), "signing") {
+		t.Fatalf("noncanonical private key error = %v", err)
 	}
 }

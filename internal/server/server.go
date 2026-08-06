@@ -119,7 +119,7 @@ func migrateSchema(db *sql.DB) error {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
 	}
-	if version > 4 {
+	if version > 5 {
 		return fmt.Errorf("unsupported server database version %d", version)
 	}
 	if version == 1 {
@@ -163,9 +163,25 @@ PRAGMA user_version = 2;`); err != nil {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit database migration: %w", err)
 		}
-		return nil
+		version = 4
 	}
 	if version == 4 {
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin database migration: %w", err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(`UPDATE nonces
+SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now');
+PRAGMA user_version = 5;`); err != nil {
+			return fmt.Errorf("migrate database schema to version 5: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit database migration: %w", err)
+		}
+		return nil
+	}
+	if version == 5 {
 		return nil
 	}
 	tx, err := db.Begin()
@@ -219,7 +235,7 @@ CREATE TABLE nonces (
 );
 CREATE INDEX nonces_created_at ON nonces(created_at);
 ` + accessEventsSchema + invitationTableSchema + `
-PRAGMA user_version = 4;`
+PRAGMA user_version = 5;`
 	if _, err := tx.Exec(schema); err != nil {
 		return fmt.Errorf("create database schema: %w", err)
 	}
@@ -291,6 +307,10 @@ func (s *Server) createVault(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "vault and device fields are required")
 		return
 	}
+	if !validPublicDeviceKeys(request.Device.SigningPublic, request.Device.WrappingPublic) {
+		writeError(w, http.StatusBadRequest, "invalid device public keys")
+		return
+	}
 	vaultID, err := randomID()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "randomness unavailable")
@@ -351,6 +371,11 @@ func (s *Server) requestEnrollment(w http.ResponseWriter, r *http.Request, vault
 		request.SigningPublic == "" || request.WrappingPublic == "" {
 		s.bestEffortPublicRejection(w, tx, vaultID, http.StatusBadRequest,
 			"device fields are required")
+		return
+	}
+	if !validPublicDeviceKeys(request.SigningPublic, request.WrappingPublic) {
+		s.bestEffortPublicRejection(w, tx, vaultID, http.StatusBadRequest,
+			"invalid device public keys")
 		return
 	}
 	deviceID, err := randomID()
@@ -918,7 +943,9 @@ func (s *Server) authenticateDevice(
 		return nil, false
 	}
 
-	if nonce == "" || protocol.ValidateTimestamp(timestamp, s.now()) != nil {
+	serverNow := s.now().UTC()
+	if protocol.ValidateTimestamp(timestamp, serverNow) != nil ||
+		protocol.ValidateNonce(nonce) != nil {
 		s.authenticationFailure(w, tx, vaultID, eventDetails{
 			identityID: device.ID, identityVerified: true, operation: operation,
 			outcome: "denied", reason: "stale_timestamp",
@@ -927,7 +954,8 @@ func (s *Server) authenticateDevice(
 	}
 
 	result, err := tx.Exec(`INSERT INTO nonces(vault_id, device_id, nonce, created_at)
-		VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`, vaultID, device.ID, nonce, timestamp)
+		VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`, vaultID, device.ID, nonce,
+		serverNow.Format(time.RFC3339))
 	if err != nil {
 		writePersistError(w)
 		return nil, false
@@ -944,7 +972,7 @@ func (s *Server) authenticateDevice(
 		}, true, http.StatusUnauthorized, "replayed request")
 		return nil, false
 	}
-	cutoff := s.now().Add(-10 * time.Minute).UTC().Format(time.RFC3339)
+	cutoff := serverNow.Add(-10 * time.Minute).Format(time.RFC3339)
 	if _, err := tx.Exec("DELETE FROM nonces WHERE created_at < ?", cutoff); err != nil {
 		writePersistError(w)
 		return nil, false

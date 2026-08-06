@@ -220,7 +220,7 @@ func TestSchemaVersionTwoMigratesWithEmptyHistory(t *testing.T) {
 	if err := migrated.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if devices != 1 || events != 0 || version != 4 {
+	if devices != 1 || events != 0 || version != 5 {
 		t.Fatalf("migration result devices=%d events=%d version=%d", devices, events, version)
 	}
 }
