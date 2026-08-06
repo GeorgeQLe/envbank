@@ -210,13 +210,24 @@ jobs:
         with:
           name: release-assets
           path: dist
-      - name: Create prerelease
+      - name: Create or update prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$VERSION" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "EnvBank v0.1.0 alpha" \
-            --notes-file .github/release-notes-v0.1.0.md \
-            --prerelease \
-            --verify-tag
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "EnvBank v0.1.0 alpha" \
+              --notes-file .github/release-notes-v0.1.0.md \
+              --prerelease
+            gh release upload "$VERSION" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$VERSION" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "EnvBank v0.1.0 alpha" \
+              --notes-file .github/release-notes-v0.1.0.md \
+              --prerelease \
+              --verify-tag
+          fi
