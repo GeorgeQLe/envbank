@@ -414,6 +414,7 @@ func deviceRevoke(args []string) error {
 	fingerprint := fs.String("fingerprint", "", "fingerprint verified out of band")
 	allowSelf := fs.Bool("allow-self", false, "confirm revocation of this configured device")
 	auth := addAuthFlags(fs)
+	args = normalizeDeviceRevokeArgs(args)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -459,6 +460,28 @@ func deviceRevoke(args []string) error {
 		fmt.Fprintln(os.Stderr, "warning: this device can no longer access the vault; its local config and Keychain entry were preserved")
 	}
 	return nil
+}
+
+func normalizeDeviceRevokeArgs(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	for _, arg := range args[:len(args)-1] {
+		if arg == "--" {
+			return args
+		}
+	}
+	candidate := args[len(args)-1]
+	if !strings.HasPrefix(candidate, "-") {
+		return args
+	}
+	decoded, err := secure.Decode(candidate)
+	if err != nil || len(decoded) != 18 || secure.Encode(decoded) != candidate {
+		return args
+	}
+	normalized := make([]string, 0, len(args)+1)
+	normalized = append(normalized, args[:len(args)-1]...)
+	return append(normalized, "--", candidate)
 }
 
 func eventList(args []string) error {

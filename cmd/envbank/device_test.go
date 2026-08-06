@@ -167,6 +167,18 @@ func TestDeviceRevokeCLIValidatesFingerprintAndSelfConfirmation(t *testing.T) {
 	}
 }
 
+func TestNormalizeDeviceRevokeArgsAcceptsLeadingDashDeviceID(t *testing.T) {
+	deviceID := "-q55sIA-10wjwVfPNz6UfRCp"
+	args := []string{"--fingerprint", "abc", deviceID}
+	normalized := normalizeDeviceRevokeArgs(args)
+	if got := strings.Join(normalized, " "); got != "--fingerprint abc -- "+deviceID {
+		t.Fatalf("normalized args = %q", got)
+	}
+	if got := normalizeDeviceRevokeArgs([]string{"--fingerprint", "abc", "--typo"}); got[2] != "--typo" {
+		t.Fatalf("unknown option was normalized: %q", got)
+	}
+}
+
 func TestDeviceRevokeCLINormalAndSelfRevocation(t *testing.T) {
 	normal := newCLIDeviceFixture(t)
 	args := append([]string{"device-revoke"}, authArgs(normal, normal.firstConfigPath)...)
