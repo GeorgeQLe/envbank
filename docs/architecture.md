@@ -60,20 +60,53 @@ Optimistic revisions prevent silent concurrent overwrites. The server retains
 only the newest ciphertext and therefore does not provide rollback protection
 on its own; signed append-only audit checkpoints are a future hardening item.
 
-## Device enrollment
+## Device enrollment and pairing invitations
 
-1. A new device generates signing and wrapping key pairs locally.
-2. It uploads only its public keys as a pending request.
-3. An approved device fetches the request, verifies its fingerprint out of
-   band, wraps the vault key to the pending X25519 public key, and signs the
-   approval.
-4. The new device authenticates with its pending Ed25519 key and downloads the
-   wrapped vault key.
-5. The new device decrypts the envelope locally and becomes active.
+Production CLI enrollment retains the original indefinite `/enrollments`
+workflow for compatibility. The disposable pairing lab uses version-1
+`/invitations`, whose state machine is:
+
+```text
+pending ──approve──> approved
+        ├─cancel───> cancelled
+        ├─reject───> rejected
+        ├─server───> expired
+        └─5 failures> attempts_exhausted
+```
+
+The new device generates fresh signing and wrapping key pairs locally and
+publicly creates an invitation. The server assigns the device ID and uses its
+own clock to set `expires_at = created_at + 10 minutes`; `now >= expires_at`
+expires the invitation. An active device verifies the complete fingerprint,
+wraps the vault key to the intended X25519 key, and signs approval. Approval is
+the one-time consumption point, while status and intended-device envelope
+retrieval are retryable.
+
+Approval, rejection, requester cancellation, expiry, and attempt exhaustion
+are terminal. The first terminal transition committed under SQLite's immediate
+transaction wins. A confirmed cancellation therefore prevents approval; if
+approval commits first, cancellation receives the authoritative approved
+state as a conflict. Status exposes no envelope to an inspecting active device;
+only the intended device receives it after approval.
+
+Five failed, validly signed transition attempts exhaust a still-pending
+invitation. Counted failures are malformed transition data, an incorrect actor
+role, or a version/device/fingerprint/envelope binding failure. Status polls,
+invalid or unknown signatures, stale timestamps, replayed nonces, network
+failures, and retries against a terminal invitation do not consume attempts.
+The existing five-minute signed-request timestamp window is independent of the
+ten-minute invitation lifetime.
+
+Invitation-created enrollment rows cannot be approved through the legacy
+endpoint. Existing enrollment rows are not backfilled, expired, or otherwise
+converted.
 
 The wrapping envelope uses ephemeral X25519, an HMAC-SHA-256 extract/expand
 construction, and AES-256-GCM with vault and device IDs as authenticated
 context.
+
+The proposed QR-first presentation, its trust boundaries, and the isolated
+developer stress lab are documented in [device pairing](device-pairing.md).
 
 ## Recovery artifacts
 
@@ -128,7 +161,7 @@ of scope for this workflow.
 ## Access events
 
 The server maintains a privacy-preserving operational history for recognized
-enrollment, device-management, record, and access-event routes. Successful
+enrollment, invitation, device-management, record, and access-event routes. Successful
 operations, verified business rejections, authentication failures, and public
 enrollment requests receive random public event IDs and a server-side sequence
 for deterministic newest-first pagination. Events contain only the vault,
@@ -200,9 +233,10 @@ threat.
 
 ## Server persistence and deployment
 
-The service stores ciphertext, public metadata, and bounded access events in a
-normalized SQLite database. Enrollment approval, optimistic record revision
-checks, replay nonce consumption, and verified access-event persistence execute
+The service stores ciphertext, public metadata, invitation lifecycle state,
+and bounded access events in a normalized SQLite database. Enrollment or
+invitation approval, optimistic record revision checks, replay nonce
+consumption, and verified access-event persistence execute
 in the same `BEGIN IMMEDIATE` transaction as their associated operation. WAL
 journaling and a busy timeout allow multiple service processes on one host to
 share the database safely. SQLite files must remain on a local filesystem;
@@ -210,8 +244,10 @@ multi-host deployments should use a client/server database adapter instead.
 
 An existing version-1 JSON state file is imported transactionally on first
 startup, and the source is retained as a `.json.bak` recovery copy. Version-1
-and version-2 SQLite databases migrate in place to version 3; their existing
-devices remain active and their access history starts empty. Production must
+and version-2 SQLite databases migrate through version 3 to version 4;
+version-3 events retain their sequence and contents. Existing devices remain
+active, legacy enrollments are not backfilled into invitations, and older
+databases without event history start empty. Production must
 still follow the [single-host production runbook](production-deployment.md):
 place the service behind TLS on an authenticated private network, restrict its
 published port to loopback, and back up the database. The HTTP server limits

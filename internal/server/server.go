@@ -119,7 +119,7 @@ func migrateSchema(db *sql.DB) error {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
 	}
-	if version > 3 {
+	if version > 4 {
 		return fmt.Errorf("unsupported server database version %d", version)
 	}
 	if version == 1 {
@@ -149,9 +149,23 @@ PRAGMA user_version = 2;`); err != nil {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit database migration: %w", err)
 		}
-		return nil
+		version = 3
 	}
 	if version == 3 {
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin database migration: %w", err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(invitationMigrationSchema); err != nil {
+			return fmt.Errorf("migrate database schema to version 4: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit database migration: %w", err)
+		}
+		return nil
+	}
+	if version == 4 {
 		return nil
 	}
 	tx, err := db.Begin()
@@ -204,8 +218,8 @@ CREATE TABLE nonces (
 	PRIMARY KEY (vault_id, device_id, nonce)
 );
 CREATE INDEX nonces_created_at ON nonces(created_at);
-` + accessEventsSchema + `
-PRAGMA user_version = 3;`
+` + accessEventsSchema + invitationTableSchema + `
+PRAGMA user_version = 4;`
 	if _, err := tx.Exec(schema); err != nil {
 		return fmt.Errorf("create database schema: %w", err)
 	}
@@ -234,6 +248,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	vaultID := parts[2]
 	switch {
+	case len(parts) == 4 && parts[3] == "invitations" && r.Method == http.MethodPost:
+		s.createInvitation(w, r, vaultID)
+	case len(parts) == 4 && parts[3] == "invitations" && r.Method == http.MethodGet:
+		s.listInvitations(w, r, vaultID)
+	case len(parts) == 5 && parts[3] == "invitations" && r.Method == http.MethodGet:
+		s.getInvitation(w, r, vaultID, parts[4])
+	case len(parts) == 6 && parts[3] == "invitations" &&
+		(parts[5] == "approve" || parts[5] == "reject" || parts[5] == "cancel") &&
+		r.Method == http.MethodPost:
+		s.transitionInvitation(w, r, vaultID, parts[4], parts[5])
 	case len(parts) == 4 && parts[3] == "enrollments" && r.Method == http.MethodPost:
 		s.requestEnrollment(w, r, vaultID)
 	case len(parts) == 4 && parts[3] == "enrollments" && r.Method == http.MethodGet:
@@ -490,6 +514,18 @@ func (s *Server) approveEnrollment(w http.ResponseWriter, r *http.Request, vault
 	if enrollment.Approved {
 		s.rejectEvent(w, tx, vaultID, auth, enrollmentID, http.StatusConflict,
 			"enrollment already approved", "already_approved")
+		return
+	}
+	var invitationExists int
+	err = tx.QueryRow(`SELECT 1 FROM invitations
+		WHERE vault_id = ? AND device_id = ?`, vaultID, enrollmentID).Scan(&invitationExists)
+	if err == nil {
+		s.rejectEvent(w, tx, vaultID, auth, enrollmentID, http.StatusConflict,
+			"invitation must use versioned approval endpoint", "terminal_conflict")
+		return
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		writePersistError(w)
 		return
 	}
 	if _, err := tx.Exec(`UPDATE enrollments SET approved = 1, envelope = ?

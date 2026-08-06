@@ -129,6 +129,7 @@ Go `crypto/rand`. See [the security core](../internal/secure/secure.go),
 | Device fingerprint | SHA-256 over domain and two encoded public keys; first 8 bytes as 16 lowercase hex characters | fingerprint v1 |
 | Request body binding | SHA-256 of exact HTTP body | 32 bytes before base64url |
 | Request nonce | random bytes | 18 bytes |
+| Pairing invitation | server-clock expiry at 10 minutes; five counted signed-transition failures | protocol v1, schema v4 |
 | Recovery identity | SHA-256 of exact artifact file | 32 bytes, lowercase hex |
 
 Domain/context strings and constructions are exact:
@@ -210,6 +211,32 @@ does not delete its envelope or recalled local keys. See
 [server enrollment/authentication](../internal/server/server.go), and
 [device tests](../cmd/envbank/device_test.go).
 
+### Pairing invitations
+
+The disposable pairing lab creates version-1 invitations while production CLI
+enrollment remains on the legacy compatibility routes. Each invitation is
+bound to its vault, pending device ID, full public-key fingerprint, protocol
+version, and server-created expiry. The only states are `pending`, `approved`,
+`cancelled`, `rejected`, `expired`, and `attempts_exhausted`.
+
+Server time sets creation plus ten minutes and treats equality as expired.
+Approval, requester cancellation, active-device rejection, lazy expiry, and
+the fifth counted failure are terminal; the first committed immediate
+transaction wins. Approval atomically stores the envelope, inserts the active
+device, consumes the signed nonce, and records the event. Status polling is
+retryable, and the envelope is returned only to the intended device after
+approval.
+
+Only validly signed requests against a pending invitation count when their
+transition body is malformed, actor role is wrong, or
+version/device/fingerprint/envelope binding fails. Bad signatures, timestamp
+failures, replay, polling, network failure, and terminal retries do not count.
+Schema v4 stores lifecycle fields separately from the retained enrollment and
+envelope row; migrations do not backfill legacy enrollments. See
+[invitation state machine](../internal/server/invitations.go),
+[protocol types](../internal/protocol/protocol.go), and
+[invitation tests](../internal/server/invitations_test.go).
+
 ### Signed requests and replay protection
 
 The client signs the exact method, path plus query, RFC3339 timestamp, random
@@ -260,8 +287,9 @@ host memory until lock, disconnect, or ten-minute idle expiry. See
 | Record encryption, ID/revision binding | [records.go](../internal/client/records.go) | [records_test.go](../internal/client/records_test.go) |
 | HTTP signing and nonce generation | [api.go](../internal/client/api.go) | server integration tests |
 | Authentication, replay, enrollment, revocation, revisions, limits | [server.go](../internal/server/server.go) | [integration_test.go](../internal/server/integration_test.go) |
+| Invitation lifecycle, binding, expiry, races, rollback | [invitations.go](../internal/server/invitations.go) | [invitations_test.go](../internal/server/invitations_test.go) |
 | Access-event transaction/privacy rules | [events.go](../internal/server/events.go) | [events_test.go](../internal/server/events_test.go) |
-| Legacy/schema migrations | [migrate.go](../internal/server/migrate.go) | server integration/events tests |
+| Legacy/schema migrations | [migrate.go](../internal/server/migrate.go), [invitations.go](../internal/server/invitations.go) | server integration/events/invitation tests |
 | Recovery format/validation/write safety | [artifact.go](../internal/recovery/artifact.go) | [artifact_test.go](../internal/recovery/artifact_test.go) |
 | Restore/resume boundaries | [recovery.go](../cmd/envbank/recovery.go) | [recovery_test.go](../cmd/envbank/recovery_test.go) |
 | Browser origin canonicalization | [origin.go](../internal/browser/origin.go) | [origin_test.go](../internal/browser/origin_test.go) |
@@ -281,7 +309,7 @@ host memory until lock, disconnect, or ten-minute idle expiry. See
 - Record count, device count, timestamps, ciphertext lengths, access patterns,
   public-key metadata, enrollment activity, and operational event metadata
   leak to the service/proxy.
-- Vault creation and enrollment request surfaces are public to callers that
+- Vault creation, enrollment request, and invitation creation surfaces are public to callers that
   reach the private proxy. Rate limiting is proxy-only.
 - Endpoint, child-process, page, extension, native-host, or local-admin
   compromise can expose plaintext and keys at use time.

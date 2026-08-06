@@ -58,6 +58,47 @@ type EnrollmentStatus struct {
 	RevokedAt string             `json:"revoked_at,omitempty"`
 }
 
+const (
+	InvitationProtocolVersion = 1
+
+	InvitationPending           = "pending"
+	InvitationApproved          = "approved"
+	InvitationCancelled         = "cancelled"
+	InvitationRejected          = "rejected"
+	InvitationExpired           = "expired"
+	InvitationAttemptsExhausted = "attempts_exhausted"
+)
+
+type InvitationRequest struct {
+	Version        int    `json:"version"`
+	Name           string `json:"name"`
+	SigningPublic  string `json:"signing_public"`
+	WrappingPublic string `json:"wrapping_public"`
+}
+
+type InvitationApproval struct {
+	Version     int               `json:"version"`
+	DeviceID    string            `json:"device_id"`
+	Fingerprint string            `json:"fingerprint"`
+	Envelope    secure.WrappedKey `json:"envelope"`
+}
+
+type InvitationTransition struct {
+	Version     int    `json:"version"`
+	DeviceID    string `json:"device_id"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+type InvitationStatus struct {
+	Version           int                `json:"version"`
+	Device            PublicDevice       `json:"device"`
+	State             string             `json:"state"`
+	ExpiresAt         string             `json:"expires_at"`
+	AttemptsRemaining int                `json:"attempts_remaining"`
+	TerminalAt        string             `json:"terminal_at,omitempty"`
+	Envelope          *secure.WrappedKey `json:"envelope,omitempty"`
+}
+
 type Record struct {
 	ID         string      `json:"id"`
 	Revision   int64       `json:"revision"`

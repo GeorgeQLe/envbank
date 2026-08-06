@@ -93,7 +93,8 @@ EnvBank client. The proxy must:
 - send traffic only to `127.0.0.1:7337`;
 - allow at most 16 KiB of request headers and 1 MiB request bodies;
 - use conservative connect, header, body, and idle timeouts;
-- rate-limit `POST /v1/vaults` and public enrollment-request routes more
+- rate-limit `POST /v1/vaults`, public enrollment-request routes, and public
+  invitation-creation routes more
   strictly than authenticated routes;
 - disable request and response buffering to disk, response caching, and
   transformed error pages;
@@ -113,6 +114,7 @@ map $request_uri $envbank_public_key {
   default "";
   "~^/v1/vaults(?:\?.*)?$" $binary_remote_addr;
   "~^/v1/vaults/[^/?]+/enrollments(?:\?.*)?$" $binary_remote_addr;
+  "~^/v1/vaults/[^/?]+/invitations(?:\?.*)?$" $binary_remote_addr;
 }
 limit_req_zone $envbank_public_key zone=envbank_public:10m rate=5r/m;
 
@@ -153,10 +155,10 @@ server {
 }
 ```
 
-An empty `envbank_public_key` is not accounted by NGINX, so only the two mapped
+An empty `envbank_public_key` is not accounted by NGINX, so only the three mapped
 public route shapes consume this limit. Validate the actual configuration with `nginx -t`.
 Test that private-network authentication is required, TLS 1.1 is rejected,
-oversized bodies/headers are rejected, the two public routes are throttled,
+oversized bodies/headers are rejected, the three public routes are throttled,
 signed requests still work with queries, and logs contain none of the excluded
 fields. Treat proxy logs as sensitive operational data and apply access,
 retention, and deletion controls.

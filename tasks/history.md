@@ -1,5 +1,19 @@
 # History
 
+## 2026-08-06
+
+- Added version-1 device-pairing invitations with server-clock expiration,
+  atomic single-use approval, cancellation, rejection, attempt exhaustion, and
+  authenticated status retrieval for the intended pending device.
+- Added schema version 4 persistence and migration coverage for invitation
+  lifecycle state while preserving legacy enrollment compatibility.
+- Added a disposable QR-first pairing lab that uses the real service and
+  cryptographic protocol while isolating normal configs, Keychain material,
+  recovery artifacts, production vaults, and non-loopback services.
+- Documented the canonical public pairing payload, fingerprint-verification
+  boundary, transport risks, cross-platform roadmap, operational controls, and
+  backup/review implications.
+
 ## 2026-08-05
 
 - Added a hardened single-host Docker production runbook covering a non-root

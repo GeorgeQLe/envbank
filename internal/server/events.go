@@ -23,14 +23,19 @@ CREATE TABLE access_events (
 	operation TEXT NOT NULL CHECK (operation IN (
 		'enrollment_request', 'enrollment_list', 'enrollment_status',
 		'enrollment_approval', 'device_list', 'device_revocation',
-		'record_list', 'record_update', 'event_list'
+		'record_list', 'record_update', 'event_list',
+		'invitation_creation', 'invitation_list', 'invitation_status',
+		'invitation_approval', 'invitation_rejection', 'invitation_cancellation',
+		'invitation_expiry'
 	)),
 	outcome TEXT NOT NULL CHECK (outcome IN ('succeeded', 'rejected', 'denied')),
 	reason TEXT CHECK (reason IS NULL OR reason IN (
 		'invalid_signature', 'stale_timestamp', 'replay', 'revoked_device',
 		'pending_device', 'invalid_request', 'unknown_device', 'not_found',
 		'revision_conflict', 'already_revoked', 'already_approved',
-		'final_active_device'
+		'final_active_device', 'binding_mismatch', 'terminal_conflict',
+		'attempt_exhaustion', 'incorrect_actor', 'unsupported_version',
+		'expired'
 	))
 );
 CREATE INDEX access_events_vault_sequence ON access_events(vault_id, sequence DESC);

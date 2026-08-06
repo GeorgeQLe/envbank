@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-readonly EXPECTED_SCHEMA_VERSION=3
+readonly EXPECTED_SCHEMA_VERSION=4
 readonly DEFAULT_PORT=17337
 readonly SQLITE_BIN=/usr/bin/sqlite3
 readonly CURL_BIN=/usr/bin/curl

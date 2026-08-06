@@ -609,8 +609,8 @@ PRAGMA user_version = 1;`
 	}
 	defer check.Close()
 	var version int
-	if err := check.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
-		t.Fatalf("schema version = %d, err %v; want 3", version, err)
+	if err := check.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 4 {
+		t.Fatalf("schema version = %d, err %v; want 4", version, err)
 	}
 }
 

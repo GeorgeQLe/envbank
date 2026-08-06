@@ -26,6 +26,9 @@ Later milestones are tracked in the [product roadmap](../docs/roadmap.md).
   pagination and transactional fail-closed persistence.
 - [x] Add encrypted offline recovery artifacts and resumable restoration into a
   new vault, key, and device identity.
+- [x] Add a versioned, server-enforced device-pairing invitation lifecycle with
+  expiration, cancellation, rejection, attempt exhaustion, atomic approval,
+  and a disposable QR-first developer lab.
 
 ## Blockers
 

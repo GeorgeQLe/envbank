@@ -4,8 +4,8 @@ This runbook covers the EnvBank sync-service database. It assumes a single
 SQLite database on a host where the EnvBank binary and `/usr/bin/sqlite3` are
 available.
 
-The procedure protects server-side ciphertext, enrollment state, revocation
-state, replay protection, and access history. It does not replace device-config
+The procedure protects server-side ciphertext, enrollment and invitation
+state, revocation state, replay protection, and access history. It does not replace device-config
 backups or an [encrypted recovery artifact](recovery.md).
 
 ## Practice the procedure
@@ -35,7 +35,7 @@ be deleted after inspection.
 A passing run verifies:
 
 - The online backup and restored database both have mode `0600`.
-- `PRAGMA quick_check` returns `ok` and `PRAGMA user_version` returns `3`.
+- `PRAGMA quick_check` returns `ok` and `PRAGMA user_version` returns `4`.
 - A deliberately truncated backup and a future schema are rejected before
   restore startup.
 - A pre-backup sentinel decrypts, while a post-backup commit is absent.
@@ -79,7 +79,7 @@ shasum -a 256 /secure/backups/envbank-YYYYMMDDTHHMMSSZ.db
 stat -f '%Lp' /secure/backups/envbank-YYYYMMDDTHHMMSSZ.db
 ```
 
-Require `ok`, schema version `3`, a recorded SHA-256 digest, and mode `600`.
+Require `ok`, schema version `4`, a recorded SHA-256 digest, and mode `600`.
 Keep the digest in access-controlled operational records so transfer or storage
 damage can be detected before a restore.
 

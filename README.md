@@ -12,6 +12,9 @@ managed KMS or enterprise secrets manager. Read the
 Independent review and remediation remain outstanding, so broader production
 use is not yet recommended.
 
+For the server-enforced QR-first invitation design and its disposable developer lab, see
+[device pairing](docs/device-pairing.md).
+
 ## Roadmap
 
 See the [product roadmap](docs/roadmap.md) for the ordered path from today's
@@ -28,6 +31,8 @@ disposable recovery drill, and maintain a separate
 - AES-256-GCM encrypted records with hidden, keyed record identifiers
 - Ed25519-authenticated client/server requests and persisted replay protection
 - X25519 vault-key wrapping for explicitly approved devices
+- Ten-minute, single-use pairing invitations with cancellation, rejection, and
+  attempt exhaustion
 - Soft device revocation with an atomic last-active-device safeguard
 - Privacy-preserving device-access history with bounded retention
 - Passphrase-encrypted `0600` local device identity
@@ -47,6 +52,7 @@ Go 1.25 or later is required.
 ```sh
 go test ./...
 go build -o envbank ./cmd/envbank
+go run ./cmd/pairing-mvp
 node --test extension/test/*.test.js
 make recovery-drill
 ```

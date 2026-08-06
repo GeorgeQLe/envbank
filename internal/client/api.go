@@ -20,6 +20,7 @@ type API struct {
 	HTTPClient *http.Client
 	Config     *Config
 	Secrets    secure.DeviceSecrets
+	Now        func() time.Time
 }
 
 func NewAPI(baseURL string) *API {
@@ -56,6 +57,47 @@ func (a *API) GetEnrollment(deviceID string) (protocol.EnrollmentStatus, error) 
 func (a *API) ApproveEnrollment(deviceID string, envelope secure.WrappedKey) error {
 	return a.do(http.MethodPost, a.vaultPath()+"/enrollments/"+url.PathEscape(deviceID),
 		protocol.EnrollmentApproval{Envelope: envelope}, nil, true)
+}
+
+func (a *API) CreateInvitation(vaultID string, request protocol.InvitationRequest) (protocol.InvitationStatus, error) {
+	var response protocol.InvitationStatus
+	err := a.do(http.MethodPost, "/v1/vaults/"+url.PathEscape(vaultID)+"/invitations",
+		request, &response, false)
+	return response, err
+}
+
+func (a *API) ListInvitations() ([]protocol.InvitationStatus, error) {
+	var response []protocol.InvitationStatus
+	err := a.do(http.MethodGet, a.vaultPath()+"/invitations", nil, &response, true)
+	return response, err
+}
+
+func (a *API) GetInvitation(deviceID string) (protocol.InvitationStatus, error) {
+	var response protocol.InvitationStatus
+	err := a.do(http.MethodGet, a.vaultPath()+"/invitations/"+url.PathEscape(deviceID),
+		nil, &response, true)
+	return response, err
+}
+
+func (a *API) ApproveInvitation(deviceID string, approval protocol.InvitationApproval) (protocol.InvitationStatus, error) {
+	var response protocol.InvitationStatus
+	err := a.do(http.MethodPost, a.vaultPath()+"/invitations/"+
+		url.PathEscape(deviceID)+"/approve", approval, &response, true)
+	return response, err
+}
+
+func (a *API) RejectInvitation(deviceID string, transition protocol.InvitationTransition) (protocol.InvitationStatus, error) {
+	var response protocol.InvitationStatus
+	err := a.do(http.MethodPost, a.vaultPath()+"/invitations/"+
+		url.PathEscape(deviceID)+"/reject", transition, &response, true)
+	return response, err
+}
+
+func (a *API) CancelInvitation(deviceID string, transition protocol.InvitationTransition) (protocol.InvitationStatus, error) {
+	var response protocol.InvitationStatus
+	err := a.do(http.MethodPost, a.vaultPath()+"/invitations/"+
+		url.PathEscape(deviceID)+"/cancel", transition, &response, true)
+	return response, err
 }
 
 func (a *API) ListDevices() ([]protocol.DeviceStatus, error) {
@@ -121,7 +163,11 @@ func (a *API) do(method, path string, request any, response any, authenticated b
 		if a.Config == nil || a.Secrets.SigningPrivate == "" {
 			return errors.New("authenticated client is not unlocked")
 		}
-		timestamp := time.Now().UTC().Format(time.RFC3339)
+		now := time.Now
+		if a.Now != nil {
+			now = a.Now
+		}
+		timestamp := now().UTC().Format(time.RFC3339)
 		nonceBytes, err := secure.RandomBytes(18)
 		if err != nil {
 			return err
