@@ -6,10 +6,11 @@ The proxy must be reachable only through an authenticated private network such
 as a device-authenticated VPN. EnvBank and its port must never be exposed
 directly to the public Internet.
 
-This guidance is prepared for review. EnvBank has not completed an independent
-cryptographic review and is not recommended for broader production use yet.
-Multi-host storage, high availability, application-level rate limiting,
-vault rekeying, and signed audit checkpoints remain out of scope.
+The independent cryptographic review and remediation re-review are complete.
+That review is not proof of security and does not replace this runbook's
+environment-specific controls. Multi-host storage, high availability,
+application-level rate limiting, vault rekeying, and signed audit checkpoints
+remain out of scope.
 
 ## Host and image preflight
 
@@ -245,6 +246,6 @@ On suspected host, proxy, database, or image compromise:
 - [ ] Upgrade rollback, monitoring, alerting, and incident isolation rehearsed
 - [x] Deployment guidance prepared
 - [x] Cryptographic review packet prepared
-- [ ] Independent cryptographic review completed and findings remediated
+- [x] Independent cryptographic review completed and findings remediated
 
-Do not recommend broader production use until the last item is complete.
+Do not deploy until every environment-specific unchecked item is complete.

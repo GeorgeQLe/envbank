@@ -2,6 +2,16 @@
 
 ## 2026-08-06
 
+- Completed the independent cryptographic review of
+  `59446421f10bc3465adb1d70f30ad50259b9209d`, remediating one high-severity
+  enrollment-identity finding and two medium-severity replay/runtime findings
+  in `505de15f6bc4840db3b9084866163ea3e5aba2b9`.
+- Re-reviewed the remediation from a clean detached clone with formatting,
+  module verification, Go, race, vet, extension, native/Linux build, recovery,
+  file/link, and vulnerability checks passing.
+- Advanced replay persistence to schema version 5, pinned Go 1.25.12 and the
+  official Docker builder digest, and retained crypto-v2 changes as explicit
+  deferred hardening recommendations.
 - Added version-1 device-pairing invitations with server-clock expiration,
   atomic single-use approval, cancellation, rejection, attempt exhaustion, and
   authenticated status retrieval for the intended pending device.

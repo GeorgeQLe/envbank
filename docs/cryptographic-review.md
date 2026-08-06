@@ -1,9 +1,9 @@
 # Cryptographic review brief
 
 This packet defines the material for an independent cryptographic and protocol
-review of EnvBank. Its preparation is not completion of that review. Findings
-must be remediated and re-reviewed before broader production use is
-recommended.
+review of EnvBank. The completed review, three remediated findings, immutable
+re-review evidence, limitations, and deferred hardening recommendations are in
+the [independent review report](cryptographic-review-report.md).
 
 ## Immutable review revision
 
@@ -44,7 +44,7 @@ revision. Validate the packet before handoff:
 
 ```sh
 git grep -nE '\\]\\([^):#]+(#[^)]+)?\\)' -- docs/cryptographic-review.md
-for path in README.md docs/architecture.md docs/recovery.md \
+for file_path in README.md docs/architecture.md docs/recovery.md \
   docs/backup-and-restore.md docs/production-deployment.md \
   internal/secure/secure.go internal/protocol/protocol.go \
   internal/client/local.go internal/client/records.go internal/client/api.go \
@@ -52,7 +52,7 @@ for path in README.md docs/architecture.md docs/recovery.md \
   internal/recovery/artifact.go internal/nativehost/host.go \
   internal/browser/origin.go extension/background.js extension/content.js \
   extension/core.js; do
-  git cat-file -e "${REVIEW_REVISION}:${path}"
+  git cat-file -e "${REVIEW_REVISION}:${file_path}"
 done
 ```
 

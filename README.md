@@ -8,9 +8,11 @@ and an out-of-band fingerprint check.
 This is an initial, reviewable implementation—not yet a replacement for a
 managed KMS or enterprise secrets manager. Read the
 [architecture and threat model](docs/architecture.md) and
-[cryptographic review brief](docs/cryptographic-review.md) before evaluation.
-Independent review and remediation remain outstanding, so broader production
-use is not yet recommended.
+[cryptographic review brief](docs/cryptographic-review.md) and
+[completed review report](docs/cryptographic-review-report.md) before
+evaluation. The confirmed findings are remediated; the report's limitations,
+deferred crypto-v2 hardening, and the operational production checklist still
+constrain production claims.
 
 For the server-enforced QR-first invitation design and its disposable developer lab, see
 [device pairing](docs/device-pairing.md).
@@ -315,7 +317,8 @@ through an authenticated private network. Follow the copy-ready
 container limits, proxy policy, backup/recovery, upgrades, monitoring, incident
 isolation, and the readiness checklist.
 
-Deployment guidance and the review packet are prepared. An independent
-cryptographic review and remediation are still outstanding; do not recommend
-broader production use until that work is complete. See the
-[product roadmap](docs/roadmap.md) for status and deferred architecture.
+Deployment guidance is prepared, and the independent cryptographic review and
+clean-clone remediation re-review are complete. Read the
+[review report](docs/cryptographic-review-report.md), then complete every
+environment-specific item in the production runbook before a deployment. See
+the [product roadmap](docs/roadmap.md) for deferred architecture.

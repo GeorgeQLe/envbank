@@ -1,12 +1,12 @@
 # Current work
 
-## Milestone 1: Safe access and recovery
+## Milestone 1: Safe access and recovery — complete
 
 - [x] Verify backup and restore procedures with a documented recovery drill.
 - [x] Add an encrypted recovery export.
 - [x] Prepare hardened single-host production deployment guidance.
 - [x] Prepare a cryptographic review packet.
-- [ ] Complete an independent cryptographic review and remediate its findings.
+- [x] Complete an independent cryptographic review and remediate its findings.
 
 Later milestones are tracked in the [product roadmap](../docs/roadmap.md).
 

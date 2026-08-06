@@ -38,7 +38,7 @@ frequency and lifecycle-API capability rather than chosen in advance.
   from the sync service.
 - [x] Prepare hardened single-host production deployment guidance.
 - [x] Prepare an immutable cryptographic review packet.
-- [ ] Complete an independent cryptographic review and remediate its findings
+- [x] Complete an independent cryptographic review and remediate its findings
   before recommending broader production use.
 
 ### 2. Cross-platform device pairing
