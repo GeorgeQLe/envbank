@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/protocol"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/secure"
+	"github.com/GeorgeQLe/envbank/internal/protocol"
+	"github.com/GeorgeQLe/envbank/internal/secure"
 	_ "modernc.org/sqlite"
 )
 

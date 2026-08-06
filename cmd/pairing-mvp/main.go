@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/pairingmvp"
+	"github.com/GeorgeQLe/envbank/internal/pairingmvp"
 )
 
 func main() {

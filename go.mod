@@ -1,4 +1,4 @@
-module github.com/GeorgeQLe/invisible-envs-bank
+module github.com/GeorgeQLe/envbank
 
 go 1.25.12
 

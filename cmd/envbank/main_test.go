@@ -6,10 +6,44 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestVersion(t *testing.T) {
+	originalVersion, originalCommit, originalBuildDate := version, commit, buildDate
+	t.Cleanup(func() {
+		version, commit, buildDate = originalVersion, originalCommit, originalBuildDate
+	})
+	version, commit, buildDate = "v0.1.0", "abc123", "2026-08-06T12:00:00Z"
+
+	var output bytes.Buffer
+	originalStdout := os.Stdout
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = write
+	t.Cleanup(func() { os.Stdout = originalStdout })
+
+	if err := run([]string{"version"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := write.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := output.ReadFrom(read); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(output.String()), "envbank v0.1.0 (commit abc123, built 2026-08-06T12:00:00Z)"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+	if err := run([]string{"version", "extra"}); err == nil {
+		t.Fatal("version accepted an argument")
+	}
+}
 
 func TestHTTPServerSecurityLimits(t *testing.T) {
 	httpServer := newHTTPServer("127.0.0.1:0", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

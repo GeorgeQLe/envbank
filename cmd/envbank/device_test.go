@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/client"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/protocol"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/secure"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/server"
+	"github.com/GeorgeQLe/envbank/internal/client"
+	"github.com/GeorgeQLe/envbank/internal/protocol"
+	"github.com/GeorgeQLe/envbank/internal/secure"
+	"github.com/GeorgeQLe/envbank/internal/server"
 )
 
 type cliDeviceFixture struct {

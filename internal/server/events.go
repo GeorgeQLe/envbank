@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/protocol"
+	"github.com/GeorgeQLe/envbank/internal/protocol"
 )
 
 const accessEventsSchema = `

@@ -22,7 +22,7 @@ by multiple hosts.
 Choose an image by digest, not a mutable tag:
 
 ```sh
-export ENVBANK_IMAGE='ghcr.io/OWNER/invisible-envs-bank@sha256:REPLACE_WITH_DIGEST'
+export ENVBANK_IMAGE='ghcr.io/georgeqle/envbank@sha256:REPLACE_WITH_DIGEST'
 case "$ENVBANK_IMAGE" in
   *@sha256:*) ;;
   *) echo 'ENVBANK_IMAGE must be pinned by sha256 digest' >&2; exit 1 ;;

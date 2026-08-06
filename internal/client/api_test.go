@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/protocol"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/secure"
+	"github.com/GeorgeQLe/envbank/internal/protocol"
+	"github.com/GeorgeQLe/envbank/internal/secure"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

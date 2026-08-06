@@ -1,5 +1,8 @@
 /envbank
 /.envbank/
+.codex/
+.claude/
+.agents/skillpacks/
 *.tmp
 *.test
 coverage.out

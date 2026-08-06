@@ -2,6 +2,17 @@
 
 ## 2026-08-06
 
+- Prepared the EnvBank v0.1.0 alpha open-source launch under Apache-2.0,
+  including public contribution, security, changelog, and issue-reporting
+  policies while deferring a standalone Code of Conduct until a private
+  conduct-reporting channel exists.
+- Renamed the Go module and internal imports to `github.com/GeorgeQLe/envbank`,
+  added link-time version/commit/build-date reporting, and documented supported
+  release platforms, unsigned macOS binaries, GHCR installation, checksums,
+  SPDX SBOMs, and GitHub provenance verification.
+- Added immutable-action CI, full-history Gitleaks, Go and JavaScript CodeQL,
+  Dependabot, release license/vulnerability gates, four native-validated
+  archives, and an attested multi-architecture non-root shell-free image.
 - Completed the independent cryptographic review of
   `59446421f10bc3465adb1d70f30ad50259b9209d`, remediating one high-severity
   enrollment-identity finding and two medium-severity replay/runtime findings

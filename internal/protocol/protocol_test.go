@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/secure"
+	"github.com/GeorgeQLe/envbank/internal/secure"
 )
 
 func TestValidateTimestampRequiresCanonicalUTCSeconds(t *testing.T) {

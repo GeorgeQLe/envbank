@@ -3,8 +3,8 @@ package client
 import (
 	"testing"
 
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/protocol"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/secure"
+	"github.com/GeorgeQLe/envbank/internal/protocol"
+	"github.com/GeorgeQLe/envbank/internal/secure"
 )
 
 func TestExistingRecordMigratesWithNoBrowserOrigins(t *testing.T) {

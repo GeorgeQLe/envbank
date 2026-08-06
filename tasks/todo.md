@@ -1,5 +1,21 @@
 # Current work
 
+## Milestone 2: EnvBank OSS v0.1.0 launch — in progress
+
+- [x] Prepare the Apache-2.0 license, public governance and security policy,
+  alpha documentation, release metadata, and narrowly scoped Gitleaks policy.
+- [x] Add pinned CI, security analysis, dependency updates, release archives,
+  checksums, SPDX SBOM, provenance, and multi-architecture GHCR automation.
+- [x] Validate formatting, modules, Go and extension tests, race tests, vet,
+  recovery, vulnerability and license audits, full-history secret scanning,
+  cross-builds, and the hardened container.
+- [ ] Rename the GitHub repository to `GeorgeQLe/envbank`, make it public, and
+  enable private vulnerability reporting and GitHub security features.
+- [ ] Protect `main`, create the annotated `v0.1.0` tag, publish the prerelease
+  and GHCR image, and make the package public.
+- [ ] Verify clone, downloads, checksums, SBOM, attestations, image health and
+  digest pull, and the legacy repository redirect anonymously.
+
 ## Milestone 1: Safe access and recovery — complete
 
 - [x] Verify backup and restore procedures with a documented recovery drill.

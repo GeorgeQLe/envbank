@@ -18,18 +18,24 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/browser"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/client"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/keychain"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/nativehost"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/protocol"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/secure"
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/server"
+	"github.com/GeorgeQLe/envbank/internal/browser"
+	"github.com/GeorgeQLe/envbank/internal/client"
+	"github.com/GeorgeQLe/envbank/internal/keychain"
+	"github.com/GeorgeQLe/envbank/internal/nativehost"
+	"github.com/GeorgeQLe/envbank/internal/protocol"
+	"github.com/GeorgeQLe/envbank/internal/secure"
+	"github.com/GeorgeQLe/envbank/internal/server"
 )
 
 const (
 	maxRequestHeaderBytes = 16 << 10
 	shutdownTimeout       = 10 * time.Second
+)
+
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
 )
 
 func main() {
@@ -53,6 +59,8 @@ func run(args []string) error {
 		return errors.New("a command is required")
 	}
 	switch args[0] {
+	case "version":
+		return printVersion(args[1:])
 	case "serve":
 		return serve(args[1:])
 	case "init":
@@ -122,6 +130,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `EnvBank: encrypted, multi-device environment variables
 
 Usage:
+  envbank version
   envbank serve [--listen 127.0.0.1:7337] [--database PATH]
   envbank init --server URL --vault NAME --device NAME [auth flags]
   envbank enroll-request --server URL --vault-id ID --device NAME [auth flags]
@@ -160,6 +169,14 @@ If --passphrase-file is omitted, ENVBANK_PASSPHRASE is used. Secret values are
 never accepted as command-line arguments. If --recovery-passphrase-file is
 omitted, ENVBANK_RECOVERY_PASSPHRASE is used.
 `)
+}
+
+func printVersion(args []string) error {
+	if len(args) != 0 {
+		return errors.New("version does not accept arguments")
+	}
+	fmt.Printf("envbank %s (commit %s, built %s)\n", version, commit, buildDate)
+	return nil
 }
 
 type authFlags struct {

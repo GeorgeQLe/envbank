@@ -1,12 +1,24 @@
 # EnvBank
 
+[![CI](https://github.com/GeorgeQLe/envbank/actions/workflows/ci.yml/badge.svg)](https://github.com/GeorgeQLe/envbank/actions/workflows/ci.yml)
+[![Security](https://github.com/GeorgeQLe/envbank/actions/workflows/security.yml/badge.svg)](https://github.com/GeorgeQLe/envbank/actions/workflows/security.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+> **v0.1.0-alpha:** EnvBank is prerelease software for evaluation. It has not
+> reached a stable compatibility or operations baseline. Do not treat it as a
+> KMS, HSM, enterprise secrets manager, or a substitute for provider-side
+> access controls, rotation, auditing, and recovery.
+
 EnvBank is a small, zero-knowledge environment-variable store for development
 and self-hosted production. Secret names and values are encrypted on the client;
 the sync service stores only ciphertext. Devices are enrolled with public keys
 and an out-of-band fingerprint check.
 
-This is an initial, reviewable implementation—not yet a replacement for a
-managed KMS or enterprise secrets manager. Read the
+This initial, reviewable implementation has important production limitations:
+no vault rekeying, server rollback detection, service rate limiting, hardware
+key custody, Windows support, or Apple signing/notarization. Endpoint,
+child-process, and authorized browser-page compromise can expose plaintext at
+use time. Read the
 [architecture and threat model](docs/architecture.md) and
 [cryptographic review brief](docs/cryptographic-review.md) and
 [completed review report](docs/cryptographic-review-report.md) before
@@ -47,10 +59,59 @@ disposable recovery drill, and maintain a separate
 - A macOS Keychain-gated Chrome native host and dependency-free MV3 extension
 - A transactional SQLite sync service that supports multiple service processes
 
+## Install v0.1.0
+
+Release archives support macOS and Linux on AMD64 and ARM64. The macOS binaries
+are unsigned and not notarized. Browser filling, Chrome native-host
+installation, Keychain storage, and local rotation notifications are macOS-only;
+the core CLI and sync service remain available on every released platform.
+
+Download the archive for your platform from the
+[v0.1.0 prerelease](https://github.com/GeorgeQLe/envbank/releases/tag/v0.1.0),
+then verify it before extracting:
+
+```sh
+gh release download v0.1.0 \
+  --repo GeorgeQLe/envbank \
+  --pattern 'envbank_0.1.0_linux_amd64.tar.gz' \
+  --pattern SHA256SUMS \
+  --pattern 'envbank_0.1.0_sbom.spdx.json'
+sha256sum --ignore-missing --check SHA256SUMS
+gh attestation verify envbank_0.1.0_linux_amd64.tar.gz \
+  --repo GeorgeQLe/envbank
+tar -xzf envbank_0.1.0_linux_amd64.tar.gz
+./envbank_0.1.0_linux_amd64/envbank version
+```
+
+On macOS, verify a single downloaded archive with
+`grep 'envbank_0.1.0_darwin_arm64.tar.gz' SHA256SUMS | shasum -a 256 -c -`
+(substitute the archive name for your architecture). Inspect
+`envbank_0.1.0_sbom.spdx.json` with an SPDX-compatible tool and verify its
+provenance the same way:
+
+```sh
+gh attestation verify envbank_0.1.0_sbom.spdx.json \
+  --repo GeorgeQLe/envbank
+```
+
+Run the multi-architecture container by immutable digest in deployments:
+
+```sh
+docker pull ghcr.io/georgeqle/envbank:v0.1.0
+docker image inspect ghcr.io/georgeqle/envbank:v0.1.0 \
+  --format '{{index .RepoDigests 0}}'
+gh attestation verify oci://ghcr.io/georgeqle/envbank:v0.1.0 \
+  --repo GeorgeQLe/envbank
+docker run --rm -p 127.0.0.1:7337:7337 \
+  -v envbank-data:/data ghcr.io/georgeqle/envbank:v0.1.0
+```
+
+The image is shell-free, runs as UID/GID `65532`, and exposes `/healthz`.
+
 ## Build and test
 
 Go 1.25.12 or later is required. Install `govulncheck` separately with
-`go install golang.org/x/vuln/cmd/govulncheck@latest`; it is a review tool, not
+`go install golang.org/x/vuln/cmd/govulncheck@v1.6.0`; it is a review tool, not
 an application dependency.
 
 ```sh
@@ -60,6 +121,7 @@ go test ./...
 go vet ./...
 govulncheck ./...
 go build -o envbank ./cmd/envbank
+./envbank version
 go run ./cmd/pairing-mvp
 node --test extension/test/*.test.js
 make recovery-drill
@@ -322,3 +384,12 @@ clean-clone remediation re-review are complete. Read the
 [review report](docs/cryptographic-review-report.md), then complete every
 environment-specific item in the production runbook before a deployment. See
 the [product roadmap](docs/roadmap.md) for deferred architecture.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull-request
+expectations. Report vulnerabilities only through the private process in
+[SECURITY.md](SECURITY.md), never in a public issue.
+
+EnvBank is licensed under the [Apache License 2.0](LICENSE). Changes are listed
+in [CHANGELOG.md](CHANGELOG.md).

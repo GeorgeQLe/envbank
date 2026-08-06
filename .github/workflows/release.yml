@@ -1,0 +1,219 @@
+name: Release v0.1.0
+
+on:
+  push:
+    tags:
+      - v0.1.0
+
+permissions:
+  contents: read
+
+env:
+  VERSION: v0.1.0
+  IMAGE: ghcr.io/georgeqle/envbank
+
+jobs:
+  release-gates:
+    name: Release gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Validate annotated tag on main
+        run: |
+          test "$GITHUB_REF_NAME" = "$VERSION"
+          test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+      - name: Quality and tests
+        run: |
+          test -z "$(gofmt -l .)"
+          go mod verify
+          go mod tidy -diff
+          go test ./...
+          go test -race ./...
+          go vet ./...
+          node --test extension/test/*.test.js
+          make recovery-drill
+          make build-cross
+      - name: Vulnerability audit
+        run: go run golang.org/x/vuln/cmd/govulncheck@19b0bb6a272792b9afa8a6983c3e9b9a1816947f ./... # v1.6.0
+      - name: Dependency license audit
+        run: >
+          go run github.com/google/go-licenses/v2@3e084b0caf710f7bfead967567539214f598c0a2 check ./...
+          --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  macos-test:
+    name: Release tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./...
+
+  build-archives:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs:
+      - release-gates
+      - macos-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+            runner: macos-15-intel
+          - goos: darwin
+            goarch: arm64
+            runner: macos-15
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-24.04
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          build_date="$(git show -s --format=%cI "$GITHUB_SHA")"
+          archive="envbank_0.1.0_${GOOS}_${GOARCH}"
+          mkdir "$archive"
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=$VERSION -X main.commit=$GITHUB_SHA -X main.buildDate=$build_date" \
+            -o "$archive/envbank" ./cmd/envbank
+          "$archive/envbank" version | grep -F "envbank $VERSION (commit $GITHUB_SHA, built $build_date)"
+          go version -m "$archive/envbank"
+          cp LICENSE README.md "$archive/"
+          tar -czf "$archive.tar.gz" "$archive"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: envbank-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: envbank_0.1.0_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
+  artifacts:
+    name: Checksums, SBOM, and artifact provenance
+    needs: build-archives
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: envbank-*
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum envbank_*.tar.gz > SHA256SUMS
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      - name: Generate SPDX JSON dependency SBOM
+        run: syft dir:. -o spdx-json=dist/envbank_0.1.0_sbom.spdx.json
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/envbank_*.tar.gz
+            dist/SHA256SUMS
+            dist/envbank_0.1.0_sbom.spdx.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  image:
+    name: Multi-architecture image and provenance
+    needs:
+      - release-gates
+      - macos-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve reproducible build date
+        id: metadata
+        run: echo "build_date=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+      - name: Build and push image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/georgeqle/envbank:v0.1.0
+            ghcr.io/georgeqle/envbank:0.1
+          build-args: |
+            VERSION=v0.1.0
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.metadata.outputs.build_date }}
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-name: ghcr.io/georgeqle/envbank
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  publish:
+    name: Publish GitHub prerelease
+    needs:
+      - artifacts
+      - image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-assets
+          path: dist
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "EnvBank v0.1.0 alpha" \
+            --notes-file .github/release-notes-v0.1.0.md \
+            --prerelease \
+            --verify-tag

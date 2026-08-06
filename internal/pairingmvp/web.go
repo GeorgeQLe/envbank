@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GeorgeQLe/invisible-envs-bank/internal/secure"
+	"github.com/GeorgeQLe/envbank/internal/secure"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
