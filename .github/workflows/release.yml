@@ -137,7 +137,7 @@ jobs:
       - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
       - name: Generate SPDX JSON dependency SBOM
         run: syft dir:. -o spdx-json=dist/envbank_0.1.0_sbom.spdx.json
-      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             dist/envbank_*.tar.gz
@@ -187,7 +187,7 @@ jobs:
             VERSION=v0.1.0
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.metadata.outputs.build_date }}
-      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ghcr.io/georgeqle/envbank
           subject-digest: ${{ steps.push.outputs.digest }}
