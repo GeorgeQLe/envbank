@@ -47,8 +47,8 @@ GHCR image.
 Every requested repository-readiness change is represented above. The GitHub
 rename, public visibility, private vulnerability reporting, and supported
 repository security settings are complete. Branch protection, tagging,
-publication, package visibility, and anonymous verification remain explicit
-post-commit launch steps because they operate on the remote repository.
+prerelease and image publication, and package visibility are also complete.
+Anonymous verification remains an explicit post-publication launch step.
 
 ## Executable tests run
 
