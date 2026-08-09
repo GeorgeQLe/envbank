@@ -125,9 +125,10 @@ Go `crypto/rand`. See [the security core](../internal/secure/secure.go),
 | Device wrapping | X25519 ECDH | 32-byte public/private; fresh 32-byte ephemeral public per wrap |
 | General AEAD | AES-256-GCM, random 12-byte nonce, 16-byte tag | `secure.Blob.version = 1` |
 | Local config KDF | PBKDF2-HMAC-SHA-256, random 16-byte salt, 600,000 iterations, 32-byte output | config v1; reader permits 100,000–10,000,000 |
-| Recovery KDF | PBKDF2-HMAC-SHA-256, random 16-byte salt, exactly 600,000 iterations, 32-byte output | artifact v1 |
+| Recovery KDF | PBKDF2-HMAC-SHA-256, random 16-byte salt, exactly 600,000 iterations, 32-byte output | artifact v1-v2 |
 | Wrap KDF | HKDF-SHA-256, X25519 shared secret, nil salt, context as `info`, 32-byte output | envelope v1 |
 | Record ID | HMAC-SHA-256 keyed by vault key | 32 bytes before base64url |
+| Vault-object ID | HMAC-SHA-256 keyed by vault key | 32 bytes before base64url |
 | Device fingerprint | SHA-256 over domain and two encoded public keys; first 8 bytes as 16 lowercase hex characters | fingerprint v1 |
 | Request body binding | SHA-256 of exact HTTP body | 32 bytes before base64url |
 | Request nonce | random bytes | 18 bytes |
@@ -140,12 +141,18 @@ Domain/context strings and constructions are exact:
 record ID input =
   "envbank.record.id.v1\x00" || UTF8(name)
 
+vault-object ID input =
+  "envbank.object.id.v1\x00" || UTF8(kind) || "\x00" || UTF8(key)
+
 device fingerprint input =
   "envbank.device.fingerprint.v1\x00" ||
   base64url(ed25519_public) || "\x00" || base64url(x25519_public)
 
 record AAD =
   "envbank.record.v1\x00" || vault_id || "\x00" || record_id
+
+vault-object AAD =
+  "envbank.object.v1\x00" || vault_id || "\x00" || object_id
 
 local config AAD =
   "envbank.local.v1\x00" || server_url || "\x00" || vault_id ||
@@ -156,7 +163,8 @@ vault-wrap HKDF info and AES-GCM AAD =
   "envbank.vault.wrap.v1\x00" || vault_id || "\x00" || device_id
 
 recovery AAD =
-  "envbank.recovery.v1\x00" || decimal(version) || "\x00" ||
+  "envbank.recovery.v" || decimal(version) || "\x00" ||
+  decimal(version) || "\x00" ||
   kdf_name || "\x00" || base64url(salt) || "\x00" ||
   decimal(iterations) || "\x00" || cipher_name
 

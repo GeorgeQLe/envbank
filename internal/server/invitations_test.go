@@ -435,7 +435,7 @@ func TestSchemaThreeToFourPreservesEventsWithoutInvitationBackfill(t *testing.T)
 	_ = migrated.db.QueryRow("SELECT COUNT(*) FROM invitations").Scan(&invitations)
 	_ = migrated.db.QueryRow("SELECT COUNT(*) FROM enrollments").Scan(&enrollments)
 	_ = migrated.db.QueryRow("SELECT COUNT(*) FROM access_events").Scan(&events)
-	if version != 5 || invitations != 0 || enrollments != 1 || events == 0 {
+	if version != 6 || invitations != 0 || enrollments != 1 || events == 0 {
 		t.Fatalf("version=%d invitations=%d enrollments=%d events=%d fixture=%s",
 			version, invitations, enrollments, events, fixture.status.Device.ID)
 	}

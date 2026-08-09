@@ -35,7 +35,7 @@ be deleted after inspection.
 A passing run verifies:
 
 - The online backup and restored database both have mode `0600`.
-- `PRAGMA quick_check` returns `ok` and `PRAGMA user_version` returns `5`.
+- `PRAGMA quick_check` returns `ok` and `PRAGMA user_version` returns `6`.
 - A deliberately truncated backup and a future schema are rejected before
   restore startup.
 - A pre-backup sentinel decrypts, while a post-backup commit is absent.

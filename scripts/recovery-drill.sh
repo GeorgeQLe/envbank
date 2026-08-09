@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-readonly EXPECTED_SCHEMA_VERSION=5
+readonly EXPECTED_SCHEMA_VERSION=6
 readonly DEFAULT_PORT=17337
 readonly SQLITE_BIN=/usr/bin/sqlite3
 readonly CURL_BIN=/usr/bin/curl
@@ -151,10 +151,19 @@ wait_for_health() {
 
 start_service() {
 	local log_path=$1
+	if "$CURL_BIN" -sS --max-time 1 "$URL/" >/dev/null 2>&1; then
+		fail "port $PORT is already serving HTTP; choose an unused port with --port"
+	fi
 	"$BIN" serve --listen "127.0.0.1:$PORT" --database "$DB" >"$log_path" 2>&1 &
 	SERVICE_PID=$!
 	if ! wait_for_health; then
 		fail "service did not become healthy; inspect $log_path with KEEP_ARTIFACTS=1"
+	fi
+	# Recheck ownership after health so a fast bind failure cannot be mistaken
+	# for an unrelated EnvBank service already listening on the same port.
+	sleep 0.1
+	if ! kill -0 "$SERVICE_PID" 2>/dev/null; then
+		fail "service exited after health check; inspect $log_path with KEEP_ARTIFACTS=1"
 	fi
 }
 

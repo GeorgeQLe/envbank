@@ -12,6 +12,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/client"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/server"
+	"github.com/GeorgeQLe/envbank/internal/vaultobject"
 )
 
 type failingPutHandler struct {
@@ -34,6 +35,11 @@ func TestRecoveryCLIExportsOfflineAccessAndRestores(t *testing.T) {
 	source := newCLIDeviceFixture(t)
 	sourceRecords := recoverySourceRecords()
 	storeFixtureRecords(t, source, sourceRecords)
+	sourceAPI, sourceKey := unlockedFixtureAPI(t, source.firstConfigPath, source.passphrasePath)
+	if _, err := sourceAPI.PutObject(sourceKey, vaultobject.KindBundleSnapshot,
+		"recovery-bundle", map[string]any{"version": 1, "source_revision": 7}, 0); err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	recoveryPassPath := writeTestPrivateFile(t, dir, "recovery.pass", "separate recovery passphrase")
 	artifactPath := filepath.Join(dir, "vault.recovery")
@@ -117,6 +123,12 @@ func TestRecoveryCLIExportsOfflineAccessAndRestores(t *testing.T) {
 	}
 	restored := loadFixtureRecords(t, configPath, localPassPath)
 	assertRestoredMetadata(t, restored, sourceRecords)
+	restoredAPI, restoredKey := unlockedFixtureAPI(t, configPath, localPassPath)
+	restoredObjects, err := restoredAPI.ListObjects(restoredKey)
+	if err != nil || len(restoredObjects) != 1 || restoredObjects[0].Revision != 1 ||
+		restoredObjects[0].Kind != vaultobject.KindBundleSnapshot {
+		t.Fatalf("restored objects = %#v, %v", restoredObjects, err)
+	}
 
 	oldStdin := os.Stdin
 	valueReader, valueWriter, err := os.Pipe()

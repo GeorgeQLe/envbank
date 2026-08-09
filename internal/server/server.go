@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -119,7 +120,7 @@ func migrateSchema(db *sql.DB) error {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
 	}
-	if version > 5 {
+	if version > 6 {
 		return fmt.Errorf("unsupported server database version %d", version)
 	}
 	if version == 1 {
@@ -179,9 +180,43 @@ PRAGMA user_version = 5;`); err != nil {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit database migration: %w", err)
 		}
-		return nil
+		version = 5
 	}
 	if version == 5 {
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin database migration: %w", err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(`ALTER TABLE access_events RENAME TO access_events_v5;
+		DROP INDEX access_events_vault_sequence;
+		DROP INDEX access_events_pruning;
+` + accessEventsSchema + `
+		INSERT INTO access_events(
+			sequence, id, vault_id, timestamp, identity_id, identity_verified,
+			target_identity_id, operation, outcome, reason
+		)
+		SELECT sequence, id, vault_id, timestamp, identity_id, identity_verified,
+			target_identity_id, operation, outcome, reason
+		FROM access_events_v5 ORDER BY sequence;
+		DROP TABLE access_events_v5;
+		CREATE TABLE IF NOT EXISTS vault_objects (
+			vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+			id TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK (revision > 0),
+			blob BLOB NOT NULL,
+			modified_at TEXT NOT NULL,
+			PRIMARY KEY (vault_id, id)
+		);
+		PRAGMA user_version = 6;`); err != nil {
+			return fmt.Errorf("migrate database schema to version 6: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit database migration: %w", err)
+		}
+		return nil
+	}
+	if version == 6 {
 		return nil
 	}
 	tx, err := db.Begin()
@@ -226,6 +261,14 @@ CREATE TABLE records (
 	modified_at TEXT NOT NULL,
 	PRIMARY KEY (vault_id, id)
 );
+CREATE TABLE vault_objects (
+	vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+	id TEXT NOT NULL,
+	revision INTEGER NOT NULL CHECK (revision > 0),
+	blob BLOB NOT NULL,
+	modified_at TEXT NOT NULL,
+	PRIMARY KEY (vault_id, id)
+);
 CREATE TABLE nonces (
 	vault_id TEXT NOT NULL,
 	device_id TEXT NOT NULL,
@@ -235,7 +278,7 @@ CREATE TABLE nonces (
 );
 CREATE INDEX nonces_created_at ON nonces(created_at);
 ` + accessEventsSchema + invitationTableSchema + `
-PRAGMA user_version = 5;`
+PRAGMA user_version = 6;`
 	if _, err := tx.Exec(schema); err != nil {
 		return fmt.Errorf("create database schema: %w", err)
 	}
@@ -290,6 +333,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.listRecords(w, r, vaultID)
 	case len(parts) == 5 && parts[3] == "records" && r.Method == http.MethodPut:
 		s.putRecord(w, r, vaultID, parts[4])
+	case len(parts) == 4 && parts[3] == "objects" && r.Method == http.MethodGet:
+		s.listVaultObjects(w, r, vaultID)
+	case len(parts) == 5 && parts[3] == "objects" && r.Method == http.MethodGet:
+		s.getVaultObject(w, r, vaultID, parts[4])
+	case len(parts) == 5 && parts[3] == "objects" && r.Method == http.MethodPut:
+		s.putVaultObject(w, r, vaultID, parts[4])
+	case len(parts) == 5 && parts[3] == "objects" && r.Method == http.MethodDelete:
+		s.deleteVaultObject(w, r, vaultID, parts[4])
 	case len(parts) == 4 && parts[3] == "access-events" && r.Method == http.MethodGet:
 		s.listAccessEvents(w, r, vaultID)
 	default:
@@ -790,6 +841,249 @@ func (s *Server) putRecord(w http.ResponseWriter, r *http.Request, vaultID, reco
 		return
 	}
 	writeJSON(w, http.StatusOK, record)
+}
+
+func (s *Server) listVaultObjects(w http.ResponseWriter, r *http.Request, vaultID string) {
+	tx, ok := s.begin(w)
+	if !ok {
+		return
+	}
+	defer tx.Rollback()
+	auth, authenticated := s.authenticateDevice(w, r, tx, vaultID, nil, "object_list", false)
+	if !authenticated {
+		return
+	}
+	rows, err := tx.Query(`SELECT id, revision, blob, modified_at
+		FROM vault_objects WHERE vault_id = ? ORDER BY id`, vaultID)
+	if err != nil {
+		writePersistError(w)
+		return
+	}
+	defer rows.Close()
+	objects := []protocol.EncryptedVaultObject{}
+	for rows.Next() {
+		object, err := scanVaultObject(rows)
+		if err != nil {
+			writePersistError(w)
+			return
+		}
+		objects = append(objects, object)
+	}
+	if rows.Err() != nil {
+		writePersistError(w)
+		return
+	}
+	if err := rows.Close(); err != nil {
+		writePersistError(w)
+		return
+	}
+	if !s.finishEvent(w, tx, vaultID, eventDetails{
+		identityID: auth.identityID, identityVerified: true,
+		operation: auth.operation, outcome: "succeeded",
+	}) {
+		return
+	}
+	writeJSON(w, http.StatusOK, objects)
+}
+
+func (s *Server) getVaultObject(w http.ResponseWriter, r *http.Request, vaultID, objectID string) {
+	tx, ok := s.begin(w)
+	if !ok {
+		return
+	}
+	defer tx.Rollback()
+	auth, authenticated := s.authenticateDevice(w, r, tx, vaultID, nil, "object_read", false)
+	if !authenticated {
+		return
+	}
+	object, err := queryVaultObject(tx, vaultID, objectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		s.rejectEvent(w, tx, vaultID, auth, "", http.StatusNotFound,
+			"vault object not found", "not_found")
+		return
+	}
+	if err != nil {
+		writePersistError(w)
+		return
+	}
+	if !s.finishEvent(w, tx, vaultID, eventDetails{
+		identityID: auth.identityID, identityVerified: true,
+		operation: auth.operation, outcome: "succeeded",
+	}) {
+		return
+	}
+	writeJSON(w, http.StatusOK, object)
+}
+
+func (s *Server) putVaultObject(w http.ResponseWriter, r *http.Request, vaultID, objectID string) {
+	body, ok := readBody(w, r, s.maxBytes)
+	if !ok {
+		return
+	}
+	tx, ok := s.begin(w)
+	if !ok {
+		return
+	}
+	defer tx.Rollback()
+	auth, authenticated := s.authenticateDevice(w, r, tx, vaultID, body, "object_update", false)
+	if !authenticated {
+		return
+	}
+	var request protocol.PutVaultObjectRequest
+	if json.Unmarshal(body, &request) != nil || !validOpaqueObjectID(objectID) ||
+		request.ExpectedRevision < 0 || !validObjectTimestamp(request.ModifiedAt) ||
+		!validEncryptedVaultObject(request.Blob) {
+		s.rejectEvent(w, tx, vaultID, auth, "", http.StatusBadRequest,
+			"invalid encrypted vault object", "invalid_request")
+		return
+	}
+	blob, err := json.Marshal(request.Blob)
+	if err != nil {
+		s.rejectEvent(w, tx, vaultID, auth, "", http.StatusBadRequest,
+			"invalid encrypted vault object", "invalid_request")
+		return
+	}
+	var current int64
+	err = tx.QueryRow(`SELECT revision FROM vault_objects
+		WHERE vault_id = ? AND id = ?`, vaultID, objectID).Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		writePersistError(w)
+		return
+	}
+	if current != request.ExpectedRevision {
+		s.rejectEvent(w, tx, vaultID, auth, "", http.StatusConflict,
+			fmt.Sprintf("revision conflict: current revision is %d", current), "revision_conflict")
+		return
+	}
+	object := protocol.EncryptedVaultObject{ID: objectID, Revision: current + 1,
+		Blob: request.Blob, ModifiedAt: request.ModifiedAt}
+	if current == 0 {
+		_, err = tx.Exec(`INSERT INTO vault_objects(vault_id, id, revision, blob, modified_at)
+			VALUES (?, ?, ?, ?, ?)`, vaultID, object.ID, object.Revision, blob, object.ModifiedAt)
+	} else {
+		var result sql.Result
+		result, err = tx.Exec(`UPDATE vault_objects SET revision = ?, blob = ?, modified_at = ?
+			WHERE vault_id = ? AND id = ? AND revision = ?`, object.Revision, blob,
+			object.ModifiedAt, vaultID, object.ID, current)
+		if err == nil {
+			var changed int64
+			changed, err = result.RowsAffected()
+			if err == nil && changed != 1 {
+				err = errors.New("concurrent vault object update")
+			}
+		}
+	}
+	if err != nil {
+		writePersistError(w)
+		return
+	}
+	if !s.finishEvent(w, tx, vaultID, eventDetails{
+		identityID: auth.identityID, identityVerified: true,
+		operation: auth.operation, outcome: "succeeded",
+	}) {
+		return
+	}
+	writeJSON(w, http.StatusOK, object)
+}
+
+func (s *Server) deleteVaultObject(w http.ResponseWriter, r *http.Request, vaultID, objectID string) {
+	body, ok := readBody(w, r, s.maxBytes)
+	if !ok {
+		return
+	}
+	tx, ok := s.begin(w)
+	if !ok {
+		return
+	}
+	defer tx.Rollback()
+	auth, authenticated := s.authenticateDevice(w, r, tx, vaultID, body, "object_delete", false)
+	if !authenticated {
+		return
+	}
+	var request protocol.DeleteVaultObjectRequest
+	if json.Unmarshal(body, &request) != nil || !validOpaqueObjectID(objectID) || request.ExpectedRevision < 1 {
+		s.rejectEvent(w, tx, vaultID, auth, "", http.StatusBadRequest,
+			"invalid vault object deletion", "invalid_request")
+		return
+	}
+	result, err := tx.Exec(`DELETE FROM vault_objects
+		WHERE vault_id = ? AND id = ? AND revision = ?`, vaultID, objectID, request.ExpectedRevision)
+	if err != nil {
+		writePersistError(w)
+		return
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		writePersistError(w)
+		return
+	}
+	if deleted != 1 {
+		var current int64
+		err := tx.QueryRow(`SELECT revision FROM vault_objects
+			WHERE vault_id = ? AND id = ?`, vaultID, objectID).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			s.rejectEvent(w, tx, vaultID, auth, "", http.StatusNotFound,
+				"vault object not found", "not_found")
+			return
+		}
+		if err != nil {
+			writePersistError(w)
+			return
+		}
+		s.rejectEvent(w, tx, vaultID, auth, "", http.StatusConflict,
+			fmt.Sprintf("revision conflict: current revision is %d", current), "revision_conflict")
+		return
+	}
+	if !s.finishEvent(w, tx, vaultID, eventDetails{
+		identityID: auth.identityID, identityVerified: true,
+		operation: auth.operation, outcome: "succeeded",
+	}) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanVaultObject(row rowScanner) (protocol.EncryptedVaultObject, error) {
+	var object protocol.EncryptedVaultObject
+	var blob []byte
+	if err := row.Scan(&object.ID, &object.Revision, &blob, &object.ModifiedAt); err != nil {
+		return object, err
+	}
+	if err := json.Unmarshal(blob, &object.Blob); err != nil {
+		return object, err
+	}
+	return object, nil
+}
+
+func queryVaultObject(tx *sql.Tx, vaultID, objectID string) (protocol.EncryptedVaultObject, error) {
+	return scanVaultObject(tx.QueryRow(`SELECT id, revision, blob, modified_at
+		FROM vault_objects WHERE vault_id = ? AND id = ?`, vaultID, objectID))
+}
+
+func validOpaqueObjectID(id string) bool {
+	raw, err := secure.Decode(id)
+	return err == nil && len(raw) == sha256.Size && secure.Encode(raw) == id
+}
+
+func validObjectTimestamp(value string) bool {
+	parsed, err := time.Parse(time.RFC3339, value)
+	return err == nil && parsed.UTC().Format(time.RFC3339) == value
+}
+
+func validEncryptedVaultObject(blob secure.Blob) bool {
+	if blob.Version != 1 {
+		return false
+	}
+	nonce, err := secure.Decode(blob.Nonce)
+	if err != nil || len(nonce) != 12 || secure.Encode(nonce) != blob.Nonce {
+		return false
+	}
+	ciphertext, err := secure.Decode(blob.Ciphertext)
+	return err == nil && len(ciphertext) >= 16 && secure.Encode(ciphertext) == blob.Ciphertext
 }
 
 func (s *Server) listAccessEvents(w http.ResponseWriter, r *http.Request, vaultID string) {

@@ -111,6 +111,26 @@ type PutRecordRequest struct {
 	Blob             secure.Blob `json:"blob"`
 }
 
+// EncryptedVaultObject is an opaque, encrypted non-record object as seen by
+// the sync service. Object kind, logical key, and payload exist only inside
+// Blob and are therefore unavailable to the service.
+type EncryptedVaultObject struct {
+	ID         string      `json:"id"`
+	Revision   int64       `json:"revision"`
+	Blob       secure.Blob `json:"blob"`
+	ModifiedAt string      `json:"modified_at"`
+}
+
+type PutVaultObjectRequest struct {
+	ExpectedRevision int64       `json:"expected_revision"`
+	ModifiedAt       string      `json:"modified_at"`
+	Blob             secure.Blob `json:"blob"`
+}
+
+type DeleteVaultObjectRequest struct {
+	ExpectedRevision int64 `json:"expected_revision"`
+}
+
 type AccessEvent struct {
 	ID               string `json:"id"`
 	VaultID          string `json:"vault_id"`
