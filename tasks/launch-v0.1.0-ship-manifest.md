@@ -1,5 +1,12 @@
 # EnvBank v0.1.0 launch ship manifest
 
+## Supersession status
+
+The v0.1.0 tag and its six release assets remain immutable and public. The
+release is provenance-incomplete because its attestations were not preserved as
+downloadable bundle assets. It is superseded by the anonymously verified v0.1.1
+corrective release; see `docs/release-evidence-v0.1.1.md`.
+
 ## User goal
 
 Rename and publish EnvBank as an explicitly alpha-quality Apache-2.0

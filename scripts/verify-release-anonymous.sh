@@ -233,12 +233,21 @@ expected_build_date=$(git -C "$verification_root/canonical" show -s --format=%cI
 
 printf 'Verifying the public multi-platform image by immutable digest...\n'
 manifest_json="$verification_root/manifest.json"
-docker buildx imagetools inspect --raw "$IMAGE:$VERSION" > "$manifest_json"
+registry_headers="$verification_root/registry.headers"
+registry_token=$("${curl_public[@]}" \
+  'https://ghcr.io/token?scope=repository%3Ageorgeqle%2Fenvbank%3Apull&service=ghcr.io' |
+  jq -er '.token')
+"${curl_public[@]}" \
+  --header "Authorization: Bearer $registry_token" \
+  --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+  --dump-header "$registry_headers" \
+  --output "$manifest_json" \
+  "https://ghcr.io/v2/georgeqle/envbank/manifests/$VERSION"
 jq -e '
   [.manifests[].platform | select(.os == "linux") | (.os + "/" + .architecture)]
   | sort == ["linux/amd64", "linux/arm64"]
 ' "$manifest_json" >/dev/null
-image_digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" | awk '$1 == "Digest:" {print $2; exit}')
+image_digest=$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2; exit}' "$registry_headers")
 [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'could not resolve OCI index digest'
 immutable_image="$IMAGE@$image_digest"
 gh attestation verify "oci://$immutable_image" \

@@ -9,6 +9,16 @@
   repository URLs, exact release asset set, safe archives, checksums, SPDX
   metadata, release identity, source ref and commit, OCI platforms, immutable
   image pull, and health response.
+- Merged the preparation through all 11 required CI/security checks, published
+  the annotated v0.1.1 corrective prerelease and AMD64/ARM64 GHCR image from
+  protected `main`, and preserved both provenance bundles as release assets.
+- Passed the complete anonymous verifier after replacing an optional Buildx
+  inspection dependency with the public GHCR manifest API; recorded exact
+  asset/platform digests, signer identity, redirect chain, binary metadata, and
+  health evidence while preserving v0.1.0.
+- Updated the release workflow's artifact upload/download actions to pinned
+  Node 24 generations after the immutable tagged run exposed Node 20
+  deprecation warnings.
 
 ## 2026-08-08
 
