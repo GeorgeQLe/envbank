@@ -2,6 +2,10 @@
 
 ## 2026-08-08
 
+- Published the renamed `GeorgeQLe/envbank` repository and verified public
+  visibility, private vulnerability reporting, vulnerability alerts,
+  Dependabot security updates, secret scanning and push protection, plus the
+  active security-analysis workflow.
 - Added an unbiased cryptographically secure random-character password
   generator with configurable length and character classes, enabled-class
   guarantees, and a cryptographic shuffle.
