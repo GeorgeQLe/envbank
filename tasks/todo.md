@@ -9,7 +9,7 @@
 - [x] Validate formatting, modules, Go and extension tests, race tests, vet,
   recovery, vulnerability and license audits, full-history secret scanning,
   cross-builds, and the hardened container.
-- [ ] Rename the GitHub repository to `GeorgeQLe/envbank`, make it public, and
+- [x] Rename the GitHub repository to `GeorgeQLe/envbank`, make it public, and
   enable private vulnerability reporting and GitHub security features.
 - [ ] Protect `main`, create the annotated `v0.1.0` tag, publish the prerelease
   and GHCR image, and make the package public.
