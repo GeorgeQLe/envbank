@@ -1,5 +1,16 @@
 # Current work
 
+## Milestone 3: SiftCut staging foundation — in progress
+
+- [x] Document the SiftCut staging use-case gaps, security invariants,
+  capability gates, phased implementation sequence, and acceptance criteria.
+- [x] Add the strict version-1 YAML manifest contract, canonical digest,
+  derivation AST and dependency ordering, semantic validation, and the
+  read-only `envbank bundle check` command with redacted regression coverage.
+- [ ] Add encrypted vault-object CRUD with domain-separated IDs and AAD,
+  optimistic revisions, server-opacity integration coverage, bundle snapshot
+  and provider-plan schemas, and recovery artifact v2 compatibility.
+
 ## Milestone 2: EnvBank OSS v0.1.1 corrective launch — complete
 
 - [x] Prepare the Apache-2.0 license, public governance and security policy,
