@@ -7,7 +7,22 @@
   <p id="origin"></p>
   <input id="search" type="search" placeholder="Search variable names" autocomplete="off">
   <p id="status">Loading…</p>
+  <details id="generator">
+    <summary>Generate password</summary>
+    <form id="generate-form">
+      <label>Record name <input id="generate-name" required pattern="[A-Za-z_][A-Za-z0-9_]*" autocomplete="off"></label>
+      <label>Length <input id="generate-length" type="number" min="8" max="256" value="24" required></label>
+      <fieldset><legend>Character classes</legend>
+        <label><input id="generate-lowercase" type="checkbox" checked> Lowercase</label>
+        <label><input id="generate-uppercase" type="checkbox" checked> Uppercase</label>
+        <label><input id="generate-digits" type="checkbox" checked> Digits</label>
+        <label><input id="generate-symbols" type="checkbox" checked> Symbols</label>
+      </fieldset>
+      <button type="submit">Generate and store…</button>
+    </form>
+  </details>
   <section id="records"></section>
 </main>
 <dialog id="confirm"><form method="dialog"><h2>Allow on this site?</h2><p id="confirm-text"></p><menu><button value="cancel">Cancel</button><button id="confirm-allow" value="default">Allow exact origin</button></menu></form></dialog>
+<dialog id="confirm-generate"><form method="dialog"><h2>Generate and store password?</h2><p id="confirm-generate-text"></p><menu><button value="cancel">Cancel</button><button id="confirm-generate-button" value="default">Generate and store</button></menu></form></dialog>
 <script src="core.js"></script><script src="popup.js"></script>

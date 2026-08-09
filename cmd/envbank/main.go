@@ -22,6 +22,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/client"
 	"github.com/GeorgeQLe/envbank/internal/keychain"
 	"github.com/GeorgeQLe/envbank/internal/nativehost"
+	"github.com/GeorgeQLe/envbank/internal/password"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/secure"
 	"github.com/GeorgeQLe/envbank/internal/server"
@@ -83,6 +84,8 @@ func run(args []string) error {
 		return setSecret(args[1:], false)
 	case "rotate":
 		return setSecret(args[1:], true)
+	case "generate":
+		return generatePassword(args[1:])
 	case "list":
 		return listSecrets(args[1:])
 	case "get":
@@ -142,6 +145,7 @@ Usage:
   envbank event-list [--limit N] [--before CURSOR] [auth flags]
   envbank set [--rotate-days N] [auth flags] NAME       # value from stdin
   envbank rotate [--bytes 32] [auth flags] NAME         # generated value
+  envbank generate [--length 24] [--lowercase=true] [--uppercase=true] [--digits=true] [--symbols=true] [--replace] [--rotate-days N] [auth flags] NAME
   envbank list [auth flags]
   envbank get NAME [auth flags]
   envbank due [--notify] [auth flags]
@@ -708,6 +712,74 @@ func setSecret(args []string, rotate bool) error {
 		action = "rotated with a generated value"
 	}
 	fmt.Printf("%s %s (revision %d)\n", record.Name, action, record.Revision)
+	return nil
+}
+
+func generatePassword(args []string) error {
+	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
+	policy := password.DefaultPolicy()
+	fs.IntVar(&policy.Length, "length", policy.Length, "password length")
+	fs.BoolVar(&policy.Lowercase, "lowercase", policy.Lowercase, "include lowercase letters")
+	fs.BoolVar(&policy.Uppercase, "uppercase", policy.Uppercase, "include uppercase letters")
+	fs.BoolVar(&policy.Digits, "digits", policy.Digits, "include digits")
+	fs.BoolVar(&policy.Symbols, "symbols", policy.Symbols, "include symbols")
+	replace := fs.Bool("replace", false, "replace an existing record")
+	rotateDays := fs.Int("rotate-days", -1, "rotation interval in days; 0 disables")
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rotateDaysSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "rotate-days" {
+			rotateDaysSet = true
+		}
+	})
+	if fs.NArg() != 1 || !validEnvName(fs.Arg(0)) {
+		return errors.New("exactly one valid environment variable NAME is required")
+	}
+	if rotateDaysSet && *rotateDays < 0 {
+		return errors.New("--rotate-days must be zero or greater")
+	}
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	api, vaultKey, records, err := loadRecordsWithAuth(auth)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	record := protocol.SecretRecord{Name: fs.Arg(0), CreatedAt: now, RotatedAt: now, Revision: 1}
+	var expected int64
+	for _, existing := range records {
+		if existing.Name != record.Name {
+			continue
+		}
+		if !*replace {
+			return errors.New("record already exists; use --replace to replace it")
+		}
+		expected = existing.Revision
+		record.CreatedAt = existing.CreatedAt
+		record.RotateEveryDays = existing.RotateEveryDays
+		record.AllowedOrigins = append([]string(nil), existing.AllowedOrigins...)
+		record.Revision = existing.Revision + 1
+		break
+	}
+	if rotateDaysSet {
+		record.RotateEveryDays = *rotateDays
+	}
+	record.Value, err = password.Generate(policy)
+	if err != nil {
+		return err
+	}
+	id, blob, err := client.EncryptRecord(api.Config.VaultID, vaultKey, record)
+	if err != nil {
+		return err
+	}
+	if _, err := api.PutRecord(id, protocol.PutRecordRequest{ExpectedRevision: expected, Blob: blob}); err != nil {
+		return err
+	}
+	fmt.Printf("%s revision %d\n", record.Name, record.Revision)
 	return nil
 }
 

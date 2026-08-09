@@ -32,11 +32,15 @@ test("extension never invokes persistence or clipboard APIs", () => {
   }
 });
 
-function backgroundHarness(tabURL) {
+function backgroundHarness(tabURL, onNativeRequest) {
   let listener;
+  let currentTabURL = tabURL;
   const nativeRequests = [], sent = [], timers = [];
   class FakeBridge {
-    request(action, fields) { nativeRequests.push({ action, ...fields }); return Promise.resolve({}); }
+    request(action, fields) {
+      nativeRequests.push({ action, ...fields });
+      return onNativeRequest ? Promise.resolve(onNativeRequest(action, fields, (url) => { currentTabURL = url; })) : Promise.resolve({});
+    }
   }
   const context = {
     EnvBankCore: { NativeBridge: FakeBridge, originFromURL },
@@ -46,7 +50,7 @@ function backgroundHarness(tabURL) {
     chrome: {
       runtime: { onMessage: { addListener(fn) { listener = fn; } } },
       tabs: {
-        get: async () => ({ url: tabURL }),
+        get: async () => ({ url: currentTabURL }),
         sendMessage: async (tabId, message) => { sent.push({ tabId, message }); },
         onUpdated: { addListener() {} }, onRemoved: { addListener() {} }
       },
@@ -79,4 +83,41 @@ test("blocked-variable approval has a dedicated exact-origin confirmation", () =
   assert.match(html, /<dialog id="confirm">/);
   assert.match(source, /Allow \$\{name\} to be filled only on \$\{origin\}/);
   assert.match(source, /returnValue !== "default"/);
+});
+
+test("generation revalidates origin and forwards replacement revision and policy", async () => {
+  const harness = backgroundHarness("https://example.com/form");
+  const policy = { length: 24, lowercase: true, uppercase: true, digits: true, symbols: true };
+  const response = await harness.message({ type: "generate", tabId: 5, name: "PASSWORD", origin: "https://example.com", policy, expectedRevision: 9 });
+  assert.equal(response.armed, true);
+  assert.deepEqual(harness.nativeRequests[0], { action: "generate_password", name: "PASSWORD", origin: "https://example.com", policy, expected_revision: 9 });
+  assert.equal(harness.sent.at(-1).message.type, "envbank-arm");
+});
+
+test("generation refuses an origin change before storing", async () => {
+  const harness = backgroundHarness("https://other.example/form");
+  const response = await harness.message({ type: "generate", tabId: 5, name: "PASSWORD", origin: "https://example.com", policy: { length: 24 }, expectedRevision: 0 });
+  assert.match(response.__error, /generation cancelled/);
+  assert.equal(harness.nativeRequests.length, 0);
+});
+
+test("navigation after storage reports that password remains stored", async () => {
+  const harness = backgroundHarness("https://example.com/form", (action, fields, navigate) => {
+    if (action === "generate_password") navigate("https://other.example/form");
+    return { name: fields.name, revision: 1 };
+  });
+  const response = await harness.message({ type: "generate", tabId: 5, name: "PASSWORD", origin: "https://example.com", policy: { length: 24, lowercase: true }, expectedRevision: 0 });
+  assert.match(response.__error, /remains stored and authorized/);
+  assert.equal(harness.nativeRequests[0].action, "generate_password");
+  assert.equal(harness.sent.length, 0);
+});
+
+test("generator confirmation describes native storage, exact origin, and replacement revision", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "popup.html"), "utf8");
+  const source = fs.readFileSync(path.join(__dirname, "..", "popup.js"), "utf8");
+  assert.match(html, /<dialog id="confirm-generate">/);
+  assert.match(source, /generate the password inside its native host/);
+  assert.match(source, /authorize only \$\{origin\}/);
+  assert.match(source, /replaces revision \$\{existing\.revision\}/);
+  assert.match(source, /expectedRevision: existing \? existing\.revision : 0/);
 });

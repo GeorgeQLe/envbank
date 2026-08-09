@@ -189,8 +189,12 @@ audit checkpoints remain a separate later hardening item.
 ## Rotation workflow
 
 Records may specify `rotate_every_days`. `envbank due` reports names and age,
-never values. `envbank rotate NAME --generate` creates a cryptographically
-random value, stores it, and optionally prints only a confirmation. Integration
+never values. `envbank rotate --bytes N NAME` retains the original
+cryptographically random URL-safe token workflow. `envbank generate NAME`
+instead creates a random-character password from individually selected fixed
+character classes. It uses rejection sampling rather than modulo reduction,
+guarantees every enabled class, performs a cryptographic Fisher-Yates shuffle,
+stores the result, and prints only the record name and revision. Integration
 with computer-use automation should follow a two-phase adapter:
 
 1. Create or request the new credential at the provider.
@@ -224,6 +228,16 @@ a variable and clicks an eligible top-frame field. Immediately before
 returning the value, the native host refetches current ciphertext and rechecks
 the exact origin. Navigation, origin changes, iframe targets, unsupported
 fields, Escape, disconnect, and the 30-second timeout cancel the operation.
+
+Password generation is an additive native protocol v1 action. The popup sends
+only the name, policy, confirmed exact origin, and expected revision. The
+native host generates and encrypts the password, then returns redacted record
+metadata. New records begin at revision 1. Replacement requires the exact
+listed revision, preserves creation time, rotation policy, and existing origin
+permissions, and adds the confirmed origin in the same optimistic write. The
+extension revalidates the tab origin before storage and again before arming the
+field selector. A navigation race after storage cannot undo the write, so the
+UI explicitly says the password remains stored and authorized.
 
 The extension uses the platform input/textarea value setter and emits `input`
 and `change` events for framework compatibility. Once inserted, the value is

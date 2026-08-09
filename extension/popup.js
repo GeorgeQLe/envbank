@@ -1,5 +1,5 @@
 "use strict";
-let tab, origin, records = [], pendingAllow = null;
+let tab, origin, records = [], pendingAllow = null, pendingGenerate = null;
 const statusNode = document.querySelector("#status");
 const recordsNode = document.querySelector("#records");
 
@@ -35,6 +35,34 @@ document.querySelector("#confirm").addEventListener("close", async (event) => {
   const name = pendingAllow; pendingAllow = null;
   try { await request({ type: "allow", tabId: tab.id, name, origin }); records = await request({ type: "list", origin }); render(); }
   catch (error) { statusNode.textContent = error.message; }
+});
+document.querySelector("#generate-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const name = document.querySelector("#generate-name").value.trim();
+  const policy = {
+    length: Number(document.querySelector("#generate-length").value),
+    lowercase: document.querySelector("#generate-lowercase").checked,
+    uppercase: document.querySelector("#generate-uppercase").checked,
+    digits: document.querySelector("#generate-digits").checked,
+    symbols: document.querySelector("#generate-symbols").checked
+  };
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) { statusNode.textContent = "Enter a valid environment-variable name"; return; }
+  if (policy.length < 8 || policy.length > 256) { statusNode.textContent = "Length must be between 8 and 256"; return; }
+  if (!policy.lowercase && !policy.uppercase && !policy.digits && !policy.symbols) { statusNode.textContent = "Select at least one character class"; return; }
+  const existing = records.find((record) => record.name === name);
+  pendingGenerate = { name, policy, expectedRevision: existing ? existing.revision : 0 };
+  const replacement = existing ? ` This replaces revision ${existing.revision} after you confirm.` : "";
+  document.querySelector("#confirm-generate-text").textContent = `EnvBank will generate the password inside its native host, store it without revealing or copying it, and authorize only ${origin}.${replacement}`;
+  document.querySelector("#confirm-generate-button").textContent = existing ? `Replace revision ${existing.revision}` : "Generate and store";
+  document.querySelector("#confirm-generate").showModal();
+});
+document.querySelector("#confirm-generate").addEventListener("close", async (event) => {
+  if (event.target.returnValue !== "default" || !pendingGenerate) { pendingGenerate = null; return; }
+  const generation = pendingGenerate; pendingGenerate = null;
+  try {
+    await request({ type: "generate", tabId: tab.id, origin, ...generation });
+    window.close();
+  } catch (error) { statusNode.textContent = error.message; }
 });
 document.querySelector("#search").addEventListener("input", render);
 document.querySelector("#lock").addEventListener("click", async () => { try { await request({ type: "lock" }); } finally { window.close(); } });

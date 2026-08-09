@@ -7,6 +7,11 @@ button { cursor: pointer; border: 1px solid #526079; border-radius: 6px; padding
 #origin { color: #9ca3af; overflow-wrap: anywhere; }
 #search { box-sizing: border-box; width: 100%; padding: 8px; border: 1px solid #526079; border-radius: 7px; background: #172032; color: inherit; }
 #status { color: #fca5a5; }
+#generator { margin: 10px 0; border: 1px solid #334155; border-radius: 7px; padding: 8px; }
+#generate-form { display: grid; gap: 8px; margin-top: 10px; }
+#generate-form > label { display: grid; gap: 4px; }
+#generate-form input:not([type="checkbox"]) { box-sizing: border-box; width: 100%; padding: 6px; border: 1px solid #526079; border-radius: 6px; background: #172032; color: inherit; }
+fieldset { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; border: 1px solid #526079; border-radius: 6px; }
 .record { display: grid; grid-template-columns: 1fr auto; gap: 5px 10px; padding: 10px 0; border-top: 1px solid #334155; }
 .meta { color: #9ca3af; font-size: 12px; }
 .due { color: #fbbf24; }

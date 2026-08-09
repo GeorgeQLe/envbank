@@ -54,6 +54,8 @@ disposable recovery drill, and maintain a separate
 - Optimistic revisions to prevent silent concurrent overwrites
 - Rotation policy reporting, local macOS notifications, and generated rotation
   values
+- Cryptographically secure random-character password generation without
+  plaintext output
 - Direct child-process environment injection without writing a `.env` file
 - Exact-origin browser authorization stored inside each encrypted record
 - A macOS Keychain-gated Chrome native host and dependency-free MV3 extension
@@ -327,6 +329,24 @@ This does not update the upstream provider. A safe provider/computer-use
 adapter must create the provider credential, commit it to EnvBank, validate the
 new credential, then revoke the old one. It must not expose values through model
 prompts, screenshots, logs, shell arguments, or clipboard history.
+
+For a human-compatible random-character password instead of a URL-safe token,
+use `generate`. It defaults to 24 lowercase, uppercase, digit, and symbol
+characters, guarantees every enabled class, and prints only the name and new
+revision:
+
+```sh
+./envbank generate --length 32 --rotate-days 90 \
+  --config .envbank/laptop.json \
+  --passphrase-file /secure/path/envbank-passphrase \
+  LOGIN_PASSWORD
+```
+
+Lengths from 8 through 256 are accepted. Disable classes with flags such as
+`--symbols=false`; at least one class must remain enabled. Existing names are
+refused unless `--replace` is present. Replacement preserves creation time,
+origin permissions, and the current rotation policy unless `--rotate-days` is
+also supplied. `rotate --bytes` remains the URL-safe token generator.
 
 ## Browser filling on macOS
 

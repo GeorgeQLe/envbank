@@ -28,6 +28,9 @@ Later milestones are tracked in the [product roadmap](../docs/roadmap.md).
 
 ## Completed
 
+- [x] Add cryptographically secure random-character password generation to the
+  CLI and Chrome extension without exposing generated plaintext through output,
+  metadata, clipboard, extension storage, or popup JavaScript.
 - [x] Implement the initial zero-knowledge EnvBank CLI, sync service, browser
   extension, native host, cryptographic record storage, and multi-device
   enrollment flow.
