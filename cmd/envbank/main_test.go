@@ -55,6 +55,69 @@ func TestHTTPServerSecurityLimits(t *testing.T) {
 	}
 }
 
+func TestBundleCheck(t *testing.T) {
+	manifest := `version: 1
+bundle: example/siftcut/staging
+policies:
+  password:
+    type: password
+    length: 32
+    lowercase: true
+records:
+  DATABASE_PASSWORD:
+    source: generate
+    policy: password
+targets:
+  railway:
+    project: siftcut-staging
+    environment: staging
+    services:
+      api:
+        order: 1
+        variables:
+          DATABASE_PASSWORD: {source: record, record: DATABASE_PASSWORD}
+`
+	path := filepath.Join(t.TempDir(), "bundle.yaml")
+	if err := os.WriteFile(path, []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStdout := os.Stdout
+	os.Stdout = write
+	t.Cleanup(func() { os.Stdout = originalStdout })
+	if err := run([]string{"bundle", "check", "--manifest", path}); err != nil {
+		t.Fatal(err)
+	}
+	if err := write.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if _, err := output.ReadFrom(read); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	for _, safe := range []string{
+		"bundle: example/siftcut/staging\n",
+		"manifest digest: ",
+		"records: 1\n",
+		"targets: railway\n",
+		"status: valid\n",
+	} {
+		if !strings.Contains(got, safe) {
+			t.Fatalf("output %q does not contain %q", got, safe)
+		}
+	}
+	for _, prohibited := range []string{"DATABASE_PASSWORD", "password", "siftcut-staging"} {
+		if strings.Contains(got, prohibited) {
+			t.Fatalf("output contains manifest detail %q: %s", prohibited, got)
+		}
+	}
+}
+
 func TestServeSIGTERMGracefulShutdown(t *testing.T) {
 	if os.Getenv("ENVBANK_SERVE_SIGNAL_HELPER") == "1" {
 		ctx, stop := shutdownSignalContext()

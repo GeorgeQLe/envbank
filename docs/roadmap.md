@@ -10,6 +10,11 @@ This roadmap describes product priorities and sequencing. The
 of truth for security boundaries, cryptographic formats, and deployment
 constraints.
 
+The [SiftCut staging use-case gap analysis](siftcut-use-case-gaps.md) applies
+this roadmap to a concrete multi-service Railway and Clerk workflow and defines
+the minimum bundle, derived-value, provider-adapter, and resumability work that
+would make EnvBank useful there.
+
 ## Foundation complete
 
 EnvBank already provides:
