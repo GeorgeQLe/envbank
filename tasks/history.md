@@ -29,6 +29,12 @@
 - Advanced backup/recovery validation to SQLite schema version 6 and hardened
   the drill against mistaking an unrelated service on its default port for the
   disposable service it launched.
+- Removed both empty accidental `recovery-drill` vaults from the separate local
+  showcase database with exact-ID transactional assertions and a retained,
+  mode-`0600`, SHA-256-verified SQLite backup. Revalidated schema version 5,
+  integrity and foreign keys, preserved the configured showcase vault, device,
+  and encrypted record, passed authenticated list/decryption and health smoke
+  tests, and left the service stopped with port 17337 free.
 
 - Prepared the corrective v0.1.1 alpha release without changing the v0.1.0 tag
   or assets, including downloadable Sigstore provenance bundles for release

@@ -81,9 +81,10 @@ Later milestones are tracked in the [product roadmap](../docs/roadmap.md).
 - [x] Add a versioned, server-enforced device-pairing invitation lifecycle with
   expiration, cancellation, rejection, attempt exhaustion, atomic approval,
   and a disposable QR-first developer lab.
+- [x] Remove both empty accidental `recovery-drill` vaults from the separate
+  local showcase service while preserving its configured vault, device, and
+  encrypted record plus a verified rollback backup.
 
 ## Blockers
 
-- Operator approval is required before removing the empty `recovery-drill`
-  vault accidentally created in the separate local showcase service while a
-  pre-ship drill discovered the default-port collision.
+None.

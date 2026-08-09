@@ -155,10 +155,13 @@ mutation. A disposable-provider milestone must validate adapter identity and
 capabilities before these schemas authorize external changes.
 
 The first pre-ship recovery drill collided with an unrelated local showcase
-service on port 17337 before the occupied-port guard existed and created one
-empty `recovery-drill` vault there. The drill wrote no secret records before it
-detected the mismatch. Removing that external vault requires operator approval;
-the retained temporary device credentials were deleted.
+service on port 17337 before the occupied-port guard existed and created two
+empty `recovery-drill` vaults there in separate attempts. The drill wrote no
+secret records to either vault before detecting the mismatch. Both external
+vaults were removed after operator approval; the configured showcase vault,
+device, and encrypted record were preserved, and the verified rollback backup
+is retained pending explicit approval to delete it. The temporary drill device
+credentials were deleted.
 
 ## Rollback note
 
@@ -171,5 +174,4 @@ by this slice.
 
 ## Next command
 
-Obtain operator approval and remove the accidental empty `recovery-drill` vault
-from the separate local showcase service.
+Begin the local `bundle prepare` and `bundle status` implementation slice.
