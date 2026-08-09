@@ -85,6 +85,10 @@ rather than implying the full SiftCut MVP is complete.
   with no leaks found.
 - `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` — no vulnerabilities
   found in called code or imported dependencies.
+- `go test ./internal/contract ./cmd/envbank`,
+  `go test -race ./internal/contract`, and
+  `go vet ./internal/contract ./cmd/envbank` — passed after review fixes for
+  credential-bearing public URLs and terminal-safe validation errors.
 
 ## Skipped tests
 
@@ -107,8 +111,13 @@ plaintext, and accidental vault/provider contact. The review found that the
 first placeholder parser returned only references rather than the literal and
 reference AST required by the plan; it was replaced with an explicit AST. It
 also found missing direct proof that typed decode failures redact scalar data;
-a unique sentinel regression test was added. No accepted review finding remains
-unfixed in this slice.
+a unique sentinel regression test was added. GitHub's automated review then
+identified two additional security cases: `DATABASE_URL` could be accepted as
+a public constant, and decoded control characters in invalid identifiers could
+reach terminal errors. Public constants now reject database-connection names
+and any absolute URL containing user information, all semantic/decode errors
+escape non-printing characters, and both behaviors have regression tests. No
+accepted review finding remains unfixed in this slice.
 
 ## Residual risk
 

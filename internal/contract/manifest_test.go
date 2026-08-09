@@ -107,11 +107,13 @@ func TestParseRejectsAmbiguousYAML(t *testing.T) {
 
 func TestParseRejectsSemanticErrors(t *testing.T) {
 	tests := map[string]string{
-		"missing record":     strings.Replace(validManifest, "record: DATABASE_URL", "record: MISSING_RECORD", 1),
-		"present and absent": strings.Replace(validManifest, "          - VITE_API_URL", "          - VITE_CLERK_PUBLISHABLE_KEY", 1),
-		"secret constant":    strings.Replace(validManifest, "CLERK_SECRET_KEY: {source: record, record: CLERK_SECRET_KEY}", "CLERK_SECRET_KEY: {source: constant, value: prohibited}", 1),
-		"bad placeholder":    strings.Replace(validManifest, "${secret:API_PASSWORD}", "${env:API_PASSWORD}", 1),
-		"missing policy":     strings.Replace(validManifest, "policy: password-32", "policy: missing", 1),
+		"missing record":          strings.Replace(validManifest, "record: DATABASE_URL", "record: MISSING_RECORD", 1),
+		"present and absent":      strings.Replace(validManifest, "          - VITE_API_URL", "          - VITE_CLERK_PUBLISHABLE_KEY", 1),
+		"secret constant":         strings.Replace(validManifest, "CLERK_SECRET_KEY: {source: record, record: CLERK_SECRET_KEY}", "CLERK_SECRET_KEY: {source: constant, value: prohibited}", 1),
+		"database URL constant":   strings.Replace(validManifest, "DATABASE_URL: {source: record, record: DATABASE_URL}", "DATABASE_URL: {source: constant, value: postgresql://localhost/example}", 1),
+		"credential URL constant": strings.Replace(validManifest, "NODE_ENV: {source: constant, value: staging}", "SERVICE_ENDPOINT: {source: constant, value: postgresql://user:password@localhost/example}", 1),
+		"bad placeholder":         strings.Replace(validManifest, "${secret:API_PASSWORD}", "${env:API_PASSWORD}", 1),
+		"missing policy":          strings.Replace(validManifest, "policy: password-32", "policy: missing", 1),
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -172,6 +174,25 @@ func TestParseInvalidTypeErrorDoesNotEchoValue(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), sentinel) {
 		t.Fatalf("error exposed invalid scalar value: %v", err)
+	}
+}
+
+func TestParseEscapesTerminalControlCharactersInErrors(t *testing.T) {
+	input := strings.Replace(validManifest, "POSTGRES_PASSWORD:", `"BAD\u001b]0;owned\nstatus: valid":`, 1)
+	_, err := Parse([]byte(input))
+	if err == nil {
+		t.Fatal("Parse accepted an invalid record name")
+	}
+	message := err.Error()
+	for _, control := range []string{"\x1b", "\n", "\r"} {
+		if strings.Contains(message, control) {
+			t.Fatalf("error contains terminal control %q: %q", control, message)
+		}
+	}
+	for _, escaped := range []string{`\u001b`, `\u000a`} {
+		if !strings.Contains(message, escaped) {
+			t.Fatalf("error %q does not contain escaped control %q", message, escaped)
+		}
 	}
 }
 

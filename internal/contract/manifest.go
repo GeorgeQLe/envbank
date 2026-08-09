@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -118,7 +120,7 @@ func Parse(data []byte) (*Document, error) {
 
 	derived, err := validate(&manifest)
 	if err != nil {
-		return nil, err
+		return nil, errors.New(terminalSafe(err.Error()))
 	}
 	canonical, err := json.Marshal(manifest)
 	if err != nil {
@@ -199,7 +201,7 @@ func allowedTag(tag string) bool {
 }
 
 func sanitizeDecodeError(err error) error {
-	message := err.Error()
+	message := terminalSafe(err.Error())
 	if index := strings.Index(message, " cannot unmarshal"); index >= 0 {
 		message = message[:index] + " has an invalid type"
 	}
@@ -349,8 +351,8 @@ func validateVariable(name string, variable Variable, records map[string]Record)
 		if variable.Record != "" || variable.Sensitivity != "" {
 			return errors.New("constant requires only value")
 		}
-		if suspiciousSecretName(name) {
-			return errors.New("secret-shaped names cannot use public constants")
+		if suspiciousSecretName(name) || containsURLCredentials(variable.Value) {
+			return errors.New("secret-shaped names and credential-bearing URLs cannot use public constants")
 		}
 	case "import":
 		if variable.Value != "" || variable.Record != "" || variable.Sensitivity != "public" {
@@ -370,13 +372,41 @@ func validateVariable(name string, variable Variable, records map[string]Record)
 }
 
 func suspiciousSecretName(name string) bool {
-	for _, part := range strings.Split(name, "_") {
+	parts := strings.Split(name, "_")
+	var database, connection bool
+	for _, part := range parts {
 		switch part {
 		case "SECRET", "PASSWORD", "TOKEN", "PRIVATE", "CREDENTIAL":
 			return true
+		case "DATABASE", "DB":
+			database = true
+		case "URL", "URI", "DSN":
+			connection = true
 		}
 	}
-	return strings.HasSuffix(name, "_KEY") && !strings.Contains(name, "PUBLISHABLE") && !strings.Contains(name, "PUBLIC")
+	return database && connection ||
+		strings.HasSuffix(name, "_KEY") && !strings.Contains(name, "PUBLISHABLE") && !strings.Contains(name, "PUBLIC")
+}
+
+func containsURLCredentials(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.IsAbs() && parsed.User != nil
+}
+
+func terminalSafe(value string) string {
+	var safe strings.Builder
+	for _, current := range value {
+		if unicode.IsPrint(current) {
+			safe.WriteRune(current)
+			continue
+		}
+		if current <= 0xffff {
+			fmt.Fprintf(&safe, `\u%04x`, current)
+		} else {
+			fmt.Fprintf(&safe, `\U%08x`, current)
+		}
+	}
+	return safe.String()
 }
 
 func sortedMapKeys[V any](values map[string]V) []string {
