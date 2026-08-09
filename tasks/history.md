@@ -2,6 +2,14 @@
 
 ## 2026-08-09
 
+- Added the public EnvBank website under `website/` with focused marketing,
+  getting-started, and install routes for the released v0.1.1 alpha.
+- Built a security-focused responsive visual system, accessible copy controls,
+  exact platform and architecture selection, checksum and Sigstore guidance,
+  unsigned-macOS warnings, and prominent product limitations.
+- Added canonical metadata, sitemap, robots policy, generated favicon and a
+  bespoke redacted Open Graph card, plus a Node 24 website CI lane.
+
 - Prepared the corrective v0.1.1 alpha release without changing the v0.1.0 tag
   or assets, including downloadable Sigstore provenance bundles for release
   artifacts and the multi-architecture image.
