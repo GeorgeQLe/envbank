@@ -90,8 +90,8 @@ version-1 artifacts.
 - `go build ./...` — passed for every Go command and package.
 - `go test -race ./internal/server ./internal/client ./internal/vaultobject
   ./internal/recovery ./internal/bundle ./internal/rollout ./cmd/envbank` —
-  passed for all changed executable packages; the CLI package completed in
-  281.767 seconds because recovery tests intentionally use the production KDF.
+  passed against the exact post-review boundary; the CLI package completed in
+  355.073 seconds because recovery tests intentionally use the production KDF.
 - `go test ./internal/server` — passed after the final malformed-envelope test
   split, covering both negative revisions and invalid encrypted blobs.
 - `node --test extension/test/*.test.js` — 13/13 extension regressions passed.
@@ -101,15 +101,13 @@ version-1 artifacts.
   rejection all verified. A negative run against the occupied default port
   failed safely before mutation; a sandboxed retry then reached the known Go
   module-cache write restriction before the approved run passed.
-- `npm --prefix website run lint`, `npm --prefix website run typecheck`, and
-  `npm --prefix website run build` — passed after fast-forwarding the already-
-  shipped website commit, proving the final integrated branch remained clean.
-- `gitleaks detect --no-banner` — scanned repository history and the worktree;
-  no leaks found.
+- `gitleaks detect --no-banner --no-git --redact` — scanned the worktree; no
+  leaks found.
 - `make secret-scan-test` — the synthetic credential was detected as required.
 - `gofmt -l cmd internal` and `git diff --check` — passed with no output.
-- `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` — the official
-  scanner found no vulnerabilities in called code or imported dependencies.
+- `shellcheck scripts/recovery-drill.sh` — passed with no warnings.
+- `go run golang.org/x/vuln/cmd/govulncheck@19b0bb6a272792b9afa8a6983c3e9b9a1816947f
+  ./...` — the repository-pinned v1.6.0 scanner found no vulnerabilities.
 
 ## Skipped tests
 
@@ -121,6 +119,12 @@ version-1 artifacts.
 - Cross-platform builds were not repeated because the changed code uses only
   portable Go APIs and `go build ./...` plus the full package tests compiled
   every changed package on the supported development platform.
+- Website checks were not repeated because the website commit was already
+  shipped independently on `origin/main` and this feature boundary does not
+  modify website or CI files.
+- A repository-history Gitleaks scan was not repeated because the changed
+  boundary is uncommitted worktree content; the redacted no-git scan directly
+  covered that boundary, while history is unchanged by the feature commit.
 
 ## Adversarial review
 
