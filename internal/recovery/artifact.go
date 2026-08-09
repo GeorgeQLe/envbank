@@ -16,15 +16,17 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/browser"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/secure"
+	"github.com/GeorgeQLe/envbank/internal/vaultobject"
 )
 
 const (
-	Version       = 1
+	LegacyVersion = 1
+	Version       = 2
 	KDF           = "pbkdf2-hmac-sha256"
 	Cipher        = "aes-256-gcm"
 	Iterations    = 600_000
 	MaxArtifact   = 256 << 20
-	recoveryMagic = "envbank.recovery.v1"
+	recoveryMagic = "envbank.recovery.v"
 )
 
 type Artifact struct {
@@ -41,19 +43,42 @@ type KDFHeader struct {
 }
 
 type Payload struct {
-	Records []protocol.SecretRecord `json:"records"`
+	Records []protocol.SecretRecord   `json:"records"`
+	Objects []vaultobject.VaultObject `json:"objects"`
+}
+
+type Snapshot struct {
+	Records []protocol.SecretRecord
+	Objects []vaultobject.VaultObject
 }
 
 func Seal(records []protocol.SecretRecord, passphrase []byte) ([]byte, error) {
+	return SealSnapshot(Snapshot{Records: records, Objects: []vaultobject.VaultObject{}}, passphrase)
+}
+
+func SealSnapshot(snapshot Snapshot, passphrase []byte) ([]byte, error) {
 	if len(passphrase) == 0 {
 		return nil, errors.New("recovery passphrase must not be empty")
 	}
-	records = cloneRecords(records)
+	records := cloneRecords(snapshot.Records)
 	if err := validateRecords(records); err != nil {
 		return nil, err
 	}
+	objects := cloneObjects(snapshot.Objects)
+	if objects == nil {
+		objects = []vaultobject.VaultObject{}
+	}
+	if err := validateObjects(objects); err != nil {
+		return nil, err
+	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Name < records[j].Name })
-	plaintext, err := json.Marshal(Payload{Records: records})
+	sort.Slice(objects, func(i, j int) bool {
+		if objects[i].Kind == objects[j].Kind {
+			return objects[i].Key < objects[j].Key
+		}
+		return objects[i].Kind < objects[j].Kind
+	})
+	plaintext, err := json.Marshal(Payload{Records: records, Objects: objects})
 	if err != nil {
 		return nil, err
 	}
@@ -90,63 +115,102 @@ func Seal(records []protocol.SecretRecord, passphrase []byte) ([]byte, error) {
 }
 
 func Open(raw, passphrase []byte) ([]protocol.SecretRecord, error) {
+	snapshot, err := OpenSnapshot(raw, passphrase)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.Records, nil
+}
+
+func OpenSnapshot(raw, passphrase []byte) (Snapshot, error) {
 	if len(raw) > MaxArtifact {
-		return nil, errors.New("recovery artifact exceeds 256 MiB")
+		return Snapshot{}, errors.New("recovery artifact exceeds 256 MiB")
 	}
 	if len(passphrase) == 0 {
-		return nil, errors.New("recovery passphrase must not be empty")
+		return Snapshot{}, errors.New("recovery passphrase must not be empty")
 	}
 	var artifact Artifact
 	if err := decodeStrict(raw, &artifact); err != nil {
-		return nil, fmt.Errorf("invalid recovery artifact: %w", err)
+		return Snapshot{}, fmt.Errorf("invalid recovery artifact: %w", err)
 	}
 	salt, err := artifact.validateHeader()
 	if err != nil {
-		return nil, err
+		return Snapshot{}, err
 	}
 	key := secure.DeriveKey(passphrase, salt, artifact.KDF.Iterations)
 	plaintext, err := secure.Open(key, artifact.Encrypted, artifact.aad())
 	if err != nil {
-		return nil, errors.New("recovery artifact authentication failed")
+		return Snapshot{}, errors.New("recovery artifact authentication failed")
 	}
 	if len(plaintext) > MaxArtifact {
-		return nil, errors.New("recovery payload exceeds 256 MiB")
+		return Snapshot{}, errors.New("recovery payload exceeds 256 MiB")
 	}
-	var payload Payload
-	if err := decodeStrict(plaintext, &payload); err != nil {
-		return nil, fmt.Errorf("invalid recovery payload: %w", err)
+	var records []protocol.SecretRecord
+	var objects []vaultobject.VaultObject
+	if artifact.Version == LegacyVersion {
+		var legacy struct {
+			Records []protocol.SecretRecord `json:"records"`
+		}
+		if err := decodeStrict(plaintext, &legacy); err != nil {
+			return Snapshot{}, fmt.Errorf("invalid recovery payload: %w", err)
+		}
+		records = legacy.Records
+		objects = []vaultobject.VaultObject{}
+	} else {
+		var payload Payload
+		if err := decodeStrict(plaintext, &payload); err != nil {
+			return Snapshot{}, fmt.Errorf("invalid recovery payload: %w", err)
+		}
+		records, objects = payload.Records, payload.Objects
 	}
-	if payload.Records == nil {
-		return nil, errors.New("invalid recovery payload: records are required")
+	if records == nil {
+		return Snapshot{}, errors.New("invalid recovery payload: records are required")
 	}
-	if err := validateRecords(payload.Records); err != nil {
-		return nil, err
+	if objects == nil {
+		return Snapshot{}, errors.New("invalid recovery payload: objects are required")
 	}
-	sort.Slice(payload.Records, func(i, j int) bool {
-		return payload.Records[i].Name < payload.Records[j].Name
+	if err := validateRecords(records); err != nil {
+		return Snapshot{}, err
+	}
+	if err := validateObjects(objects); err != nil {
+		return Snapshot{}, err
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Name < records[j].Name
 	})
-	return payload.Records, nil
+	sort.Slice(objects, func(i, j int) bool {
+		if objects[i].Kind == objects[j].Kind {
+			return objects[i].Key < objects[j].Key
+		}
+		return objects[i].Kind < objects[j].Kind
+	})
+	return Snapshot{Records: records, Objects: objects}, nil
 }
 
 func Read(path string, passphrase []byte) ([]protocol.SecretRecord, string, error) {
+	snapshot, artifactID, err := ReadSnapshot(path, passphrase)
+	return snapshot.Records, artifactID, err
+}
+
+func ReadSnapshot(path string, passphrase []byte) (Snapshot, string, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, "", err
+		return Snapshot{}, "", err
 	}
 	defer file.Close()
 	raw, err := io.ReadAll(io.LimitReader(file, MaxArtifact+1))
 	if err != nil {
-		return nil, "", err
+		return Snapshot{}, "", err
 	}
 	if len(raw) > MaxArtifact {
-		return nil, "", errors.New("recovery artifact exceeds 256 MiB")
+		return Snapshot{}, "", errors.New("recovery artifact exceeds 256 MiB")
 	}
-	records, err := Open(raw, passphrase)
+	snapshot, err := OpenSnapshot(raw, passphrase)
 	if err != nil {
-		return nil, "", err
+		return Snapshot{}, "", err
 	}
 	sum := sha256.Sum256(raw)
-	return records, hex.EncodeToString(sum[:]), nil
+	return snapshot, hex.EncodeToString(sum[:]), nil
 }
 
 func Write(path string, raw []byte) error {
@@ -193,7 +257,7 @@ func Write(path string, raw []byte) error {
 }
 
 func (a Artifact) validateHeader() ([]byte, error) {
-	if a.Version != Version {
+	if a.Version != LegacyVersion && a.Version != Version {
 		return nil, fmt.Errorf("unsupported recovery artifact version %d", a.Version)
 	}
 	if a.KDF.Name != KDF || a.KDF.Iterations != Iterations {
@@ -210,9 +274,24 @@ func (a Artifact) validateHeader() ([]byte, error) {
 }
 
 func (a Artifact) aad() []byte {
-	return []byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%d\x00%s",
-		recoveryMagic, a.Version, a.KDF.Name, a.KDF.Salt, a.KDF.Iterations,
+	return []byte(fmt.Sprintf("%s%d\x00%d\x00%s\x00%s\x00%d\x00%s",
+		recoveryMagic, a.Version, a.Version, a.KDF.Name, a.KDF.Salt, a.KDF.Iterations,
 		a.Cipher))
+}
+
+func validateObjects(objects []vaultobject.VaultObject) error {
+	seen := make(map[string]struct{}, len(objects))
+	for _, object := range objects {
+		if err := vaultobject.Validate(object); err != nil {
+			return errors.New("invalid recovery vault object")
+		}
+		identity := object.Kind + "\x00" + object.Key
+		if _, exists := seen[identity]; exists {
+			return errors.New("duplicate recovery vault object")
+		}
+		seen[identity] = struct{}{}
+	}
+	return nil
 }
 
 func validateRecords(records []protocol.SecretRecord) error {
@@ -272,6 +351,15 @@ func cloneRecords(records []protocol.SecretRecord) []protocol.SecretRecord {
 	copy(cloned, records)
 	for i := range cloned {
 		cloned[i].AllowedOrigins = append([]string(nil), cloned[i].AllowedOrigins...)
+	}
+	return cloned
+}
+
+func cloneObjects(objects []vaultobject.VaultObject) []vaultobject.VaultObject {
+	cloned := make([]vaultobject.VaultObject, len(objects))
+	copy(cloned, objects)
+	for index := range cloned {
+		cloned[index].Payload = append(json.RawMessage(nil), cloned[index].Payload...)
 	}
 	return cloned
 }

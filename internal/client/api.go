@@ -132,6 +132,29 @@ func (a *API) PutRecord(recordID string, request protocol.PutRecordRequest) (pro
 	return response, err
 }
 
+func (a *API) ListVaultObjects() ([]protocol.EncryptedVaultObject, error) {
+	var response []protocol.EncryptedVaultObject
+	err := a.do(http.MethodGet, a.vaultPath()+"/objects", nil, &response, true)
+	return response, err
+}
+
+func (a *API) GetVaultObject(objectID string) (protocol.EncryptedVaultObject, error) {
+	var response protocol.EncryptedVaultObject
+	err := a.do(http.MethodGet, a.vaultPath()+"/objects/"+url.PathEscape(objectID), nil, &response, true)
+	return response, err
+}
+
+func (a *API) PutVaultObject(objectID string, request protocol.PutVaultObjectRequest) (protocol.EncryptedVaultObject, error) {
+	var response protocol.EncryptedVaultObject
+	err := a.do(http.MethodPut, a.vaultPath()+"/objects/"+url.PathEscape(objectID), request, &response, true)
+	return response, err
+}
+
+func (a *API) DeleteVaultObject(objectID string, expectedRevision int64) error {
+	return a.do(http.MethodDelete, a.vaultPath()+"/objects/"+url.PathEscape(objectID),
+		protocol.DeleteVaultObjectRequest{ExpectedRevision: expectedRevision}, nil, true)
+}
+
 func (a *API) ListAccessEvents(limit int, before string) (protocol.AccessEventPage, error) {
 	var response protocol.AccessEventPage
 	values := url.Values{}

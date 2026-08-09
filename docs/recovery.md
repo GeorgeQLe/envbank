@@ -1,15 +1,15 @@
 # Encrypted recovery
 
 An EnvBank recovery artifact is an independent, encrypted snapshot of every
-secret record that an approved device can currently read. It is the recovery
-path when the original sync service, device configs, or device identities are
-unavailable.
+secret record and encrypted bookkeeping object that an approved device can
+currently read. It is the recovery path when the original sync service, device
+configs, or device identities are unavailable.
 
 The artifact contains record names, values, creation and rotation timestamps,
-rotation policies, browser-origin allowlists, and source revisions inside its
-encrypted payload. It does not contain the original vault key, device signing
-or wrapping keys, device authorization, revocation state, replay nonces, or
-access history.
+rotation policies, browser-origin allowlists, source revisions, bundle
+snapshots, and provider plans inside its encrypted payload. It does not contain
+the original vault key, provider credentials, device signing or wrapping keys,
+device authorization, revocation state, replay nonces, or access history.
 
 ## Create and protect an artifact
 
@@ -40,11 +40,12 @@ If `--recovery-passphrase-file` is omitted,
 long-lived shell environment. Recovery passphrases and secret values are never
 accepted as command-line arguments.
 
-Format version 1 uses AES-256-GCM with a random nonce. Its key is derived with
+Format version 2 uses AES-256-GCM with a random nonce. Its key is derived with
 PBKDF2-HMAC-SHA-256, a random 16-byte salt, and 600,000 iterations. The format
 version and KDF parameters are authenticated. Readers reject files larger than
 256 MiB, unsupported versions or algorithms, altered or truncated ciphertext,
-unsafe KDF parameters, malformed payloads, and duplicate or invalid records.
+unsafe KDF parameters, malformed payloads, and duplicate or invalid records or
+objects. Record-only format-version-1 artifacts remain readable.
 
 ## Offline access
 

@@ -232,6 +232,118 @@ func TestMultiDeviceEnrollmentAndRecordSync(t *testing.T) {
 	}
 }
 
+func TestEncryptedVaultObjectCRUDIsOpaqueToServer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opaque.db")
+	service, err := server.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpClient := &http.Client{Transport: handlerTransport{handler: service}}
+	keys, err := secure.NewDeviceKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultKey, err := secure.RandomBytes(32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys.Secrets.VaultKey = secure.Encode(vaultKey)
+	api := client.NewAPI("http://envbank.test")
+	api.HTTPClient = httpClient
+	created, err := api.CreateVault("opaque", protocol.PublicDevice{Name: "device",
+		SigningPublic: keys.SigningPublic, WrappingPublic: keys.WrappingPublic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.Config = &client.Config{VaultID: created.VaultID, DeviceID: created.DeviceID}
+	api.Secrets = keys.Secrets
+	kind := "bundle-snapshot"
+	logicalKey := "private-bundle-sentinel-7af3"
+	payload := map[string]string{"manifest_digest": "private-digest-sentinel-91c2"}
+	stored, err := api.PutObject(vaultKey, kind, logicalKey, payload, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != 1 {
+		t.Fatalf("created revision = %d", stored.Revision)
+	}
+	if _, err := api.PutObject(vaultKey, kind, logicalKey, payload, 0); err == nil ||
+		!strings.Contains(err.Error(), "revision conflict") {
+		t.Fatalf("stale object update error = %v", err)
+	}
+	got, err := api.GetObject(vaultKey, kind, logicalKey)
+	if err != nil || got.Key != logicalKey {
+		t.Fatalf("get object = %#v, %v", got, err)
+	}
+	objects, err := api.ListObjects(vaultKey)
+	if err != nil || len(objects) != 1 || objects[0].Kind != kind {
+		t.Fatalf("list objects = %#v, %v", objects, err)
+	}
+	if err := api.DeleteObject(vaultKey, kind, logicalKey, 2); err == nil ||
+		!strings.Contains(err.Error(), "revision conflict") {
+		t.Fatalf("stale object delete error = %v", err)
+	}
+	if err := api.DeleteObject(vaultKey, kind, logicalKey, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.GetObject(vaultKey, kind, logicalKey); err == nil {
+		t.Fatal("deleted object remained readable")
+	}
+	events, err := api.ListAccessEvents(20, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations := make(map[string]bool)
+	for _, event := range events.Events {
+		operations[event.Operation] = true
+	}
+	for _, operation := range []string{"object_update", "object_read", "object_list", "object_delete"} {
+		if !operations[operation] {
+			t.Fatalf("object access event %q was not persisted", operation)
+		}
+	}
+
+	// Reinsert so the on-disk opacity assertion examines durable ciphertext.
+	if _, err := api.PutObject(vaultKey, kind, logicalKey, payload, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{kind, logicalKey, payload["manifest_digest"]} {
+		if bytes.Contains(raw, []byte(forbidden)) {
+			t.Fatalf("server database exposed object plaintext %q", forbidden)
+		}
+	}
+}
+
+func TestEncryptedVaultObjectRejectsMalformedOpaqueInput(t *testing.T) {
+	service, err := server.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	fixture := createTwoDeviceVault(t, service)
+	validBlob := secure.Blob{Version: 1, Nonce: secure.Encode(make([]byte, 12)),
+		Ciphertext: secure.Encode(make([]byte, 16))}
+	for name, request := range map[string]protocol.PutVaultObjectRequest{
+		"negative revision": {ExpectedRevision: -1, ModifiedAt: "2026-08-09T20:00:00Z", Blob: validBlob},
+		"invalid blob": {ExpectedRevision: 0, ModifiedAt: "2026-08-09T20:00:00Z",
+			Blob: secure.Blob{Version: 1, Nonce: "bad", Ciphertext: "bad"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := fixture.firstAPI.PutVaultObject(secure.Encode(make([]byte, 32)), request); err == nil ||
+				!strings.Contains(err.Error(), "400") {
+				t.Fatalf("malformed opaque object error = %v", err)
+			}
+		})
+	}
+}
+
 func TestSharedDatabaseSerializesConcurrentRevisionUpdates(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "server.db")
 	firstService, err := server.Open(path)
@@ -653,8 +765,8 @@ PRAGMA user_version = 1;`
 	}
 	defer check.Close()
 	var version int
-	if err := check.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 5 {
-		t.Fatalf("schema version = %d, err %v; want 5", version, err)
+	if err := check.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
+		t.Fatalf("schema version = %d, err %v; want 6", version, err)
 	}
 }
 
@@ -937,7 +1049,7 @@ func TestVersionFourNonceMigrationRemainsReplaySafe(t *testing.T) {
 		device_id = ? AND nonce = ?`, created.VaultID, created.DeviceID, nonce).Scan(&refreshed); err != nil {
 		t.Fatal(err)
 	}
-	if version != 5 || refreshed == "2000-01-01T00:00:00Z" {
+	if version != 6 || refreshed == "2000-01-01T00:00:00Z" {
 		t.Fatalf("migration version=%d refreshed=%q", version, refreshed)
 	}
 }

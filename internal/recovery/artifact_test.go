@@ -10,6 +10,7 @@ import (
 
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/secure"
+	"github.com/GeorgeQLe/envbank/internal/vaultobject"
 )
 
 var testRecords = []protocol.SecretRecord{
@@ -53,6 +54,63 @@ func TestArtifactRoundTripSupportsAnEmptyVault(t *testing.T) {
 	}
 	if records == nil || len(records) != 0 {
 		t.Fatalf("records = %#v, want a non-nil empty snapshot", records)
+	}
+}
+
+func TestArtifactV2RoundTripPreservesVaultObjectSourceRevision(t *testing.T) {
+	objects := []vaultobject.VaultObject{{
+		Kind: vaultobject.KindBundleSnapshot, Key: "bundle/private-sentinel", Revision: 9,
+		ModifiedAt: "2026-08-09T20:00:00Z",
+		Payload:    json.RawMessage(`{"manifest_digest":"private-object-payload-sentinel"}`),
+	}}
+	raw, err := SealSnapshot(Snapshot{Records: testRecords, Objects: objects}, []byte("passphrase"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var header Artifact
+	if err := json.Unmarshal(raw, &header); err != nil || header.Version != Version {
+		t.Fatalf("artifact header = %#v, %v", header, err)
+	}
+	for _, forbidden := range []string{"bundle/private-sentinel", "private-object-payload-sentinel"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("artifact exposed vault object plaintext %q", forbidden)
+		}
+	}
+	snapshot, err := OpenSnapshot(raw, []byte("passphrase"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Objects) != 1 || snapshot.Objects[0].Revision != 9 ||
+		!reflect.DeepEqual(snapshot.Objects[0], objects[0]) {
+		t.Fatalf("objects = %#v", snapshot.Objects)
+	}
+}
+
+func TestArtifactV1RemainsReadable(t *testing.T) {
+	plaintext, err := json.Marshal(struct {
+		Records []protocol.SecretRecord `json:"records"`
+	}{Records: testRecords})
+	if err != nil {
+		t.Fatal(err)
+	}
+	salt := make([]byte, 16)
+	artifact := Artifact{Version: LegacyVersion,
+		KDF: KDFHeader{Name: KDF, Salt: secure.Encode(salt), Iterations: Iterations}, Cipher: Cipher}
+	artifact.Encrypted, err = secure.Seal(secure.DeriveKey([]byte("passphrase"), salt, Iterations),
+		plaintext, artifact.aad())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := OpenSnapshot(raw, []byte("passphrase"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Records) != len(testRecords) || snapshot.Objects == nil || len(snapshot.Objects) != 0 {
+		t.Fatalf("legacy snapshot = %#v", snapshot)
 	}
 }
 
@@ -104,7 +162,7 @@ func TestArtifactRejectsUnsupportedUnsafeAndMalformedInputs(t *testing.T) {
 	if err := json.Unmarshal(raw, &artifact); err != nil {
 		t.Fatal(err)
 	}
-	artifact.Version = 2
+	artifact.Version = 3
 	changed, _ := json.Marshal(artifact)
 	if _, err := Open(changed, []byte("passphrase")); err == nil ||
 		!strings.Contains(err.Error(), "unsupported recovery artifact version") {
@@ -194,6 +252,9 @@ func TestArtifactWriteIsPrivateAndRefusesOverwrite(t *testing.T) {
 
 func sealPayloadForTest(t *testing.T, payload Payload, passphrase []byte) []byte {
 	t.Helper()
+	if payload.Objects == nil {
+		payload.Objects = []vaultobject.VaultObject{}
+	}
 	plaintext, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)

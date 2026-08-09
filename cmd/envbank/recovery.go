@@ -12,6 +12,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/recovery"
 	"github.com/GeorgeQLe/envbank/internal/secure"
+	"github.com/GeorgeQLe/envbank/internal/vaultobject"
 )
 
 type recoveryFlags struct {
@@ -45,11 +46,15 @@ func recoveryExport(args []string) error {
 	if err != nil {
 		return err
 	}
-	_, _, records, err := loadRecordsWithAuth(auth)
+	api, vaultKey, records, err := loadRecordsWithAuth(auth)
 	if err != nil {
 		return err
 	}
-	raw, err := recovery.Seal(records, passphrase)
+	objects, err := api.ListObjects(vaultKey)
+	if err != nil {
+		return err
+	}
+	raw, err := recovery.SealSnapshot(recovery.Snapshot{Records: records, Objects: objects}, passphrase)
 	if err != nil {
 		return err
 	}
@@ -147,7 +152,7 @@ func recoveryRestore(args []string) error {
 	if err != nil {
 		return err
 	}
-	records, artifactID, err := recovery.Read(recoveryAuth.artifactPath, recoveryPassphrase)
+	snapshot, artifactID, err := recovery.ReadSnapshot(recoveryAuth.artifactPath, recoveryPassphrase)
 	if err != nil {
 		return err
 	}
@@ -155,15 +160,15 @@ func recoveryRestore(args []string) error {
 		if *serverURL != "" || *vaultName != "" || *deviceName != "" {
 			return errors.New("--server, --vault, and --device are not accepted with --resume")
 		}
-		return resumeRecoveryRestore(auth, records, artifactID)
+		return resumeRecoveryRestore(auth, snapshot, artifactID)
 	}
 	if *serverURL == "" || *vaultName == "" || *deviceName == "" {
 		return errors.New("--server, --vault, and --device are required")
 	}
-	return beginRecoveryRestore(auth, records, artifactID, *serverURL, *vaultName, *deviceName)
+	return beginRecoveryRestore(auth, snapshot, artifactID, *serverURL, *vaultName, *deviceName)
 }
 
-func beginRecoveryRestore(auth *authFlags, records []protocol.SecretRecord, artifactID, serverURL, vaultName, deviceName string) error {
+func beginRecoveryRestore(auth *authFlags, snapshot recovery.Snapshot, artifactID, serverURL, vaultName, deviceName string) error {
 	if _, err := os.Stat(auth.configPath); err == nil {
 		return fmt.Errorf("config already exists at %s", auth.configPath)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -203,14 +208,15 @@ func beginRecoveryRestore(auth *authFlags, records []protocol.SecretRecord, arti
 	}
 	api.Config = cfg
 	api.Secrets = keys.Secrets
-	if err := restoreRecords(api, vaultKey, records); err != nil {
+	if err := restoreSnapshot(api, vaultKey, snapshot); err != nil {
 		return fmt.Errorf("recovery upload incomplete; use recovery-restore --resume with the saved config: %w", err)
 	}
-	fmt.Printf("restored %d record(s) into new vault %s\n", len(records), created.VaultID)
+	fmt.Printf("restored %d record(s) and %d object(s) into new vault %s\n",
+		len(snapshot.Records), len(snapshot.Objects), created.VaultID)
 	return nil
 }
 
-func resumeRecoveryRestore(auth *authFlags, records []protocol.SecretRecord, artifactID string) error {
+func resumeRecoveryRestore(auth *authFlags, snapshot recovery.Snapshot, artifactID string) error {
 	api, secrets, err := unlockedAPI(auth)
 	if err != nil {
 		return err
@@ -222,11 +228,19 @@ func resumeRecoveryRestore(auth *authFlags, records []protocol.SecretRecord, art
 	if err != nil {
 		return err
 	}
-	if err := restoreRecords(api, vaultKey, records); err != nil {
+	if err := restoreSnapshot(api, vaultKey, snapshot); err != nil {
 		return fmt.Errorf("recovery resume failed: %w", err)
 	}
-	fmt.Printf("recovery complete with %d record(s)\n", len(records))
+	fmt.Printf("recovery complete with %d record(s) and %d object(s)\n",
+		len(snapshot.Records), len(snapshot.Objects))
 	return nil
+}
+
+func restoreSnapshot(api *client.API, vaultKey []byte, snapshot recovery.Snapshot) error {
+	if err := restoreRecords(api, vaultKey, snapshot.Records); err != nil {
+		return err
+	}
+	return restoreObjects(api, vaultKey, snapshot.Objects)
 }
 
 func restoreRecords(api *client.API, vaultKey []byte, source []protocol.SecretRecord) error {
@@ -293,6 +307,60 @@ func validateRecoveryTarget(api *client.API, vaultKey []byte, expected map[strin
 		present[record.Name] = struct{}{}
 	}
 	return present, nil
+}
+
+func restoreObjects(api *client.API, vaultKey []byte, source []vaultobject.VaultObject) error {
+	expected := make(map[string]vaultobject.VaultObject, len(source))
+	for _, recovered := range source {
+		recovered.Revision = 1
+		expected[recovered.Kind+"\x00"+recovered.Key] = recovered
+	}
+	existing, err := api.ListObjects(vaultKey)
+	if err != nil {
+		return err
+	}
+	present := make(map[string]struct{}, len(existing))
+	for _, object := range existing {
+		identity := object.Kind + "\x00" + object.Key
+		want, exists := expected[identity]
+		if !exists {
+			return errors.New("replacement vault contains an unexpected vault object")
+		}
+		if !reflect.DeepEqual(object, want) {
+			return errors.New("replacement vault contains a conflicting vault object")
+		}
+		present[identity] = struct{}{}
+	}
+	for _, recovered := range source {
+		identity := recovered.Kind + "\x00" + recovered.Key
+		if _, exists := present[identity]; exists {
+			continue
+		}
+		recovered.Revision = 1
+		id, blob, err := vaultobject.Encrypt(api.Config.VaultID, vaultKey, recovered)
+		if err != nil {
+			return err
+		}
+		if _, err := api.PutVaultObject(id, protocol.PutVaultObjectRequest{
+			ExpectedRevision: 0, ModifiedAt: recovered.ModifiedAt, Blob: blob,
+		}); err != nil {
+			return errors.New("vault object recovery upload failed")
+		}
+	}
+	existing, err = api.ListObjects(vaultKey)
+	if err != nil {
+		return err
+	}
+	if len(existing) != len(expected) {
+		return errors.New("replacement vault is missing one or more restored vault objects")
+	}
+	for _, object := range existing {
+		want, exists := expected[object.Kind+"\x00"+object.Key]
+		if !exists || !reflect.DeepEqual(object, want) {
+			return errors.New("replacement vault object contents could not be verified")
+		}
+	}
+	return nil
 }
 
 func loadRecoveryRecords(args []string, command string, requireName bool) ([]protocol.SecretRecord, string, error) {

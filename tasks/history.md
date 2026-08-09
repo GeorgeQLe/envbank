@@ -20,6 +20,15 @@
 - Added table, canonicalization, malicious-YAML, derivation-cycle,
   secret-sentinel, CLI-output, fuzz-seed, and race coverage for the contract
   foundation without adding vault or provider mutations.
+- Added opaque encrypted vault-object CRUD across protocol, client, and server
+  layers with domain-separated IDs and AAD, optimistic revisions, private
+  access events, and the transactional SQLite version-6 migration.
+- Added versioned bundle-snapshot and provider-plan schemas plus encrypted
+  recovery artifact v2, including legacy artifact reads, restored revision
+  reset, resumable object upload, and server-opacity regression coverage.
+- Advanced backup/recovery validation to SQLite schema version 6 and hardened
+  the drill against mistaking an unrelated service on its default port for the
+  disposable service it launched.
 
 - Prepared the corrective v0.1.1 alpha release without changing the v0.1.0 tag
   or assets, including downloadable Sigstore provenance bundles for release

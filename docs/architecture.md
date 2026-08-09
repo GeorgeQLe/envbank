@@ -110,10 +110,12 @@ developer stress lab are documented in [device pairing](device-pairing.md).
 
 ## Recovery artifacts
 
-A version-1 recovery artifact contains a sorted snapshot of decrypted
-`SecretRecord` objects, including source revisions, inside a single
-AES-256-GCM payload. It deliberately excludes the vault key, device private
-keys, and server authorization or access-history data. A separate recovery
+Version-2 recovery artifacts contain sorted snapshots of decrypted
+`SecretRecord` values and encrypted vault-object plaintext, including their
+source sync revisions, inside a single AES-256-GCM payload. Version-1
+record-only artifacts remain readable. Artifacts deliberately exclude the
+vault key, device private keys, provider credentials, and server authorization
+or access-history data. A separate recovery
 passphrase derives the 256-bit artifact key using PBKDF2-HMAC-SHA-256, a random
 16-byte salt, and 600,000 iterations. The format version, KDF identifier, salt,
 and iteration count are additional authenticated data.
@@ -123,9 +125,9 @@ artifact. Synchronized restoration creates a new server vault, random vault
 key, and device identity; it re-encrypts records under the new vault ID and
 resets their optimistic revisions to 1. The encrypted local config is saved
 before uploads and bound to the exact artifact digest. Resume authenticates to
-the configured replacement service, verifies already uploaded records with the
-new vault key, skips identical records, and fails closed on changed or
-unrelated target records.
+the configured replacement service, verifies already uploaded records and
+vault objects with the new vault key, skips identical state, resets restored
+sync revisions to 1, and fails closed on changed or unrelated target state.
 
 This is a new authorization domain. Recovery cannot reproduce old device
 authorization, revocation history, replay state, access events, or the original

@@ -26,7 +26,8 @@ CREATE TABLE access_events (
 		'record_list', 'record_update', 'event_list',
 		'invitation_creation', 'invitation_list', 'invitation_status',
 		'invitation_approval', 'invitation_rejection', 'invitation_cancellation',
-		'invitation_expiry'
+		'invitation_expiry', 'object_list', 'object_read', 'object_update',
+		'object_delete'
 	)),
 	outcome TEXT NOT NULL CHECK (outcome IN ('succeeded', 'rejected', 'denied')),
 	reason TEXT CHECK (reason IS NULL OR reason IN (
