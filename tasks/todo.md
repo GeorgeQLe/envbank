@@ -1,6 +1,6 @@
 # Current work
 
-## Milestone 3: Public EnvBank website — implementation complete
+## Milestone 4: Public EnvBank website — implementation complete
 
 - [x] Add a static TypeScript Next.js website with public marketing,
   first-vault tutorial, and platform-specific installation routes.
@@ -10,6 +10,17 @@
   route metadata, canonical URLs, favicon, sitemap, robots metadata, and a
   bespoke social preview.
 - [x] Add a Node 24 website build, lint, and typecheck lane to CI.
+
+## Milestone 3: SiftCut staging foundation — in progress
+
+- [x] Document the SiftCut staging use-case gaps, security invariants,
+  capability gates, phased implementation sequence, and acceptance criteria.
+- [x] Add the strict version-1 YAML manifest contract, canonical digest,
+  derivation AST and dependency ordering, semantic validation, and the
+  read-only `envbank bundle check` command with redacted regression coverage.
+- [ ] Add encrypted vault-object CRUD with domain-separated IDs and AAD,
+  optimistic revisions, server-opacity integration coverage, bundle snapshot
+  and provider-plan schemas, and recovery artifact v2 compatibility.
 
 ## Milestone 2: EnvBank OSS v0.1.1 corrective launch — complete
 

@@ -14,12 +14,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/GeorgeQLe/envbank/internal/browser"
 	"github.com/GeorgeQLe/envbank/internal/client"
+	"github.com/GeorgeQLe/envbank/internal/contract"
 	"github.com/GeorgeQLe/envbank/internal/keychain"
 	"github.com/GeorgeQLe/envbank/internal/nativehost"
 	"github.com/GeorgeQLe/envbank/internal/password"
@@ -120,6 +122,8 @@ func run(args []string) error {
 		return recoveryRun(args[1:])
 	case "recovery-restore":
 		return recoveryRestore(args[1:])
+	case "bundle":
+		return bundleCommand(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -164,6 +168,7 @@ Usage:
   envbank recovery-run --artifact PATH [recovery auth flags] -- COMMAND [ARGS...]
   envbank recovery-restore --artifact PATH --server URL --vault NAME --device NAME [recovery auth flags] [auth flags]
   envbank recovery-restore --resume --artifact PATH [recovery auth flags] [auth flags]
+  envbank bundle check --manifest PATH
 
 Auth flags:
   --config PATH           encrypted device config
@@ -173,6 +178,50 @@ If --passphrase-file is omitted, ENVBANK_PASSPHRASE is used. Secret values are
 never accepted as command-line arguments. If --recovery-passphrase-file is
 omitted, ENVBANK_RECOVERY_PASSPHRASE is used.
 `)
+}
+
+func bundleCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("bundle subcommand is required (supported: check)")
+	}
+	switch args[0] {
+	case "check":
+		return bundleCheck(args[1:])
+	default:
+		return fmt.Errorf("unknown bundle subcommand %q", args[0])
+	}
+}
+
+func bundleCheck(args []string) error {
+	fs := flag.NewFlagSet("bundle check", flag.ContinueOnError)
+	manifestPath := fs.String("manifest", "", "bundle manifest path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *manifestPath == "" || fs.NArg() != 0 {
+		return errors.New("bundle check requires --manifest PATH and no positional arguments")
+	}
+	file, err := os.Open(*manifestPath)
+	if err != nil {
+		return fmt.Errorf("open manifest: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, contract.MaxManifestBytes+1))
+	if err != nil {
+		return fmt.Errorf("read manifest: %w", err)
+	}
+	document, err := contract.Parse(data)
+	if err != nil {
+		return err
+	}
+	providers := make([]string, 0, len(document.Manifest.Targets))
+	for provider := range document.Manifest.Targets {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	fmt.Printf("bundle: %s\nmanifest digest: %s\nrecords: %d\ntargets: %s\nstatus: valid\n",
+		document.Manifest.Bundle, document.Digest, len(document.Manifest.Records), strings.Join(providers, ","))
+	return nil
 }
 
 func printVersion(args []string) error {

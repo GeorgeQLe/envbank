@@ -9,6 +9,17 @@
   unsigned-macOS warnings, and prominent product limitations.
 - Added canonical metadata, sitemap, robots policy, generated favicon and a
   bespoke redacted Open Graph card, plus a Node 24 website CI lane.
+- Defined the SiftCut staging gap analysis and implementation plan around a
+  public versioned contract, encrypted runtime state, trusted local derivation,
+  provider capability gates, resumable rollout, honest reconciliation,
+  readiness, recovery, and rotation.
+- Added the strict version-1 YAML manifest contract with bounded data-only
+  parsing, semantic validation, derivation AST and deterministic dependency
+  ordering, canonical JSON/SHA-256 digests, redacted errors, and the read-only
+  `envbank bundle check` command.
+- Added table, canonicalization, malicious-YAML, derivation-cycle,
+  secret-sentinel, CLI-output, fuzz-seed, and race coverage for the contract
+  foundation without adding vault or provider mutations.
 
 - Prepared the corrective v0.1.1 alpha release without changing the v0.1.0 tag
   or assets, including downloadable Sigstore provenance bundles for release
