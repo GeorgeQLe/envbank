@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GeorgeQLe/envbank/internal/client"
+	"github.com/GeorgeQLe/envbank/internal/password"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/secure"
 )
@@ -199,4 +200,113 @@ func TestPolicyConflictUsesRedactedError(t *testing.T) {
 	if strings.Contains(response.Error, record.Value) || strings.Contains(response.Error, record.Name) {
 		t.Fatal("policy error leaked record data")
 	}
+}
+
+func TestGeneratePasswordCreatesEncryptedRedactedRecord(t *testing.T) {
+	var put protocol.PutRecordRequest
+	host, _ := testHost(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&put); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}, nil)
+	policy := password.DefaultPolicy()
+	response, _ := host.Handle(Request{Version: 1, ID: "generate", Action: "generate_password", Name: "LOGIN_PASSWORD", Origin: "https://example.com", Policy: policy})
+	if !response.OK {
+		t.Fatalf("generate failed: %#v", response)
+	}
+	raw, _ := json.Marshal(response)
+	if strings.Contains(string(raw), "value") {
+		t.Fatalf("response contains a value field: %s", raw)
+	}
+	metadata := response.Result.(ListedRecord)
+	if metadata.Name != "LOGIN_PASSWORD" || metadata.Revision != 1 || !metadata.Allowed {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	if put.ExpectedRevision != 0 || put.Blob.Ciphertext == "" {
+		t.Fatalf("put = %#v", put)
+	}
+	id := secure.RecordID(host.vaultKey, "LOGIN_PASSWORD")
+	decoded, err := client.DecryptRecords("vault", host.vaultKey, []protocol.Record{{ID: id, Revision: 1, Blob: put.Blob}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 1 || len(decoded[0].Value) != policy.Length || !browserOriginPresent(decoded[0].AllowedOrigins, "https://example.com") {
+		t.Fatalf("stored record = %#v", decoded)
+	}
+	requestJSON, _ := json.Marshal(put)
+	if strings.Contains(string(requestJSON), decoded[0].Value) {
+		t.Fatal("server request exposed plaintext outside encrypted blob")
+	}
+}
+
+func TestGeneratePasswordReplacementRequiresExactRevisionAndPreservesMetadata(t *testing.T) {
+	existing := protocol.SecretRecord{Name: "PASSWORD", Value: "old-sensitive-value", CreatedAt: "2025-01-02T03:04:05Z", RotatedAt: "2025-02-03T04:05:06Z", RotateEveryDays: 60, Revision: 7, AllowedOrigins: []string{"https://old.example"}}
+	var encrypted []protocol.Record
+	var put protocol.PutRecordRequest
+	host, _ := testHost(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(encrypted)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&put); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}, nil)
+	id, blob, err := client.EncryptRecord("vault", host.vaultKey, existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted = []protocol.Record{{ID: id, Revision: existing.Revision, Blob: blob}}
+	policy := password.DefaultPolicy()
+	stale, _ := host.Handle(Request{Version: 1, ID: "stale", Action: "generate_password", Name: existing.Name, Origin: "https://new.example", Policy: policy, ExpectedRevision: 6})
+	if stale.OK || !strings.Contains(stale.Error, "refresh") || strings.Contains(stale.Error, existing.Value) {
+		t.Fatalf("stale response = %#v", stale)
+	}
+	response, _ := host.Handle(Request{Version: 1, ID: "replace", Action: "generate_password", Name: existing.Name, Origin: "https://new.example", Policy: policy, ExpectedRevision: 7})
+	if !response.OK || put.ExpectedRevision != 7 {
+		t.Fatalf("replacement response=%#v put=%#v", response, put)
+	}
+	decoded, err := client.DecryptRecords("vault", host.vaultKey, []protocol.Record{{ID: id, Revision: 8, Blob: put.Blob}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decoded[0]
+	if got.CreatedAt != existing.CreatedAt || got.RotateEveryDays != existing.RotateEveryDays || got.Revision != 8 || got.Value == existing.Value || !browserOriginPresent(got.AllowedOrigins, "https://old.example") || !browserOriginPresent(got.AllowedOrigins, "https://new.example") {
+		t.Fatalf("replacement = %#v", got)
+	}
+}
+
+func TestGeneratePasswordValidatesNameOriginAndClasses(t *testing.T) {
+	host, calls := testHost(t, nil, nil)
+	policy := password.DefaultPolicy()
+	for _, request := range []Request{
+		{Version: 1, ID: "name", Action: "generate_password", Name: "BAD-NAME", Origin: "https://example.com", Policy: policy},
+		{Version: 1, ID: "origin", Action: "generate_password", Name: "GOOD_NAME", Origin: "http://example.com", Policy: policy},
+		{Version: 1, ID: "classes", Action: "generate_password", Name: "GOOD_NAME", Origin: "https://example.com", Policy: password.Policy{Length: 24}},
+	} {
+		response, _ := host.Handle(request)
+		if response.OK || response.Result != nil {
+			t.Fatalf("invalid request succeeded: %#v", response)
+		}
+	}
+	if *calls != 0 {
+		t.Fatalf("invalid requests contacted server %d times", *calls)
+	}
+}
+
+func browserOriginPresent(origins []string, want string) bool {
+	for _, origin := range origins {
+		if origin == want {
+			return true
+		}
+	}
+	return false
 }

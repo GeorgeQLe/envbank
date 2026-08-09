@@ -3,6 +3,13 @@
 EnvBank handles sensitive material and is currently alpha-quality software. It
 is not a KMS, HSM, or enterprise secrets manager.
 
+Generated passwords are plaintext only inside the generating CLI/native-host
+process, encrypted record handling, and the explicitly selected destination
+field. They are never returned by metadata APIs or exposed through command
+output, extension storage, clipboard operations, logs, or popup JavaScript.
+An authorized or compromised destination page can read a value after filling;
+exact-origin authorization is not protection from page-level compromise.
+
 ## Supported versions
 
 Only the latest release receives security fixes. Until a stable release exists,

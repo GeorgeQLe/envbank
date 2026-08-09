@@ -1,5 +1,21 @@
 # History
 
+## 2026-08-08
+
+- Added an unbiased cryptographically secure random-character password
+  generator with configurable length and character classes, enabled-class
+  guarantees, and a cryptographic shuffle.
+- Added `envbank generate` with explicit replacement, optimistic revisions,
+  creation/origin/rotation metadata preservation, and name-and-revision-only
+  output while retaining `rotate --bytes` for URL-safe tokens.
+- Extended native protocol v1 and the Chrome popup with native-only password
+  generation, exact-origin and replacement confirmation, navigation-race
+  handling, and the existing 30-second field-selection flow.
+- Added Go and extension regression coverage for generation policy, encrypted
+  persistence, stale revisions, metadata preservation, origin revalidation,
+  and plaintext-exposure prohibitions; updated user, architecture, extension,
+  and security documentation.
+
 ## 2026-08-06
 
 - Prepared the EnvBank v0.1.0 alpha open-source launch under Apache-2.0,

@@ -25,8 +25,13 @@ async function armFill(tabId, name, origin) {
   const token = randomToken();
   const expires = Date.now() + 30000;
   sessions.set(tabId, { name, origin, token, expires });
-  await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["content.js"] });
-  await chrome.tabs.sendMessage(tabId, { type: "envbank-arm", token, expires });
+  try {
+    await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["content.js"] });
+    await chrome.tabs.sendMessage(tabId, { type: "envbank-arm", token, expires });
+  } catch (error) {
+    cancel(tabId, "arming-failed");
+    throw error;
+  }
   setTimeout(() => cancel(tabId, "timeout"), 30000);
   return { armed: true };
 }
@@ -37,6 +42,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === "allow") {
       if (await currentOrigin(message.tabId) !== message.origin) throw new Error("The tab origin changed; approval cancelled");
       return bridge.request("allow_origin", { name: message.name, origin: message.origin });
+    }
+    if (message.type === "generate") {
+      if (await currentOrigin(message.tabId) !== message.origin) throw new Error("The tab origin changed; generation cancelled");
+      const record = await bridge.request("generate_password", {
+        name: message.name,
+        origin: message.origin,
+        policy: message.policy,
+        expected_revision: message.expectedRevision || 0
+      });
+      try {
+        await armFill(message.tabId, message.name, message.origin);
+      } catch (_) {
+        throw new Error("The password remains stored and authorized, but field selection could not start; the tab may have navigated");
+      }
+      return { record, armed: true };
     }
     if (message.type === "arm") return armFill(message.tabId, message.name, message.origin);
     if (message.type === "cancel-selection" && sender.tab) { cancel(sender.tab.id, message.reason || "cancelled"); return {}; }

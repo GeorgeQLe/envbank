@@ -8,6 +8,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/browser"
 	"github.com/GeorgeQLe/envbank/internal/client"
 	"github.com/GeorgeQLe/envbank/internal/keychain"
+	"github.com/GeorgeQLe/envbank/internal/password"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/secure"
 )
@@ -15,11 +16,13 @@ import (
 const ProtocolVersion = 1
 
 type Request struct {
-	Version int    `json:"version"`
-	ID      string `json:"id"`
-	Action  string `json:"action"`
-	Name    string `json:"name,omitempty"`
-	Origin  string `json:"origin,omitempty"`
+	Version          int             `json:"version"`
+	ID               string          `json:"id"`
+	Action           string          `json:"action"`
+	Name             string          `json:"name,omitempty"`
+	Origin           string          `json:"origin,omitempty"`
+	Policy           password.Policy `json:"policy,omitempty"`
+	ExpectedRevision int64           `json:"expected_revision,omitempty"`
 }
 
 type Response struct {
@@ -165,6 +168,21 @@ func (h *Host) Handle(request Request) (Response, bool) {
 			break
 		}
 		response.OK, response.Result = true, map[string]any{"name": request.Name, "origin": origin}
+	case "generate_password":
+		if !validVariableName(request.Name) {
+			response.Error = "a valid variable name is required"
+			break
+		}
+		if err := request.Policy.Validate(); err != nil {
+			response.Error = err.Error()
+			break
+		}
+		result, err := h.generatePassword(request.Name, origin, request.Policy, request.ExpectedRevision)
+		if err != nil {
+			response.Error = err.Error()
+			break
+		}
+		response.OK, response.Result = true, result
 	case "get_for_fill":
 		if request.Name == "" {
 			response.Error = "variable name is required"
@@ -190,6 +208,62 @@ func (h *Host) Handle(request Request) (Response, bool) {
 		response.Error = "unknown native action"
 	}
 	return response, false
+}
+
+func validVariableName(name string) bool {
+	if name == "" || (name[0] != '_' && (name[0] < 'A' || name[0] > 'Z') && (name[0] < 'a' || name[0] > 'z')) {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		c := name[i]
+		if c != '_' && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func (h *Host) generatePassword(name, origin string, policy password.Policy, expected int64) (ListedRecord, error) {
+	records, err := h.loadRecords()
+	if err != nil {
+		return ListedRecord{}, err
+	}
+	nowFunction := h.Now
+	if nowFunction == nil {
+		nowFunction = time.Now
+	}
+	now := nowFunction().UTC().Format(time.RFC3339)
+	record := protocol.SecretRecord{Name: name, CreatedAt: now, RotatedAt: now, Revision: 1, AllowedOrigins: []string{origin}}
+	found := false
+	for _, existing := range records {
+		if existing.Name != name {
+			continue
+		}
+		found = true
+		if expected == 0 || expected != existing.Revision {
+			return ListedRecord{}, errors.New("record changed or replacement was not confirmed; refresh and try again")
+		}
+		record.CreatedAt = existing.CreatedAt
+		record.RotateEveryDays = existing.RotateEveryDays
+		record.AllowedOrigins, _ = browser.AddOrigin(existing.AllowedOrigins, origin)
+		record.Revision = existing.Revision + 1
+		break
+	}
+	if !found && expected != 0 {
+		return ListedRecord{}, errors.New("record changed or replacement was not confirmed; refresh and try again")
+	}
+	record.Value, err = password.Generate(policy)
+	if err != nil {
+		return ListedRecord{}, errors.New("password generation failed")
+	}
+	id, blob, err := client.EncryptRecord(h.api.Config.VaultID, h.vaultKey, record)
+	if err != nil {
+		return ListedRecord{}, errors.New("could not encrypt generated password")
+	}
+	if _, err := h.api.PutRecord(id, protocol.PutRecordRequest{ExpectedRevision: expected, Blob: blob}); err != nil {
+		return ListedRecord{}, errors.New("record changed concurrently; refresh and try again")
+	}
+	return ListedRecord{Name: record.Name, Allowed: true, Revision: record.Revision, RotatedAt: record.RotatedAt, RotateEveryDays: record.RotateEveryDays}, nil
 }
 
 func (h *Host) changePolicy(name, origin string, allow bool) error {
