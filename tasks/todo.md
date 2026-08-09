@@ -1,6 +1,6 @@
 # Current work
 
-## Milestone 2: EnvBank OSS v0.1.1 corrective launch — in progress
+## Milestone 2: EnvBank OSS v0.1.1 corrective launch — complete
 
 - [x] Prepare the Apache-2.0 license, public governance and security policy,
   alpha documentation, release metadata, and narrowly scoped Gitleaks policy.
@@ -15,9 +15,9 @@
   and GHCR image, and make the package public.
 - [x] Prepare a corrective tag-only v0.1.1 workflow with downloadable artifact
   and image provenance bundles plus credential-isolated public verification.
-- [ ] Merge the preparation, create the annotated `v0.1.1` tag on protected
+- [x] Merge the preparation, create the annotated `v0.1.1` tag on protected
   `main`, and publish the new prerelease and `v0.1.1`/`0.1` GHCR tags.
-- [ ] Verify clone, redirect, exact downloads, checksums, SBOM, local Sigstore
+- [x] Verify clone, redirect, exact downloads, checksums, SBOM, local Sigstore
   bundles, image platforms, health and immutable digest pull anonymously, then
   record the evidence without changing v0.1.0.
 
