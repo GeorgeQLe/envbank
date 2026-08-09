@@ -92,7 +92,10 @@ changes, navigation between storage and fill arming, and accidental plaintext
 egress through CLI output, native metadata/errors, popup state, logging,
 clipboard, or browser storage. The encrypted upload was decrypted in tests to
 verify its content while the wire request was checked not to contain the
-plaintext. No blocking findings remain.
+plaintext. Automated PR review found that replacement confirmation understated
+preserved origin grants and that dialog `returnValue` could remain stale after
+a failed attempt. The copy now discloses preserved grants, and both confirmation
+dialogs reset their result before every opening. No blocking findings remain.
 
 ## Residual risk
 

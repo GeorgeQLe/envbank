@@ -28,7 +28,9 @@ async function choose(name) {
 function confirmAllow(name) {
   pendingAllow = name;
   document.querySelector("#confirm-text").textContent = `Allow ${name} to be filled only on ${origin}?`;
-  document.querySelector("#confirm").showModal();
+  const dialog = document.querySelector("#confirm");
+  dialog.returnValue = "";
+  dialog.showModal();
 }
 document.querySelector("#confirm").addEventListener("close", async (event) => {
   if (event.target.returnValue !== "default" || !pendingAllow) { pendingAllow = null; return; }
@@ -51,10 +53,14 @@ document.querySelector("#generate-form").addEventListener("submit", (event) => {
   if (!policy.lowercase && !policy.uppercase && !policy.digits && !policy.symbols) { statusNode.textContent = "Select at least one character class"; return; }
   const existing = records.find((record) => record.name === name);
   pendingGenerate = { name, policy, expectedRevision: existing ? existing.revision : 0 };
-  const replacement = existing ? ` This replaces revision ${existing.revision} after you confirm.` : "";
-  document.querySelector("#confirm-generate-text").textContent = `EnvBank will generate the password inside its native host, store it without revealing or copying it, and authorize only ${origin}.${replacement}`;
+  const authorization = existing
+    ? `authorize ${origin}, and preserve the record's existing exact-origin authorizations. This replaces revision ${existing.revision} after you confirm.`
+    : `authorize only ${origin}.`;
+  document.querySelector("#confirm-generate-text").textContent = `EnvBank will generate the password inside its native host and store it without revealing or copying it. It will ${authorization}`;
   document.querySelector("#confirm-generate-button").textContent = existing ? `Replace revision ${existing.revision}` : "Generate and store";
-  document.querySelector("#confirm-generate").showModal();
+  const dialog = document.querySelector("#confirm-generate");
+  dialog.returnValue = "";
+  dialog.showModal();
 });
 document.querySelector("#confirm-generate").addEventListener("close", async (event) => {
   if (event.target.returnValue !== "default" || !pendingGenerate) { pendingGenerate = null; return; }

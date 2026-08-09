@@ -82,6 +82,7 @@ test("blocked-variable approval has a dedicated exact-origin confirmation", () =
   const source = fs.readFileSync(path.join(__dirname, "..", "popup.js"), "utf8");
   assert.match(html, /<dialog id="confirm">/);
   assert.match(source, /Allow \$\{name\} to be filled only on \$\{origin\}/);
+  assert.match(source, /dialog\.returnValue = ""/);
   assert.match(source, /returnValue !== "default"/);
 });
 
@@ -117,7 +118,8 @@ test("generator confirmation describes native storage, exact origin, and replace
   const source = fs.readFileSync(path.join(__dirname, "..", "popup.js"), "utf8");
   assert.match(html, /<dialog id="confirm-generate">/);
   assert.match(source, /generate the password inside its native host/);
-  assert.match(source, /authorize only \$\{origin\}/);
-  assert.match(source, /replaces revision \$\{existing\.revision\}/);
+  assert.match(source, /preserve the record's existing exact-origin authorizations/);
+  assert.match(source, /This replaces revision \$\{existing\.revision\}/);
+  assert.match(source, /dialog\.returnValue = ""/);
   assert.match(source, /expectedRevision: existing \? existing\.revision : 0/);
 });
