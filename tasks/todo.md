@@ -1,5 +1,16 @@
 # Current work
 
+## Milestone 4: Public EnvBank website — implementation complete
+
+- [x] Add a static TypeScript Next.js website with public marketing,
+  first-vault tutorial, and platform-specific installation routes.
+- [x] Present only released v0.1.1 capabilities, verification evidence, and
+  candid alpha limitations without including unreleased provider automation.
+- [x] Add responsive, keyboard-accessible controls, reduced-motion support,
+  route metadata, canonical URLs, favicon, sitemap, robots metadata, and a
+  bespoke social preview.
+- [x] Add a Node 24 website build, lint, and typecheck lane to CI.
+
 ## Milestone 3: SiftCut staging foundation — in progress
 
 - [x] Document the SiftCut staging use-case gaps, security invariants,

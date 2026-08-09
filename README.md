@@ -1,5 +1,9 @@
 # EnvBank
 
+Website: [envbank.vercel.app](https://envbank.vercel.app) ·
+[Getting started](https://envbank.vercel.app/getting-started) ·
+[Install v0.1.1](https://envbank.vercel.app/install)
+
 [![CI](https://github.com/GeorgeQLe/envbank/actions/workflows/ci.yml/badge.svg)](https://github.com/GeorgeQLe/envbank/actions/workflows/ci.yml)
 [![Security](https://github.com/GeorgeQLe/envbank/actions/workflows/security.yml/badge.svg)](https://github.com/GeorgeQLe/envbank/actions/workflows/security.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
