@@ -1,5 +1,15 @@
 # History
 
+## 2026-08-09
+
+- Prepared the corrective v0.1.1 alpha release without changing the v0.1.0 tag
+  or assets, including downloadable Sigstore provenance bundles for release
+  artifacts and the multi-architecture image.
+- Added credential-isolated anonymous verification of the canonical and legacy
+  repository URLs, exact release asset set, safe archives, checksums, SPDX
+  metadata, release identity, source ref and commit, OCI platforms, immutable
+  image pull, and health response.
+
 ## 2026-08-08
 
 - Published the renamed `GeorgeQLe/envbank` repository and verified public
