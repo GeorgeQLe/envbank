@@ -11,7 +11,7 @@
   cross-builds, and the hardened container.
 - [x] Rename the GitHub repository to `GeorgeQLe/envbank`, make it public, and
   enable private vulnerability reporting and GitHub security features.
-- [ ] Protect `main`, create the annotated `v0.1.0` tag, publish the prerelease
+- [x] Protect `main`, create the annotated `v0.1.0` tag, publish the prerelease
   and GHCR image, and make the package public.
 - [ ] Verify clone, downloads, checksums, SBOM, attestations, image health and
   digest pull, and the legacy repository redirect anonymously.

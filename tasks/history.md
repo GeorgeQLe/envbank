@@ -6,6 +6,8 @@
   visibility, private vulnerability reporting, vulnerability alerts,
   Dependabot security updates, secret scanning and push protection, plus the
   active security-analysis workflow.
+- Verified protected-branch enforcement for `main`, the annotated `v0.1.0` tag,
+  the published alpha prerelease, and the public GHCR package.
 - Added an unbiased cryptographically secure random-character password
   generator with configurable length and character classes, enabled-class
   guarantees, and a cryptographic shuffle.
