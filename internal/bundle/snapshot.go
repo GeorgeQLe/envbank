@@ -22,7 +22,10 @@ type Snapshot struct {
 	PhysicalToLogical map[string]string       `json:"physical_to_logical"`
 	Sources           map[string]SourceStatus `json:"sources"`
 	RecordRevisions   map[string]int64        `json:"record_revisions"`
-	CreatedAt         string                  `json:"created_at"`
+	// PreviousRecordRevisions retains non-secret revision evidence needed by
+	// recovery and later rollout validation after a record advances.
+	PreviousRecordRevisions map[string][]int64 `json:"previous_record_revisions,omitempty"`
+	CreatedAt               string             `json:"created_at"`
 }
 
 type SourceStatus struct {
@@ -63,6 +66,21 @@ func (snapshot Snapshot) Validate() error {
 	for name, revision := range snapshot.RecordRevisions {
 		if _, exists := logical[name]; !exists || revision < 1 {
 			return fmt.Errorf("bundle snapshot record revision %s is invalid", name)
+		}
+	}
+	for name, revisions := range snapshot.PreviousRecordRevisions {
+		if _, exists := logical[name]; !exists {
+			return fmt.Errorf("bundle snapshot previous record revision %s is invalid", name)
+		}
+		seen := make(map[int64]struct{}, len(revisions))
+		for _, revision := range revisions {
+			if revision < 1 || revision == snapshot.RecordRevisions[name] {
+				return fmt.Errorf("bundle snapshot previous record revision %s is invalid", name)
+			}
+			if _, exists := seen[revision]; exists {
+				return fmt.Errorf("bundle snapshot previous record revision %s is duplicated", name)
+			}
+			seen[revision] = struct{}{}
 		}
 	}
 	for name := range logical {

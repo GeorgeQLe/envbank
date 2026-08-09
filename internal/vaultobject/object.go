@@ -20,6 +20,7 @@ import (
 
 const (
 	KindBundleSnapshot       = "bundle-snapshot"
+	KindBundlePrepare        = "bundle-prepare"
 	KindProviderPlan         = "provider-plan"
 	KindRolloutOperation     = "rollout-operation"
 	KindReadinessAttestation = "readiness-attestation"

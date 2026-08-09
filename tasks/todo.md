@@ -1,8 +1,14 @@
 # Current work
 
-## Milestone 5: SiftCut trusted bundle preparation — pending
+## Milestone 6: Provider-neutral rollout engine — pending
 
-- [ ] Add local `bundle prepare` and `bundle status` workflows with trusted
+- [ ] Define redaction-safe provider capabilities and request types, then add
+  expiring encrypted plans and a resumable local rollout state machine with a
+  fake adapter before any live-provider integration.
+
+## Milestone 5: SiftCut trusted bundle preparation — complete
+
+- [x] Add local `bundle prepare` and `bundle status` workflows with trusted
   stdin import, deterministic bounded derivation, optimistic record writes,
   resumable journals, and encrypted snapshot persistence.
 

@@ -141,6 +141,14 @@ func TestParseLimitsDocumentSize(t *testing.T) {
 	}
 }
 
+func TestParseLimitsRecordNameForPhysicalMapping(t *testing.T) {
+	name := "A" + strings.Repeat("B", maxRecordName)
+	input := strings.Replace(validManifest, "POSTGRES_PASSWORD:", name+":", 1)
+	if _, err := Parse([]byte(input)); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("oversized record name error = %v", err)
+	}
+}
+
 func TestParseTemplate(t *testing.T) {
 	parsed, err := ParseTemplate("prefix-${secret:ONE}-${secret:TWO}")
 	if err != nil {

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/GeorgeQLe/envbank/internal/browser"
+	"github.com/GeorgeQLe/envbank/internal/bundle"
 	"github.com/GeorgeQLe/envbank/internal/client"
 	"github.com/GeorgeQLe/envbank/internal/contract"
 	"github.com/GeorgeQLe/envbank/internal/keychain"
@@ -169,6 +170,8 @@ Usage:
   envbank recovery-restore --artifact PATH --server URL --vault NAME --device NAME [recovery auth flags] [auth flags]
   envbank recovery-restore --resume --artifact PATH [recovery auth flags] [auth flags]
   envbank bundle check --manifest PATH
+  envbank bundle prepare --manifest PATH [auth flags]  # missing imports from a JSON object on stdin
+  envbank bundle status --manifest PATH [auth flags]
 
 Auth flags:
   --config PATH           encrypted device config
@@ -182,11 +185,15 @@ omitted, ENVBANK_RECOVERY_PASSPHRASE is used.
 
 func bundleCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("bundle subcommand is required (supported: check)")
+		return errors.New("bundle subcommand is required (supported: check, prepare, status)")
 	}
 	switch args[0] {
 	case "check":
 		return bundleCheck(args[1:])
+	case "prepare":
+		return bundlePrepare(args[1:])
+	case "status":
+		return bundleStatus(args[1:])
 	default:
 		return fmt.Errorf("unknown bundle subcommand %q", args[0])
 	}
@@ -201,16 +208,7 @@ func bundleCheck(args []string) error {
 	if *manifestPath == "" || fs.NArg() != 0 {
 		return errors.New("bundle check requires --manifest PATH and no positional arguments")
 	}
-	file, err := os.Open(*manifestPath)
-	if err != nil {
-		return fmt.Errorf("open manifest: %w", err)
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, contract.MaxManifestBytes+1))
-	if err != nil {
-		return fmt.Errorf("read manifest: %w", err)
-	}
-	document, err := contract.Parse(data)
+	document, err := loadBundleManifest(*manifestPath)
 	if err != nil {
 		return err
 	}
@@ -222,6 +220,92 @@ func bundleCheck(args []string) error {
 	fmt.Printf("bundle: %s\nmanifest digest: %s\nrecords: %d\ntargets: %s\nstatus: valid\n",
 		document.Manifest.Bundle, document.Digest, len(document.Manifest.Records), strings.Join(providers, ","))
 	return nil
+}
+
+func bundlePrepare(args []string) error {
+	fs := flag.NewFlagSet("bundle prepare", flag.ContinueOnError)
+	manifestPath := fs.String("manifest", "", "bundle manifest path")
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *manifestPath == "" || fs.NArg() != 0 {
+		return errors.New("bundle prepare requires --manifest PATH and no positional arguments")
+	}
+	document, err := loadBundleManifest(*manifestPath)
+	if err != nil {
+		return err
+	}
+	api, secrets, err := unlockedAPI(auth)
+	if err != nil {
+		return err
+	}
+	vaultKey, err := requireVaultKey(secrets)
+	if err != nil {
+		return err
+	}
+	status, err := (&bundle.Preparer{API: api, VaultKey: vaultKey}).Prepare(document, os.Stdin)
+	if err != nil {
+		return err
+	}
+	printBundleStatus(status)
+	return nil
+}
+
+func bundleStatus(args []string) error {
+	fs := flag.NewFlagSet("bundle status", flag.ContinueOnError)
+	manifestPath := fs.String("manifest", "", "bundle manifest path")
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *manifestPath == "" || fs.NArg() != 0 {
+		return errors.New("bundle status requires --manifest PATH and no positional arguments")
+	}
+	document, err := loadBundleManifest(*manifestPath)
+	if err != nil {
+		return err
+	}
+	api, secrets, err := unlockedAPI(auth)
+	if err != nil {
+		return err
+	}
+	vaultKey, err := requireVaultKey(secrets)
+	if err != nil {
+		return err
+	}
+	status, err := (&bundle.Preparer{API: api, VaultKey: vaultKey}).Status(document)
+	if err != nil {
+		return err
+	}
+	printBundleStatus(status)
+	return nil
+}
+
+func loadBundleManifest(path string) (*contract.Document, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open manifest: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, contract.MaxManifestBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read manifest: %w", err)
+	}
+	return contract.Parse(data)
+}
+
+func printBundleStatus(status bundle.Status) {
+	fmt.Printf("bundle: %s\nmanifest digest: %s\nstatus: %s\nrecords:\n",
+		status.Bundle, status.ManifestDigest, status.State)
+	names := make([]string, 0, len(status.Records))
+	for name := range status.Records {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Printf("  %s: %s\n", name, status.Records[name])
+	}
 }
 
 func printVersion(args []string) error {
