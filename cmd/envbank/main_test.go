@@ -17,7 +17,7 @@ func TestVersion(t *testing.T) {
 	t.Cleanup(func() {
 		version, commit, buildDate = originalVersion, originalCommit, originalBuildDate
 	})
-	version, commit, buildDate = "v0.1.0", "abc123", "2026-08-06T12:00:00Z"
+	version, commit, buildDate = "v0.1.1", "abc123", "2026-08-09T12:00:00Z"
 
 	var output bytes.Buffer
 	originalStdout := os.Stdout
@@ -37,7 +37,7 @@ func TestVersion(t *testing.T) {
 	if _, err := output.ReadFrom(read); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.TrimSpace(output.String()), "envbank v0.1.0 (commit abc123, built 2026-08-06T12:00:00Z)"; got != want {
+	if got, want := strings.TrimSpace(output.String()), "envbank v0.1.1 (commit abc123, built 2026-08-09T12:00:00Z)"; got != want {
 		t.Fatalf("version output = %q, want %q", got, want)
 	}
 	if err := run([]string{"version", "extra"}); err == nil {
