@@ -44,6 +44,10 @@ Operators should also read the
 disposable recovery drill, and maintain a separate
 [encrypted recovery artifact](docs/recovery.md).
 
+The unreleased SiftCut bundle workflow is documented in
+[local bundle preparation](docs/bundles.md). It prepares encrypted local state
+only and does not contact or deploy to a provider.
+
 ## What works
 
 - AES-256-GCM encrypted records with hidden, keyed record identifiers
@@ -60,6 +64,8 @@ disposable recovery drill, and maintain a separate
   values
 - Cryptographically secure random-character password generation without
   plaintext output
+- Local, resumable bundle preparation with stdin-only imports, bounded
+  derivation, encrypted snapshots, and names-only status
 - Direct child-process environment injection without writing a `.env` file
 - Exact-origin browser authorization stored inside each encrypted record
 - A macOS Keychain-gated Chrome native host and dependency-free MV3 extension

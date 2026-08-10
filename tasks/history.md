@@ -2,6 +2,15 @@
 
 ## 2026-08-09
 
+- Added local `envbank bundle prepare` and `bundle status` workflows with
+  deterministic bundle-scoped physical names, exact JSON stdin imports,
+  policy-based generation, bounded topological derivation, optimistic record
+  writes, encrypted per-record journals, final revision checks, and encrypted
+  snapshot publication with prior revision evidence retained for recovery.
+- Added names-only missing/prepared/stale reporting with dependent-staleness
+  propagation plus regression coverage for independent generated values,
+  exact in-process derivations, plaintext exclusion, idempotency, resumability,
+  physical-name stability, input conflicts, and expansion limits.
 - Added the public EnvBank website under `website/` with focused marketing,
   getting-started, and install routes for the released v0.1.1 alpha.
 - Built a security-focused responsive visual system, accessible copy controls,

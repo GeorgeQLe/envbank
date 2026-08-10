@@ -23,6 +23,7 @@ const (
 	maxYAMLDepth     = 20
 	maxYAMLNodes     = 10_000
 	maxBundleLength  = 128
+	maxRecordName    = 128
 	maxPolicies      = 128
 	maxRecords       = 256
 	maxTargets       = 8
@@ -245,8 +246,8 @@ func validate(manifest *Manifest) ([]string, error) {
 	for _, name := range sortedMapKeys(manifest.Records) {
 		record := manifest.Records[name]
 		path := "records." + name
-		if !namePattern.MatchString(name) {
-			return nil, fmt.Errorf("%s: invalid environment variable name", path)
+		if len(name) > maxRecordName || !namePattern.MatchString(name) {
+			return nil, fmt.Errorf("%s: invalid environment variable name of at most %d characters", path, maxRecordName)
 		}
 		switch record.Source {
 		case "generate":

@@ -41,6 +41,10 @@ func (t cliHandlerTransport) RoundTrip(request *http.Request) (*http.Response, e
 }
 
 func newCLIDeviceFixture(t *testing.T) *cliDeviceFixture {
+	return newCLIDeviceFixtureWithWrapper(t, nil)
+}
+
+func newCLIDeviceFixtureWithWrapper(t *testing.T, wrap func(http.Handler) http.Handler) *cliDeviceFixture {
 	t.Helper()
 	service, err := server.Open("")
 	if err != nil {
@@ -48,7 +52,11 @@ func newCLIDeviceFixture(t *testing.T) *cliDeviceFixture {
 	}
 	t.Cleanup(func() { _ = service.Close() })
 	scheme := fmt.Sprintf("envbanktest%d", cliFixtureSequence.Add(1))
-	http.DefaultTransport.(*http.Transport).RegisterProtocol(scheme, cliHandlerTransport{handler: service})
+	var handler http.Handler = service
+	if wrap != nil {
+		handler = wrap(handler)
+	}
+	http.DefaultTransport.(*http.Transport).RegisterProtocol(scheme, cliHandlerTransport{handler: handler})
 	serverURL := scheme + "://server"
 
 	dir := t.TempDir()

@@ -5,11 +5,12 @@ import "testing"
 func TestSnapshotSchemaValidation(t *testing.T) {
 	snapshot := Snapshot{
 		Version: SnapshotVersion, Bundle: "short-editor/example/staging",
-		ManifestDigest:    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		PhysicalToLogical: map[string]string{"ENVBANK_B1_HASH_TOKEN": "TOKEN"},
-		Sources:           map[string]SourceStatus{"TOKEN": {Source: "generate", Status: "ready"}},
-		RecordRevisions:   map[string]int64{"TOKEN": 4},
-		CreatedAt:         "2026-08-09T20:00:00Z",
+		ManifestDigest:          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		PhysicalToLogical:       map[string]string{"ENVBANK_B1_HASH_TOKEN": "TOKEN"},
+		Sources:                 map[string]SourceStatus{"TOKEN": {Source: "generate", Status: "ready"}},
+		RecordRevisions:         map[string]int64{"TOKEN": 4},
+		PreviousRecordRevisions: map[string][]int64{"TOKEN": {2, 3}},
+		CreatedAt:               "2026-08-09T20:00:00Z",
 	}
 	if err := snapshot.Validate(); err != nil {
 		t.Fatal(err)
@@ -17,6 +18,21 @@ func TestSnapshotSchemaValidation(t *testing.T) {
 	snapshot.RecordRevisions["TOKEN"] = 0
 	if err := snapshot.Validate(); err == nil {
 		t.Fatal("zero source revision was accepted")
+	}
+}
+
+func TestSnapshotRejectsInvalidPreviousRevisionEvidence(t *testing.T) {
+	snapshot := Snapshot{
+		Version: SnapshotVersion, Bundle: "short-editor/example/staging",
+		ManifestDigest:          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		PhysicalToLogical:       map[string]string{"ENVBANK_B1_HASH_TOKEN": "TOKEN"},
+		Sources:                 map[string]SourceStatus{"TOKEN": {Source: "generate", Status: "ready"}},
+		RecordRevisions:         map[string]int64{"TOKEN": 4},
+		PreviousRecordRevisions: map[string][]int64{"TOKEN": {3, 4}},
+		CreatedAt:               "2026-08-09T20:00:00Z",
+	}
+	if err := snapshot.Validate(); err == nil {
+		t.Fatal("current revision was accepted as previous revision evidence")
 	}
 }
 
