@@ -1,15 +1,15 @@
 # Current work
 
-## Milestone 9: EnvBank OSS v0.2.0 feature release — preparation complete
+## Milestone 9: EnvBank OSS v0.2.0 feature release — complete
 
 - [x] Repair the scheduled full-history Gitleaks scan with version-compatible,
   narrowly scoped allowlists and an executable history regression.
 - [x] Prepare an exact-tag v0.2.0 prerelease workflow, release notes, current
   installation guidance, anonymous verifier, and a cgo-enabled macOS archive
   that includes Keychain-backed Railway credential support.
-- [ ] Merge the preparation through protected `main`, create the annotated
+- [x] Merge the preparation through protected `main`, create the annotated
   `v0.2.0` tag, and publish the prerelease plus `v0.2.0`/`0.2` GHCR tags.
-- [ ] Verify the public release anonymously, record immutable evidence, update
+- [x] Verify the public release anonymously, record immutable evidence, update
   the website to v0.2.0, and install the verified macOS binary on PATH.
 
 ## Milestone 8: Railway apply, resume, and names-only verification — complete

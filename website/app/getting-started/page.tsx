@@ -22,9 +22,9 @@ const steps = [
 export default function GettingStarted() {
   return (
     <>
-      <section className="page-hero shell"><p className="eyebrow">First vault tutorial</p><h1>From zero to an injected process.</h1><p>Six deliberate steps. Plaintext stays out of command arguments and environment files.</p><div className="page-meta"><span>~10 minutes</span><span>Local service</span><span>v0.1.1</span></div></section>
+      <section className="page-hero shell"><p className="eyebrow">First vault tutorial</p><h1>From zero to an injected process.</h1><p>Six deliberate steps. Plaintext stays out of command arguments and environment files.</p><div className="page-meta"><span>~10 minutes</span><span>Local service</span><span>v0.2.0</span></div></section>
       <div className="tutorial shell">
-        <aside className="tutorial-aside"><p>Before you begin</p><ul><li><Link href="/install">Install the v0.1.1 binary</Link></li><li>Open two terminal windows</li><li>Choose secure paths outside your repository</li></ul><p className="aside-warning">Never commit device configs, passphrase files, recovery artifacts, or plaintext values.</p></aside>
+        <aside className="tutorial-aside"><p>Before you begin</p><ul><li><Link href="/install">Install the v0.2.0 binary</Link></li><li>Open two terminal windows</li><li>Choose secure paths outside your repository</li></ul><p className="aside-warning">Never commit device configs, passphrase files, recovery artifacts, or plaintext values.</p></aside>
         <div className="steps">
           {steps.map((step, index) => <section className="step" key={step.title} aria-labelledby={`step-${index + 1}`}><div className="step-number">{String(index + 1).padStart(2, "0")}</div><div><p className="step-label">Step {index + 1} of {steps.length}</p><h2 id={`step-${index + 1}`}>{step.title}</h2><p>{step.body}</p><CodeBlock label={step.label}>{step.code}</CodeBlock></div></section>)}
         </div>
