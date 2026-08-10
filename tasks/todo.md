@@ -1,8 +1,14 @@
 # Current work
 
-## Milestone 7: Railway identity binding and names-only planning — pending
+## Milestone 8: Railway apply, resume, and names-only verification — complete
 
-- [ ] Add an in-process Railway metadata adapter that binds the credential,
+- [x] Add separately confirmed Railway variable writes, partial-failure resume,
+  and sanitized verification while forbidding deployment mutations and blind
+  deletion.
+
+## Milestone 7: Railway identity binding and names-only planning — complete
+
+- [x] Add an in-process Railway metadata adapter that binds the credential,
   project, environment, and exact service IDs, then creates names-only plans
   without value reads, provider writes, or deployment mutations.
 

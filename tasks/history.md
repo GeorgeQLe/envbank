@@ -2,6 +2,40 @@
 
 ## 2026-08-09
 
+- Hardened the Milestone 8 Railway rollout after PR #22 review: environment
+  binding now requires the manifest name and token-scoped ID on the same unique
+  node, and unusable HTTP 2xx write responses retain ambiguous retry semantics.
+  Added cross-environment, malformed, oversized, unreadable, GraphQL-envelope,
+  mutation-decoding, sanitization, and status-classification regressions.
+- Added interactive `railway apply`, confirmed-operation `railway resume`, and
+  read-only `railway verify` commands over encrypted rollout state, with exact
+  credential, target, snapshot, manifest, service-ID, and record-revision
+  revalidation.
+- Allowlisted only Railway single-variable upserts with `skipDeploys: true`.
+  Writes checkpoint before and after each request, committed actions are
+  skipped on resume, and ambiguous exact upserts are safely repeatable without
+  regenerating values.
+- Kept Railway verification names-only: immutable metadata is re-resolved,
+  provider presence is reported as unknown, local committed-write evidence is
+  shown separately, and staged changes are distinguished from uninspected
+  deployed state. Intended absence never becomes a blind deletion.
+- Covered partial service failure, post-failure resume, committed-write
+  non-repetition, public constants, secret and provider-body redaction,
+  skip-deploy enforcement, forbidden GraphQL operations, and names-only CLI
+  verification with loopback integration tests.
+- Added `railway bind` with trusted-stdin project-token intake, verification of
+  the token-scoped immutable project/environment identity, exact four-service
+  name-to-ID resolution, and bundle-scoped macOS Keychain storage only after a
+  successful bind.
+- Added a bounded in-process Railway GraphQL transport whose production
+  allowlist contains only project-token identity and project metadata queries;
+  redirects, oversized responses, arbitrary GraphQL bodies, unsafe error codes,
+  wrong token scopes, duplicate service names, and service-ID drift fail closed.
+- Added encrypted 15-minute names-only plans that bind all four service IDs,
+  manifest and snapshot revisions, required and intended-absent variable names,
+  and exact record revisions while reporting provider state as `unverifiable`.
+  Names-only plans are structurally non-applicable and the Railway adapter has
+  no variable-value query, provider mutation, or deployment document.
 - Added the provider-neutral rollout boundary with declared capability gates,
   callback-scoped non-serializable secret requests, bounded metadata-only
   evidence, and provider-error sanitization that discards arbitrary bodies.

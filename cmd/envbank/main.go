@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -27,8 +29,13 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/nativehost"
 	"github.com/GeorgeQLe/envbank/internal/password"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
+	"github.com/GeorgeQLe/envbank/internal/provider"
+	"github.com/GeorgeQLe/envbank/internal/provider/railway"
+	"github.com/GeorgeQLe/envbank/internal/rollout"
 	"github.com/GeorgeQLe/envbank/internal/secure"
 	"github.com/GeorgeQLe/envbank/internal/server"
+	"github.com/GeorgeQLe/envbank/internal/vaultobject"
+	"github.com/mattn/go-isatty"
 )
 
 const (
@@ -125,6 +132,8 @@ func run(args []string) error {
 		return recoveryRestore(args[1:])
 	case "bundle":
 		return bundleCommand(args[1:])
+	case "railway":
+		return railwayCommand(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -172,6 +181,11 @@ Usage:
   envbank bundle check --manifest PATH
   envbank bundle prepare --manifest PATH [auth flags]  # missing imports from a JSON object on stdin
   envbank bundle status --manifest PATH [auth flags]
+  envbank railway bind --manifest PATH [auth flags]  # project token from trusted stdin
+  envbank railway plan --manifest PATH [auth flags]
+  envbank railway apply --plan PLAN_ID [auth flags]
+  envbank railway resume --operation OPERATION_ID [auth flags]
+  envbank railway verify --bundle BUNDLE [auth flags]
 
 Auth flags:
   --config PATH           encrypted device config
@@ -181,6 +195,389 @@ If --passphrase-file is omitted, ENVBANK_PASSPHRASE is used. Secret values are
 never accepted as command-line arguments. If --recovery-passphrase-file is
 omitted, ENVBANK_RECOVERY_PASSPHRASE is used.
 `)
+}
+
+var railwayCredentialStore keychain.Store = keychain.SystemStore{}
+var railwayAdapterOptions = func() railway.Options { return railway.Options{} }
+var railwayConfirmation rollout.ConfirmFunc = confirmRailwayWrites
+
+func railwayCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("railway subcommand is required (supported: bind, plan, apply, resume, verify)")
+	}
+	switch args[0] {
+	case "bind":
+		return railwayBind(args[1:])
+	case "plan":
+		return railwayPlan(args[1:])
+	case "apply":
+		return railwayApply(args[1:])
+	case "resume":
+		return railwayResume(args[1:])
+	case "verify":
+		return railwayVerify(args[1:])
+	default:
+		return fmt.Errorf("unknown railway subcommand %q", args[0])
+	}
+}
+
+func railwayApply(args []string) error {
+	fs := flag.NewFlagSet("railway apply", flag.ContinueOnError)
+	planID := fs.String("plan", "", "encrypted provider plan ID")
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *planID == "" || fs.NArg() != 0 {
+		return errors.New("railway apply requires --plan PLAN_ID and no positional arguments")
+	}
+	api, secrets, err := unlockedAPI(auth)
+	if err != nil {
+		return err
+	}
+	vaultKey, err := requireVaultKey(secrets)
+	if err != nil {
+		return err
+	}
+	store := &rollout.EncryptedStore{API: api, VaultKey: vaultKey}
+	plan, _, err := store.LoadPlan(context.Background(), *planID)
+	if err != nil {
+		return err
+	}
+	adapter, err := railwayAdapterForBundle(api.Config.VaultID, plan.Bundle)
+	if err != nil {
+		return err
+	}
+	defer adapter.Close()
+	operation, err := (&rollout.Engine{Adapter: adapter, Store: store}).Apply(
+		context.Background(), *planID, railwayConfirmation)
+	printRailwayOperation(operation)
+	return err
+}
+
+func railwayResume(args []string) error {
+	fs := flag.NewFlagSet("railway resume", flag.ContinueOnError)
+	operationID := fs.String("operation", "", "encrypted rollout operation ID")
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *operationID == "" || fs.NArg() != 0 {
+		return errors.New("railway resume requires --operation OPERATION_ID and no positional arguments")
+	}
+	api, secrets, err := unlockedAPI(auth)
+	if err != nil {
+		return err
+	}
+	vaultKey, err := requireVaultKey(secrets)
+	if err != nil {
+		return err
+	}
+	store := &rollout.EncryptedStore{API: api, VaultKey: vaultKey}
+	operation, _, err := store.LoadOperation(context.Background(), *operationID)
+	if err != nil {
+		return err
+	}
+	adapter, err := railwayAdapterForBundle(api.Config.VaultID, operation.Bundle)
+	if err != nil {
+		return err
+	}
+	defer adapter.Close()
+	operation, err = (&rollout.Engine{Adapter: adapter, Store: store}).Resume(context.Background(), *operationID)
+	printRailwayOperation(operation)
+	return err
+}
+
+func railwayVerify(args []string) error {
+	fs := flag.NewFlagSet("railway verify", flag.ContinueOnError)
+	bundleID := fs.String("bundle", "", "bundle identifier")
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *bundleID == "" || fs.NArg() != 0 {
+		return errors.New("railway verify requires --bundle BUNDLE and no positional arguments")
+	}
+	api, secrets, err := unlockedAPI(auth)
+	if err != nil {
+		return err
+	}
+	vaultKey, err := requireVaultKey(secrets)
+	if err != nil {
+		return err
+	}
+	plan, operation, err := latestRailwayEvidence(api, vaultKey, *bundleID)
+	if err != nil {
+		return err
+	}
+	adapter, err := railwayAdapterForBundle(api.Config.VaultID, *bundleID)
+	if err != nil {
+		return err
+	}
+	defer adapter.Close()
+	identity, err := adapter.Identity(context.Background())
+	if err != nil {
+		return providerSafeError("identity", err)
+	}
+	if identity.Provider != plan.Provider || identity.ID != plan.ProviderIdentity {
+		return errors.New("provider identity does not match the latest plan")
+	}
+	if _, err := adapter.Inspect(context.Background(), provider.Target{ProjectID: plan.Target.ProjectID,
+		EnvironmentID: plan.Target.EnvironmentID, ServiceIDs: plan.Target.ServiceIDs}); err != nil {
+		return providerSafeError("inspect", err)
+	}
+	store := &rollout.EncryptedStore{API: api, VaultKey: vaultKey}
+	if err := store.ValidateSnapshot(context.Background(), plan); err != nil {
+		return err
+	}
+	fmt.Printf("bundle: %s\nprovider: railway\nproject id: %s\nenvironment id: %s\nlocal snapshot revision: %d\nnames:\n",
+		plan.Bundle, plan.Target.ProjectID, plan.Target.EnvironmentID, plan.SnapshotRevision)
+	for _, item := range plan.Names {
+		write := "not-written"
+		for _, action := range operation.Actions {
+			if action.Action.Service == item.Service && action.Action.Name == item.Name && action.WriteEvidence != nil {
+				write = "committed"
+				break
+			}
+		}
+		fmt.Printf("  %s/%s: desired=%s presence=unknown local-write=%s\n", item.Service, item.Name, item.Desired, write)
+	}
+	fmt.Printf("operation: %s\noperation status: %s\nprovider verification: limited (names-only metadata unavailable)\n", operation.ID, operation.Status)
+	fmt.Println("staged changes: committed writes recorded locally; exact provider state is unreadable without values")
+	fmt.Println("deployed state: not inspected; no deployment mutation issued")
+	if operation.Status == rollout.StatusReady || operation.Status == rollout.StatusLimited {
+		fmt.Println("status: ready for separately authorized deployment")
+	} else {
+		fmt.Printf("status: incomplete; resume operation %s before deployment authorization\n", operation.ID)
+	}
+	return nil
+}
+
+func railwayBind(args []string) error {
+	fs := flag.NewFlagSet("railway bind", flag.ContinueOnError)
+	manifestPath := fs.String("manifest", "", "bundle manifest path")
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *manifestPath == "" || fs.NArg() != 0 {
+		return errors.New("railway bind requires --manifest PATH and no positional arguments")
+	}
+	document, err := loadBundleManifest(*manifestPath)
+	if err != nil {
+		return err
+	}
+	binding, err := railway.BindingRequestForManifest(document)
+	if err != nil {
+		return err
+	}
+	api, _, err := unlockedAPI(auth)
+	if err != nil {
+		return err
+	}
+	token, err := readRailwayCredential(os.Stdin)
+	if err != nil {
+		return err
+	}
+	defer clearBytes(token)
+	adapter, err := railway.New(token, railwayAdapterOptions())
+	if err != nil {
+		return err
+	}
+	defer adapter.Close()
+	target, err := adapter.Bind(context.Background(), binding)
+	if err != nil {
+		return providerSafeError("bind", err)
+	}
+	account, err := railway.CredentialAccount(api.Config.VaultID, document.Manifest.Bundle)
+	if err != nil {
+		return err
+	}
+	if err := railwayCredentialStore.Put(railway.CredentialService, account, token); err != nil {
+		return errors.New("verified Railway project credential could not be stored in Keychain")
+	}
+	fmt.Printf("bundle: %s\nprovider: railway\nproject id: %s\nenvironment id: %s\nservices:\n",
+		document.Manifest.Bundle, target.ProjectID, target.EnvironmentID)
+	for _, name := range railway.SiftCutServiceNames() {
+		fmt.Printf("  %s: %s\n", name, target.ServiceIDs[name])
+	}
+	fmt.Println("status: bound")
+	return nil
+}
+
+func railwayPlan(args []string) error {
+	fs := flag.NewFlagSet("railway plan", flag.ContinueOnError)
+	manifestPath := fs.String("manifest", "", "bundle manifest path")
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *manifestPath == "" || fs.NArg() != 0 {
+		return errors.New("railway plan requires --manifest PATH and no positional arguments")
+	}
+	document, err := loadBundleManifest(*manifestPath)
+	if err != nil {
+		return err
+	}
+	binding, err := railway.BindingRequestForManifest(document)
+	if err != nil {
+		return err
+	}
+	api, secrets, err := unlockedAPI(auth)
+	if err != nil {
+		return err
+	}
+	vaultKey, err := requireVaultKey(secrets)
+	if err != nil {
+		return err
+	}
+	snapshot, snapshotRevision, err := bundle.LoadSnapshot(api, vaultKey, document.Manifest.Bundle)
+	if err != nil {
+		return err
+	}
+	account, err := railway.CredentialAccount(api.Config.VaultID, document.Manifest.Bundle)
+	if err != nil {
+		return err
+	}
+	token, err := railway.LoadCredential(railwayCredentialStore, account)
+	if err != nil {
+		return err
+	}
+	defer clearBytes(token)
+	adapter, err := railway.New(token, railwayAdapterOptions())
+	if err != nil {
+		return err
+	}
+	defer adapter.Close()
+	target, err := adapter.Bind(context.Background(), binding)
+	if err != nil {
+		return providerSafeError("bind", err)
+	}
+	input, err := railway.BuildNamesOnlyInput(document, snapshot, snapshotRevision, target)
+	if err != nil {
+		return err
+	}
+	engine := rollout.Engine{Adapter: adapter, Store: &rollout.EncryptedStore{API: api, VaultKey: vaultKey}}
+	plan, err := engine.Plan(context.Background(), input)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("plan: %s\nbundle: %s\nprovider: railway\nproject id: %s\nenvironment id: %s\nexpires: %s\nnames:\n",
+		plan.ID(), plan.Bundle, plan.Target.ProjectID, plan.Target.EnvironmentID, plan.ExpiresAt)
+	for _, item := range plan.Names {
+		fmt.Printf("  %s/%s: desired=%s state=%s\n", item.Service, item.Name, item.Desired, item.State)
+	}
+	fmt.Println("status: names-only; no provider values read and no provider changes made")
+	return nil
+}
+
+func railwayAdapterForBundle(vaultID, bundleID string) (*railway.Adapter, error) {
+	account, err := railway.CredentialAccount(vaultID, bundleID)
+	if err != nil {
+		return nil, err
+	}
+	token, err := railway.LoadCredential(railwayCredentialStore, account)
+	if err != nil {
+		return nil, err
+	}
+	defer clearBytes(token)
+	return railway.New(token, railwayAdapterOptions())
+}
+
+func confirmRailwayWrites(_ context.Context, request rollout.Confirmation) error {
+	if request.Kind != "apply" || request.Destructive || request.Provider != railway.ProviderName ||
+		request.ActionCount < 1 || !isatty.IsTerminal(os.Stdin.Fd()) {
+		return errors.New("Railway apply confirmation requires an interactive terminal")
+	}
+	fmt.Fprintf(os.Stderr, "Apply %d Railway variable writes for %s with deployments skipped? Type apply: ",
+		request.ActionCount, request.Bundle)
+	answer, err := bufio.NewReader(io.LimitReader(os.Stdin, 32)).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return errors.New("Railway apply confirmation could not be read")
+	}
+	if strings.TrimSpace(answer) != "apply" {
+		return errors.New("Railway apply confirmation was declined")
+	}
+	return nil
+}
+
+func printRailwayOperation(operation rollout.Operation) {
+	if operation.ID == "" {
+		return
+	}
+	fmt.Printf("operation: %s\nbundle: %s\nstatus: %s\nactions:\n",
+		operation.ID, operation.Bundle, operation.Status)
+	for _, item := range operation.Actions {
+		fmt.Printf("  %s/%s: %s attempts=%d\n", item.Action.Service, item.Action.Name, item.Status, item.Attempts)
+	}
+	if operation.Status == rollout.StatusReady || operation.Status == rollout.StatusLimited {
+		fmt.Println("staged changes: committed writes recorded locally")
+		fmt.Println("deployed state: not inspected; no deployment mutation issued")
+		fmt.Println("deployment: ready for separately authorized deployment")
+	}
+}
+
+func latestRailwayEvidence(api *client.API, vaultKey []byte, bundleID string) (rollout.ProviderPlan, rollout.Operation, error) {
+	objects, err := api.ListObjects(vaultKey)
+	if err != nil {
+		return rollout.ProviderPlan{}, rollout.Operation{}, err
+	}
+	var operation rollout.Operation
+	for _, object := range objects {
+		if object.Kind != vaultobject.KindRolloutOperation {
+			continue
+		}
+		var candidate rollout.Operation
+		if json.Unmarshal(object.Payload, &candidate) != nil || candidate.Bundle != bundleID ||
+			candidate.Provider != railway.ProviderName || candidate.Validate() != nil {
+			continue
+		}
+		if operation.UpdatedAt == "" || candidate.UpdatedAt > operation.UpdatedAt {
+			operation = candidate
+		}
+	}
+	if operation.ID == "" {
+		return rollout.ProviderPlan{}, rollout.Operation{}, errors.New("no confirmed Railway operation exists for the bundle")
+	}
+	store := &rollout.EncryptedStore{API: api, VaultKey: vaultKey}
+	plan, _, err := store.LoadPlan(context.Background(), operation.PlanID)
+	if err != nil {
+		return rollout.ProviderPlan{}, rollout.Operation{}, err
+	}
+	if !rollout.OperationMatchesPlan(operation, plan) {
+		return rollout.ProviderPlan{}, rollout.Operation{}, errors.New("Railway operation does not match its provider plan")
+	}
+	return plan, operation, nil
+}
+
+func readRailwayCredential(reader io.Reader) ([]byte, error) {
+	if reader == nil {
+		return nil, errors.New("Railway project credential is required on trusted stdin")
+	}
+	raw, err := io.ReadAll(io.LimitReader(reader, (16<<10)+1))
+	if err != nil || len(raw) > 16<<10 {
+		clearBytes(raw)
+		return nil, errors.New("Railway project credential could not be read from trusted stdin")
+	}
+	token := bytes.TrimSpace(raw)
+	if len(token) == 0 || bytes.IndexFunc(token, func(character rune) bool { return character <= ' ' || character == 0x7f }) >= 0 {
+		clearBytes(raw)
+		return nil, errors.New("Railway project credential is invalid")
+	}
+	result := append([]byte(nil), token...)
+	clearBytes(raw)
+	return result, nil
+}
+
+func providerSafeError(operation string, err error) error {
+	safe := provider.SanitizeError(operation, err)
+	return safe
+}
+
+func clearBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }
 
 func bundleCommand(args []string) error {
