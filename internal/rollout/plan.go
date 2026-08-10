@@ -14,6 +14,7 @@ import (
 const (
 	PlanVersion = 1
 	PlanTTL     = 15 * time.Minute
+	MaxActions  = 512
 )
 
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -48,6 +49,11 @@ type Action struct {
 	ExpectedRecordRevision int64  `json:"expected_record_revision,omitempty"`
 }
 
+// ID returns the opaque local identifier used to store and later apply the
+// plan. The digest already binds every plan field, so no second identifier is
+// required.
+func (plan ProviderPlan) ID() string { return plan.Digest }
+
 // ComputeDigest hashes the canonical JSON representation with Digest empty.
 // Action order is intentionally significant.
 func (plan ProviderPlan) ComputeDigest() (string, error) {
@@ -80,8 +86,14 @@ func (plan ProviderPlan) Validate(now time.Time) error {
 	if !now.Before(expires) {
 		return errors.New("provider plan has expired")
 	}
+	if now.Before(created) {
+		return errors.New("provider plan is not yet valid")
+	}
 	if plan.Target.ProjectID == "" || plan.Target.EnvironmentID == "" || plan.Target.ServiceIDs == nil {
 		return errors.New("provider plan target binding is incomplete")
+	}
+	if len(plan.Actions) == 0 || len(plan.Actions) > MaxActions {
+		return fmt.Errorf("provider plan must contain between 1 and %d actions", MaxActions)
 	}
 	seenActions := make(map[string]struct{}, len(plan.Actions))
 	for index, action := range plan.Actions {
@@ -93,16 +105,35 @@ func (plan ProviderPlan) Validate(now time.Time) error {
 			return fmt.Errorf("provider plan action %d has a duplicate ID", index)
 		}
 		seenActions[action.ID] = struct{}{}
-		if bound := plan.Target.ServiceIDs[action.Service]; bound != action.ServiceID {
-			return fmt.Errorf("provider plan action %d has an invalid service binding", index)
-		}
-		if action.Record != "" && action.ExpectedRecordRevision < 1 {
-			return fmt.Errorf("provider plan action %d has an invalid record revision", index)
+		if err := validateAction(index, action, plan.Target); err != nil {
+			return err
 		}
 	}
 	want, err := plan.ComputeDigest()
 	if err != nil || plan.Digest != want {
 		return errors.New("provider plan digest is invalid")
+	}
+	return nil
+}
+
+func validateAction(index int, action Action, target TargetBinding) error {
+	if action.ID == "" || action.Operation == "" || action.Service == "" ||
+		action.ServiceID == "" || action.Name == "" {
+		return fmt.Errorf("provider plan action %d is incomplete", index)
+	}
+	switch action.Operation {
+	case "create", "update", "upsert", "revoke":
+	default:
+		return fmt.Errorf("provider plan action %d has an invalid operation", index)
+	}
+	if bound := target.ServiceIDs[action.Service]; bound != action.ServiceID {
+		return fmt.Errorf("provider plan action %d has an invalid service binding", index)
+	}
+	if action.Operation != "revoke" && (action.Record == "" || action.ExpectedRecordRevision < 1) {
+		return fmt.Errorf("provider plan action %d has an invalid record revision", index)
+	}
+	if action.Operation == "revoke" && (action.Record != "" || action.ExpectedRecordRevision != 0) {
+		return fmt.Errorf("provider plan action %d has unexpected record state", index)
 	}
 	return nil
 }

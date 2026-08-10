@@ -133,6 +133,34 @@ This is a new authorization domain. Recovery cannot reproduce old device
 authorization, revocation history, replay state, access events, or the original
 vault key.
 
+## Provider-neutral rollout state
+
+Provider automation crosses a narrow local adapter boundary. Each adapter
+declares create, metadata-read, update, validate, revoke, idempotency, and
+masked-presence capabilities. A write request exposes its secret bytes only to
+an in-process callback; formatting is redacted, JSON encoding is rejected, and
+the request is cleared after the adapter returns. Arbitrary provider errors and
+response bodies are discarded in favor of bounded status, code, and retry
+metadata. Provider evidence accepts only bounded identifiers, canonical UTC
+timestamps, presence, and explicit verified-or-limited results.
+
+Metadata-only planning binds the manifest digest, current encrypted snapshot
+revision, exact logical record revisions, immutable provider identity, project,
+environment, service IDs, ordered actions, and a 15-minute expiry into a
+digest-addressed encrypted plan. A new apply must use an unexpired plan and
+revalidate every binding. It requires an interactive confirmation immediately
+before the first write and a separate confirmation before revoke actions.
+
+Each action is durably checkpointed as `in_flight` before calling the adapter
+and as `committed` immediately after valid provider evidence returns. Resume
+skips committed actions. An ambiguous write is retried with the same key only
+when the provider declares idempotency; otherwise metadata inspection must
+prove committed or absent state, and an unprovable outcome stops for explicit
+reconciliation. A confirmed operation may resume after its plan expires, but
+all identity, target, snapshot, and record bindings remain mandatory. Final
+verification distinguishes verified presence from provider limitations and
+stops at `ready-to-deploy`; the engine has no deployment behavior.
+
 ## Device revocation
 
 Approved devices have an optional server-side revocation timestamp. Device
