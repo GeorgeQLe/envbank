@@ -32,3 +32,22 @@ func TestValidateSnapshotBindingsChecksCurrentRecordBeforeApply(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateSnapshotBindingsChecksNamesOnlyRecordRevisions(t *testing.T) {
+	plan := ProviderPlan{Bundle: "short-editor/example/staging", ManifestDigest: strings.Repeat("a", 64),
+		SnapshotRevision: 3, Target: TargetBinding{ServiceIDs: map[string]string{"api": "api-id"}},
+		Kind: PlanKindNamesOnly, Names: []PlannedName{{Service: "api", ServiceID: "api-id",
+			Name: "DATABASE_URL", Desired: "present", State: "unverifiable",
+			Record: "database-url", ExpectedRecordRevision: 8}}}
+	snapshot := bundle.Snapshot{Bundle: plan.Bundle, ManifestDigest: plan.ManifestDigest,
+		RecordRevisions: map[string]int64{"database-url": 8}}
+	physical := bundle.PhysicalName(plan.Bundle, "database-url")
+	if err := validateSnapshotBindings(plan, 3, snapshot,
+		[]protocol.SecretRecord{{Name: physical, Revision: 8}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSnapshotBindings(plan, 3, snapshot,
+		[]protocol.SecretRecord{{Name: physical, Revision: 9}}); err == nil {
+		t.Fatal("stale names-only record binding was accepted")
+	}
+}

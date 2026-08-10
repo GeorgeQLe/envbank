@@ -20,6 +20,8 @@ type PlanInput struct {
 	ManifestDigest   string
 	SnapshotRevision int64
 	Target           TargetBinding
+	Kind             PlanKind
+	Names            []PlannedName
 	Actions          []Action
 }
 
@@ -76,6 +78,7 @@ func (engine *Engine) Plan(ctx context.Context, input PlanInput) (ProviderPlan, 
 		Version: PlanVersion, Bundle: input.Bundle, ManifestDigest: input.ManifestDigest,
 		SnapshotRevision: input.SnapshotRevision, Provider: identity.Provider,
 		ProviderIdentity: identity.ID, Target: cloneBinding(input.Target),
+		Kind: input.Kind, Names: append([]PlannedName(nil), input.Names...),
 		Actions: append([]Action(nil), input.Actions...), CreatedAt: now.Format(time.RFC3339),
 		ExpiresAt: now.Add(PlanTTL).Format(time.RFC3339),
 	}
@@ -104,6 +107,9 @@ func (engine *Engine) Apply(ctx context.Context, planID string, confirm ConfirmF
 	plan, _, err := engine.Store.LoadPlan(ctx, planID)
 	if err != nil {
 		return Operation{}, err
+	}
+	if len(plan.Actions) == 0 {
+		return Operation{}, errors.New("provider plan has no confirmed writes")
 	}
 	if err := engine.validatePlanContext(ctx, plan, true); err != nil {
 		return Operation{}, err
@@ -179,7 +185,7 @@ func (engine *Engine) advance(ctx context.Context, plan ProviderPlan, operation 
 		if item.Status == ActionVerified || item.Status == ActionLimited || item.Status == ActionCommitted {
 			continue
 		}
-		if item.Status == ActionInFlight && !capabilities.SupportsIdempotencyKey {
+		if item.Status == ActionInFlight && !retriableWrite(capabilities) {
 			resolved := reconcileAction(item, metadata, engine.nowString())
 			if !resolved {
 				operation.Status = StatusReconciliation
@@ -207,6 +213,8 @@ func (engine *Engine) advance(ctx context.Context, plan ProviderPlan, operation 
 			if err != nil {
 				return operation, err
 			}
+		} else {
+			value = []byte(item.Action.PublicValue)
 		}
 		operation.Status = StatusWriting
 		item.Status = ActionInFlight
@@ -234,7 +242,7 @@ func (engine *Engine) advance(ctx context.Context, plan ProviderPlan, operation 
 			}
 			if safe.Retry == provider.RetryNever {
 				operation.Status = StatusFailed
-			} else if safe.Retry == provider.RetryAmbiguous && !capabilities.SupportsIdempotencyKey {
+			} else if safe.Retry == provider.RetryAmbiguous && !retriableWrite(capabilities) {
 				operation.Status = StatusReconciliation
 			} else {
 				operation.Status = StatusRetryable
@@ -457,6 +465,10 @@ func actionsSupported(actions []Action, capabilities provider.Capabilities) erro
 	return nil
 }
 
+func retriableWrite(capabilities provider.Capabilities) bool {
+	return capabilities.SupportsIdempotencyKey || capabilities.SupportsIdempotentWrite
+}
+
 func operationMatchesPlan(operation Operation, plan ProviderPlan) bool {
 	if operation.PlanDigest != plan.Digest || operation.Bundle != plan.Bundle ||
 		operation.ManifestDigest != plan.ManifestDigest || operation.SnapshotRevision != plan.SnapshotRevision ||
@@ -470,6 +482,12 @@ func operationMatchesPlan(operation Operation, plan ProviderPlan) bool {
 		}
 	}
 	return true
+}
+
+// OperationMatchesPlan verifies every immutable operation binding against the
+// encrypted plan that authorized it.
+func OperationMatchesPlan(operation Operation, plan ProviderPlan) bool {
+	return operationMatchesPlan(operation, plan)
 }
 
 func providerTarget(binding TargetBinding) provider.Target {

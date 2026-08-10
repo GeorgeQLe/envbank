@@ -1,0 +1,200 @@
+package railway
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/GeorgeQLe/envbank/internal/provider"
+)
+
+func TestBindAndInspectUseOnlyIdentityAndTargetMetadata(t *testing.T) {
+	operations := make([]string, 0)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Project-Access-Token") != "project-token-fixture" ||
+			request.Header.Get("Authorization") != "" {
+			t.Error("request did not use project-token authentication")
+		}
+		var body struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case strings.Contains(body.Query, "EnvBankRailwayIdentity"):
+			operations = append(operations, "EnvBankRailwayIdentity")
+			fmt.Fprint(response, `{"data":{"projectToken":{"projectId":"project-id","environmentId":"environment-id"}}}`)
+		case strings.Contains(body.Query, "EnvBankRailwayTarget"):
+			operations = append(operations, "EnvBankRailwayTarget")
+			fmt.Fprint(response, targetResponse())
+		default:
+			t.Fatalf("forbidden GraphQL document: %s", body.Query)
+		}
+	}))
+	defer server.Close()
+
+	adapter, err := New([]byte("project-token-fixture"), Options{Endpoint: server.URL, Client: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	request := BindingRequest{Project: "siftcut-staging", Environment: "staging",
+		Services: map[string]string{"postgres": "", "migrator": "", "api": "", "web": ""}}
+	target, err := adapter.Bind(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ProjectID != "project-id" || target.EnvironmentID != "environment-id" ||
+		target.ServiceIDs["postgres"] != "postgres-id" || len(target.ServiceIDs) != 4 {
+		t.Fatalf("unexpected binding: %+v", target)
+	}
+	metadata, err := adapter.Inspect(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for service, variables := range metadata.Variables {
+		if len(variables) != 0 {
+			t.Fatalf("service %s unexpectedly contained variable metadata", service)
+		}
+	}
+	for _, operation := range operations {
+		if operation != "EnvBankRailwayIdentity" && operation != "EnvBankRailwayTarget" {
+			t.Fatalf("unexpected operation %s", operation)
+		}
+	}
+}
+
+func TestBindingFailsClosedOnIdentityAndServiceDrift(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		if strings.Contains(body.Query, "Identity") {
+			fmt.Fprint(response, `{"data":{"projectToken":{"projectId":"wrong-project","environmentId":"environment-id"}}}`)
+			return
+		}
+		fmt.Fprint(response, targetResponse())
+	}))
+	defer server.Close()
+	adapter, err := New([]byte("token"), Options{Endpoint: server.URL, Client: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	_, err = adapter.Bind(context.Background(), BindingRequest{Project: "siftcut-staging",
+		ProjectID: "project-id", Environment: "staging", Services: map[string]string{"api": "api-id"}})
+	var safe provider.Error
+	if !strings.Contains(fmt.Sprint(err), "TARGET_ID_MISMATCH") || !errors.As(err, &safe) {
+		t.Fatalf("wrong project token did not fail safely: %v", err)
+	}
+}
+
+func TestGraphQLErrorsDiscardMessagesAndBodies(t *testing.T) {
+	const sentinel = "provider-response-secret-SENTINEL-41"
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		fmt.Fprintf(response, `{"errors":[{"message":%q,"extensions":{"code":%q}}]}`,
+			sentinel, "unsafe code "+sentinel)
+	}))
+	defer server.Close()
+	adapter, err := New([]byte("token"), Options{Endpoint: server.URL, Client: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	_, err = adapter.Identity(context.Background())
+	if err == nil || strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("GraphQL error was not safely bounded: %v", err)
+	}
+}
+
+func TestBindingRejectsDuplicateServiceResolution(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		if strings.Contains(body.Query, "Identity") {
+			fmt.Fprint(response, `{"data":{"projectToken":{"projectId":"project-id","environmentId":"environment-id"}}}`)
+			return
+		}
+		duplicate := strings.Replace(targetResponse(),
+			`{"node":{"id":"api-id","name":"api"}}`,
+			`{"node":{"id":"api-id","name":"api"}},{"node":{"id":"other-api-id","name":"api"}}`, 1)
+		fmt.Fprint(response, duplicate)
+	}))
+	defer server.Close()
+	adapter, err := New([]byte("token"), Options{Endpoint: server.URL, Client: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	_, err = adapter.Bind(context.Background(), BindingRequest{Project: "siftcut-staging",
+		Environment: "staging", Services: map[string]string{"api": ""}})
+	if err == nil || !strings.Contains(err.Error(), "SERVICE_RESOLUTION") {
+		t.Fatalf("duplicate service name was accepted: %v", err)
+	}
+}
+
+func TestWriteUsesOnlySkipDeployVariableUpsertAndVerifyReadsNoValues(t *testing.T) {
+	const secret = "write-value-SENTINEL-82"
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		var body struct {
+			Query     string `json:"query"`
+			Variables struct {
+				Input struct {
+					ProjectID, EnvironmentID, ServiceID, Name, Value string
+					SkipDeploys                                      bool
+				} `json:"input"`
+			} `json:"variables"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		lowerQuery := strings.ToLower(body.Query)
+		if body.Variables.Input.Value != secret {
+			t.Fatal("Railway write did not receive the callback-scoped value")
+		}
+		if !strings.Contains(body.Query, "EnvBankRailwayVariableUpsert") ||
+			strings.Contains(lowerQuery, "serviceinstancedeploy") || strings.Contains(lowerQuery, "redeploy") ||
+			strings.Contains(lowerQuery, "restart") ||
+			body.Variables.Input.ProjectID != "project-id" ||
+			body.Variables.Input.EnvironmentID != "environment-id" ||
+			body.Variables.Input.ServiceID != "api-id" || body.Variables.Input.Name != "SECRET" ||
+			!body.Variables.Input.SkipDeploys {
+			t.Fatalf("unexpected sanitized write request: query=%q name=%q", body.Query, body.Variables.Input.Name)
+		}
+		fmt.Fprint(response, `{"data":{"variableUpsert":true}}`)
+	}))
+	defer server.Close()
+	adapter, err := New([]byte("token"), Options{Endpoint: server.URL, Client: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	target := provider.Target{ProjectID: "project-id", EnvironmentID: "environment-id",
+		ServiceIDs: map[string]string{"api": "api-id"}}
+	write := provider.NewWriteRequest("upsert", target, "api", "api-id", "SECRET", "ignored", []byte(secret))
+	if _, err := adapter.Write(context.Background(), write); err != nil {
+		t.Fatal(err)
+	}
+	write.Destroy()
+	evidence, err := adapter.Verify(context.Background(), provider.VerifyRequest{Target: target,
+		Service: "api", ServiceID: "api-id", Name: "SECRET"})
+	if err != nil || evidence.Result != provider.VerificationLimited ||
+		evidence.Presence != provider.PresenceUnknown || requests != 1 {
+		t.Fatalf("unexpected names-only verification: evidence=%+v requests=%d err=%v", evidence, requests, err)
+	}
+}
+
+func targetResponse() string {
+	return `{"data":{"project":{"id":"project-id","name":"siftcut-staging","environments":{"edges":[{"node":{"id":"environment-id","name":"staging"}}]},"services":{"edges":[{"node":{"id":"postgres-id","name":"postgres"}},{"node":{"id":"migrator-id","name":"migrator"}},{"node":{"id":"api-id","name":"api"}},{"node":{"id":"web-id","name":"web"}},{"node":{"id":"other-id","name":"unrelated"}}]}}}}`
+}

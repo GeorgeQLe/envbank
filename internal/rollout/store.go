@@ -130,6 +130,11 @@ func validateSnapshotBindings(plan ProviderPlan, objectRevision int64, snapshot 
 			return fmt.Errorf("provider plan record %s is stale", action.Record)
 		}
 	}
+	for _, item := range plan.Names {
+		if item.Record != "" && snapshot.RecordRevisions[item.Record] != item.ExpectedRecordRevision {
+			return fmt.Errorf("provider plan record %s is stale", item.Record)
+		}
+	}
 	revisions := make(map[string]int64, len(records))
 	for _, record := range records {
 		revisions[record.Name] = record.Revision
@@ -141,6 +146,15 @@ func validateSnapshotBindings(plan ProviderPlan, objectRevision int64, snapshot 
 		physical := bundle.PhysicalName(plan.Bundle, action.Record)
 		if revisions[physical] != action.ExpectedRecordRevision {
 			return fmt.Errorf("provider plan record %s is stale", action.Record)
+		}
+	}
+	for _, item := range plan.Names {
+		if item.Record == "" {
+			continue
+		}
+		physical := bundle.PhysicalName(plan.Bundle, item.Record)
+		if revisions[physical] != item.ExpectedRecordRevision {
+			return fmt.Errorf("provider plan record %s is stale", item.Record)
 		}
 	}
 	return nil

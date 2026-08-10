@@ -19,13 +19,14 @@ import (
 const MaxProviderCodeBytes = 96
 
 type Capabilities struct {
-	Create                 bool `json:"create"`
-	ReadMetadata           bool `json:"read_metadata"`
-	Update                 bool `json:"update"`
-	Validate               bool `json:"validate"`
-	Revoke                 bool `json:"revoke"`
-	SupportsIdempotencyKey bool `json:"supports_idempotency_key"`
-	SupportsMaskedPresence bool `json:"supports_masked_presence"`
+	Create                  bool `json:"create"`
+	ReadMetadata            bool `json:"read_metadata"`
+	Update                  bool `json:"update"`
+	Validate                bool `json:"validate"`
+	Revoke                  bool `json:"revoke"`
+	SupportsIdempotencyKey  bool `json:"supports_idempotency_key"`
+	SupportsIdempotentWrite bool `json:"supports_idempotent_write"`
+	SupportsMaskedPresence  bool `json:"supports_masked_presence"`
 }
 
 // Identity is the immutable, non-secret identity to which a credential is

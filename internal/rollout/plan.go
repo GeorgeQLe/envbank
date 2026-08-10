@@ -17,6 +17,10 @@ const (
 	MaxActions  = 512
 )
 
+type PlanKind string
+
+const PlanKindNamesOnly PlanKind = "names-only"
+
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type ProviderPlan struct {
@@ -27,10 +31,25 @@ type ProviderPlan struct {
 	Provider         string        `json:"provider"`
 	ProviderIdentity string        `json:"provider_identity"`
 	Target           TargetBinding `json:"target"`
+	Kind             PlanKind      `json:"kind,omitempty"`
+	Names            []PlannedName `json:"names,omitempty"`
 	Actions          []Action      `json:"actions"`
 	CreatedAt        string        `json:"created_at"`
 	ExpiresAt        string        `json:"expires_at"`
 	Digest           string        `json:"digest"`
+}
+
+// PlannedName is a names-and-revisions-only statement of desired provider
+// state. State is unverifiable when the provider cannot safely expose names
+// without also returning values.
+type PlannedName struct {
+	Service                string `json:"service"`
+	ServiceID              string `json:"service_id"`
+	Name                   string `json:"name"`
+	Desired                string `json:"desired"`
+	State                  string `json:"state"`
+	Record                 string `json:"record,omitempty"`
+	ExpectedRecordRevision int64  `json:"expected_record_revision,omitempty"`
 }
 
 type TargetBinding struct {
@@ -40,12 +59,16 @@ type TargetBinding struct {
 }
 
 type Action struct {
-	ID                     string `json:"id"`
-	Operation              string `json:"operation"`
-	Service                string `json:"service"`
-	ServiceID              string `json:"service_id"`
-	Name                   string `json:"name"`
-	Record                 string `json:"record,omitempty"`
+	ID          string `json:"id"`
+	Operation   string `json:"operation"`
+	Service     string `json:"service"`
+	ServiceID   string `json:"service_id"`
+	Name        string `json:"name"`
+	Record      string `json:"record,omitempty"`
+	ValueSource string `json:"value_source,omitempty"`
+	// PublicValue is permitted only for manifest values already classified as
+	// public constants. Secret and imported values must remain record-backed.
+	PublicValue            string `json:"public_value,omitempty"`
 	ExpectedRecordRevision int64  `json:"expected_record_revision,omitempty"`
 }
 
@@ -92,10 +115,21 @@ func (plan ProviderPlan) Validate(now time.Time) error {
 	if plan.Target.ProjectID == "" || plan.Target.EnvironmentID == "" || plan.Target.ServiceIDs == nil {
 		return errors.New("provider plan target binding is incomplete")
 	}
-	if len(plan.Actions) == 0 || len(plan.Actions) > MaxActions {
+	if plan.Kind != "" && plan.Kind != PlanKindNamesOnly {
+		return errors.New("provider plan kind is invalid")
+	}
+	if plan.Kind == PlanKindNamesOnly {
+		if len(plan.Names) == 0 || len(plan.Names) > MaxActions || len(plan.Actions) > MaxActions {
+			return fmt.Errorf("names-only provider plan must contain between 1 and %d names", MaxActions)
+		}
+		if err := validateNames(plan.Names, plan.Target); err != nil {
+			return err
+		}
+	} else if len(plan.Actions) == 0 || len(plan.Actions) > MaxActions || len(plan.Names) != 0 {
 		return fmt.Errorf("provider plan must contain between 1 and %d actions", MaxActions)
 	}
 	seenActions := make(map[string]struct{}, len(plan.Actions))
+	seenTargets := make(map[string]struct{}, len(plan.Actions))
 	for index, action := range plan.Actions {
 		if action.ID == "" || action.Operation == "" || action.Service == "" ||
 			action.ServiceID == "" || action.Name == "" {
@@ -105,13 +139,62 @@ func (plan ProviderPlan) Validate(now time.Time) error {
 			return fmt.Errorf("provider plan action %d has a duplicate ID", index)
 		}
 		seenActions[action.ID] = struct{}{}
+		targetKey := action.Service + "\x00" + action.Name
+		if _, exists := seenTargets[targetKey]; exists {
+			return fmt.Errorf("provider plan action %d duplicates a variable target", index)
+		}
+		seenTargets[targetKey] = struct{}{}
 		if err := validateAction(index, action, plan.Target); err != nil {
+			return err
+		}
+	}
+	if plan.Kind == PlanKindNamesOnly {
+		if err := validateNamesOnlyActions(plan.Names, plan.Actions); err != nil {
 			return err
 		}
 	}
 	want, err := plan.ComputeDigest()
 	if err != nil || plan.Digest != want {
 		return errors.New("provider plan digest is invalid")
+	}
+	return nil
+}
+
+func validateNamesOnlyActions(names []PlannedName, actions []Action) error {
+	byTarget := make(map[string]PlannedName, len(names))
+	for _, item := range names {
+		byTarget[item.Service+"\x00"+item.Name] = item
+	}
+	for index, action := range actions {
+		item, exists := byTarget[action.Service+"\x00"+action.Name]
+		if !exists || item.Desired != "present" || action.Operation != "upsert" ||
+			action.Record != item.Record || action.ExpectedRecordRevision != item.ExpectedRecordRevision {
+			return fmt.Errorf("names-only provider plan action %d does not match a desired-present name", index)
+		}
+	}
+	return nil
+}
+
+func validateNames(names []PlannedName, target TargetBinding) error {
+	seen := make(map[string]struct{}, len(names))
+	for index, item := range names {
+		if item.Service == "" || item.ServiceID == "" || item.Name == "" ||
+			target.ServiceIDs[item.Service] != item.ServiceID ||
+			(item.Desired != "present" && item.Desired != "absent") || item.State != "unverifiable" {
+			return fmt.Errorf("names-only provider plan entry %d is invalid", index)
+		}
+		key := item.Service + "\x00" + item.Name
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("names-only provider plan entry %d is duplicated", index)
+		}
+		seen[key] = struct{}{}
+		if item.Desired == "absent" && (item.Record != "" || item.ExpectedRecordRevision != 0) {
+			return fmt.Errorf("names-only provider plan entry %d has unexpected record state", index)
+		}
+		if item.Record == "" && item.ExpectedRecordRevision != 0 ||
+			item.Record != "" && item.ExpectedRecordRevision < 1 {
+			return fmt.Errorf("names-only provider plan entry %d has an invalid record revision", index)
+		}
 	}
 	return nil
 }
@@ -129,10 +212,16 @@ func validateAction(index int, action Action, target TargetBinding) error {
 	if bound := target.ServiceIDs[action.Service]; bound != action.ServiceID {
 		return fmt.Errorf("provider plan action %d has an invalid service binding", index)
 	}
-	if action.Operation != "revoke" && (action.Record == "" || action.ExpectedRecordRevision < 1) {
-		return fmt.Errorf("provider plan action %d has an invalid record revision", index)
+	if action.Operation != "revoke" {
+		recordBacked := (action.ValueSource == "" || action.ValueSource == "record") &&
+			action.Record != "" && action.ExpectedRecordRevision > 0 && action.PublicValue == ""
+		publicConstant := action.ValueSource == "public-constant" &&
+			action.Record == "" && action.ExpectedRecordRevision == 0
+		if !recordBacked && !publicConstant {
+			return fmt.Errorf("provider plan action %d has an invalid value source", index)
+		}
 	}
-	if action.Operation == "revoke" && (action.Record != "" || action.ExpectedRecordRevision != 0) {
+	if action.Operation == "revoke" && (action.Record != "" || action.ValueSource != "" || action.PublicValue != "" || action.ExpectedRecordRevision != 0) {
 		return fmt.Errorf("provider plan action %d has unexpected record state", index)
 	}
 	return nil

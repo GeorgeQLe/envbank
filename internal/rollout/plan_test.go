@@ -55,3 +55,35 @@ func TestProviderPlanDigestBindsOrderedActionsAndExpiry(t *testing.T) {
 		t.Fatal("noncanonical plan timestamps were accepted")
 	}
 }
+
+func TestNamesOnlyPlanBindsNamesAndConfirmedUpserts(t *testing.T) {
+	created := time.Date(2026, 8, 9, 20, 0, 0, 0, time.UTC)
+	plan := ProviderPlan{Version: PlanVersion, Bundle: "short-editor/example/staging",
+		ManifestDigest:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		SnapshotRevision: 3, Provider: "railway", ProviderIdentity: "project-id:environment-id",
+		Target: TargetBinding{ProjectID: "project-id", EnvironmentID: "environment-id",
+			ServiceIDs: map[string]string{"api": "api-id"}}, Kind: PlanKindNamesOnly,
+		Names: []PlannedName{{Service: "api", ServiceID: "api-id", Name: "DATABASE_URL",
+			Desired: "present", State: "unverifiable", Record: "DATABASE_URL",
+			ExpectedRecordRevision: 8}}, CreatedAt: created.Format(time.RFC3339),
+		ExpiresAt: created.Add(PlanTTL).Format(time.RFC3339)}
+	var err error
+	plan.Digest, err = plan.ComputeDigest()
+	if err != nil || plan.Validate(created.Add(time.Minute)) != nil {
+		t.Fatalf("valid names-only plan failed: digest=%v validate=%v", err,
+			plan.Validate(created.Add(time.Minute)))
+	}
+	changed := plan
+	changed.Names = append([]PlannedName(nil), plan.Names...)
+	changed.Names[0].State = "present"
+	if changed.Validate(created.Add(time.Minute)) == nil {
+		t.Fatal("names-only state substitution was accepted")
+	}
+	withAction := plan
+	withAction.Actions = []Action{{ID: "action", Operation: "upsert", Service: "api",
+		ServiceID: "api-id", Name: "DATABASE_URL", Record: "DATABASE_URL", ExpectedRecordRevision: 8}}
+	withAction.Digest, _ = withAction.ComputeDigest()
+	if withAction.Validate(created.Add(time.Minute)) != nil {
+		t.Fatal("names-only plan rejected its separately confirmed upsert")
+	}
+}

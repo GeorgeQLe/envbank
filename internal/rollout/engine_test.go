@@ -199,6 +199,26 @@ func TestEnginePlansAppliesAndPersistsRedactedEvidence(t *testing.T) {
 	}
 }
 
+func TestNamesOnlyPlanCannotBeApplied(t *testing.T) {
+	engine, _, adapter, input := fixtureEngine(1)
+	input.Kind = PlanKindNamesOnly
+	input.Actions = nil
+	input.Names = []PlannedName{{Service: "api", ServiceID: "api-id", Name: "SECRET_1",
+		Desired: "present", State: "unverifiable", Record: "record-1",
+		ExpectedRecordRevision: 4}}
+	plan, err := engine.Plan(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed := false
+	if _, err := engine.Apply(context.Background(), plan.ID(), func(context.Context, Confirmation) error {
+		confirmed = true
+		return nil
+	}); err == nil || confirmed || len(adapter.writes) != 0 {
+		t.Fatal("names-only plan reached confirmation or provider write")
+	}
+}
+
 func TestApplyCancellationAndDestructiveSecondConfirmationAreNoWritePaths(t *testing.T) {
 	engine, _, adapter, input := fixtureEngine(1)
 	plan, err := engine.Plan(context.Background(), input)

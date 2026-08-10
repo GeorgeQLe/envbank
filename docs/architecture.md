@@ -153,13 +153,39 @@ before the first write and a separate confirmation before revoke actions.
 
 Each action is durably checkpointed as `in_flight` before calling the adapter
 and as `committed` immediately after valid provider evidence returns. Resume
-skips committed actions. An ambiguous write is retried with the same key only
-when the provider declares idempotency; otherwise metadata inspection must
+skips committed actions. An ambiguous write is retried only when the provider
+accepts an idempotency key or the exact write is itself idempotent; otherwise metadata inspection must
 prove committed or absent state, and an unprovable outcome stops for explicit
 reconciliation. A confirmed operation may resume after its plan expires, but
 all identity, target, snapshot, and record bindings remain mandatory. Final
 verification distinguishes verified presence from provider limitations and
 stops at `ready-to-deploy`; the engine has no deployment behavior.
+
+The Railway adapter accepts only a project-scoped token stored under
+a bundle-scoped macOS Keychain account. `railway bind` first uses Railway's
+`projectToken` query to prove the immutable project and environment IDs, then
+resolves the manifest's exact `postgres`, `migrator`, `api`, and `web` names to
+service IDs before storing the credential. Its read document resolves project,
+environment, and service metadata. It does not use the
+documented Railway variable query because that query returns values rather than
+names-only metadata.
+
+Consequently, `railway plan` marks every desired-present and desired-absent
+name `unverifiable`, binds record-backed names to exact encrypted snapshot
+revisions, and saves a 15-minute encrypted `names-only` plan. Record-backed
+values and manifest-declared public constants become ordered upsert actions;
+unresolved public imports and intended absence remain non-actions. Apply
+revalidates every binding, requires an interactive confirmation, and issues
+only one `variableUpsert` at a time with `skipDeploys: true`. The exact upsert
+is safely repeatable after an ambiguous response, while committed actions are
+never repeated.
+
+Railway verification re-resolves immutable identity and service IDs, validates
+the current local snapshot, and reports committed local operation evidence.
+Provider presence remains `unknown` because reading Railway variables would
+also read values. Staged writes and deployed state are reported separately;
+there is no delete, staged-change commit, deploy, redeploy, restart, domain,
+service-create, or service-delete GraphQL document.
 
 ## Device revocation
 

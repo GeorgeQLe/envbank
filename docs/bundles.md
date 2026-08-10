@@ -61,6 +61,61 @@ These commands mutate only the encrypted EnvBank vault. Provider planning,
 variable writes, service deployment, verification, and revocation are outside
 this workflow.
 
+## Railway names-only planning
+
+On a cgo-enabled macOS build, bind a Railway project token from trusted stdin.
+The token must be scoped to the manifest's exact project and environment. It is
+verified before being stored in macOS Keychain and is never accepted as a flag,
+environment variable, manifest field, or plan field:
+
+```sh
+trusted-token-command | envbank railway bind \
+  --manifest siftcut-staging.envbank.yaml \
+  --config /secure/path/device.json \
+  --passphrase-file /secure/path/passphrase
+
+envbank railway plan \
+  --manifest siftcut-staging.envbank.yaml \
+  --config /secure/path/device.json \
+  --passphrase-file /secure/path/passphrase
+
+envbank railway apply --plan PLAN_ID \
+  --config /secure/path/device.json \
+  --passphrase-file /secure/path/passphrase
+
+envbank railway resume --operation OPERATION_ID \
+  --config /secure/path/device.json \
+  --passphrase-file /secure/path/passphrase
+
+envbank railway verify --bundle example/siftcut/railway-staging \
+  --config /secure/path/device.json \
+  --passphrase-file /secure/path/passphrase
+```
+
+Binding verifies Railway's immutable project/environment identity and resolves
+exactly `postgres`, `migrator`, `api`, and `web` to immutable service IDs. The
+plan binds those IDs, the manifest digest, the encrypted snapshot revision, and
+each referenced local record revision. Output includes provider identifiers
+and variable names, but no values, physical record names, or credential
+fingerprints. Encrypted plans may retain manifest-declared public constants;
+secret values remain referenced only by logical record and exact revision.
+
+Railway's documented variable query returns values, so EnvBank does not call it
+in this workflow. Required-present and intended-absent names are therefore
+reported honestly as `unverifiable`; absence is not inferred and no deletion is
+planned. Locally available record-backed values and public constants become
+ordered upserts. Apply requires an interactive terminal confirmation and uses
+only Railway's single-variable upsert with `skipDeploys: true`.
+
+Every action is durably marked in flight before its request and committed after
+a successful response. Resume skips committed actions and may repeat an
+ambiguous Railway upsert because setting the same name to the same value is
+idempotent. Verification rechecks the exact immutable target and reports local
+write evidence, but provider presence remains `unknown`; it never calls the
+value-returning variable query. Staged-write evidence is kept separate from
+deployed state, and EnvBank stops at readiness for a separately authorized
+deployment. There is no deployment or deletion command.
+
 ## Memory limitation
 
 EnvBank overwrites temporary byte buffers where practical, but Go strings and
