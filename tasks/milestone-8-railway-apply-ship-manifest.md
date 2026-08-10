@@ -25,9 +25,13 @@ deletion, or deployment mutations.
   contract with semantic write idempotency.
 - `internal/provider/railway/adapter.go` — implements bounded Railway GraphQL
   identity/target reads and the sole allowlisted `variableUpsert` mutation
-  with `skipDeploys: true`.
+  with `skipDeploys: true`; requires the requested environment name and
+  token-scoped ID on one unique metadata node and treats unusable successful
+  write responses as ambiguous.
 - `internal/provider/railway/adapter_test.go` — covers authentication, target
-  drift, response redaction, mutation shape, and read-free verification.
+  drift, cross-environment name/ID rejection, response redaction, ambiguous
+  malformed-write responses, HTTP-status retry classes, mutation shape, and
+  read-free verification.
 - `internal/provider/railway/credential.go` — defines bundle-scoped Keychain
   credential storage and names-only loading.
 - `internal/provider/railway/credential_test.go` — covers account derivation,
@@ -79,6 +83,8 @@ deletion, or deployment mutations.
 
 Executable verification completed successfully on 2026-08-09:
 
+- `go test ./internal/provider/railway ./internal/rollout ./cmd/envbank`
+- `go vet ./internal/provider/railway ./internal/rollout ./cmd/envbank`
 - `go test ./...`
 - `go test -race ./internal/provider/... ./internal/rollout ./cmd/envbank`
 - `go vet ./...`
@@ -130,6 +136,18 @@ Findings fixed before shipping:
   plan/operation binding check instead of duplicating only a subset.
 - Verification reports incomplete operations as incomplete and cannot claim
   deployment readiness before the operation reaches a terminal state.
+- PR #22 review found that separate environment nodes could independently
+  satisfy the requested name and token-scoped ID. Binding now requires one
+  unique node to match both while retaining the duplicate-name and duplicate-ID
+  rejection, with a production-name/staging-ID regression returning
+  `ENVIRONMENT_MISMATCH`.
+- PR #22 review found that an HTTP 2xx Railway write with an unreadable or
+  malformed response could be recorded as definitively failed after the
+  provider had committed it. Body-read failures, oversized bodies, malformed
+  and null GraphQL envelopes, GraphQL errors, and invalid mutation-result
+  decoding now return sanitized `RetryAmbiguous` errors. Adapter regressions
+  cover every path and preserve safe retry for 429, ambiguous retry for
+  write-side 5xx, and no retry for definitive 4xx responses.
 - A full-tree secret scan found six generated Next.js cache values under the
   ignored `website/.next` directory. The cache was moved intact to
   `/tmp/envbank-website-next-pre-ship-20260809`; a second full-tree scan found
@@ -149,6 +167,13 @@ cannot be guaranteed to be erased immediately, although owned byte buffers are
 wiped. Rate-limit responses stop the operation for operator-controlled resume;
 there is no automatic retry loop. macOS Keychain remains the sole supported
 credential store.
+
+Malformed successful write responses can require an exact idempotent upsert on
+resume even when Railway did not commit the first request; this is deliberate
+and safe only while the allowlisted mutation retains its exact-upsert semantics
+and `skipDeploys: true`. Binding still trusts Railway's token identity and
+project metadata responses, so provider-side identity semantics remain an
+external dependency despite same-node and uniqueness enforcement.
 
 ## Rollback note
 

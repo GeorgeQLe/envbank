@@ -2,6 +2,11 @@
 
 ## 2026-08-09
 
+- Hardened the Milestone 8 Railway rollout after PR #22 review: environment
+  binding now requires the manifest name and token-scoped ID on the same unique
+  node, and unusable HTTP 2xx write responses retain ambiguous retry semantics.
+  Added cross-environment, malformed, oversized, unreadable, GraphQL-envelope,
+  mutation-decoding, sanitization, and status-classification regressions.
 - Added interactive `railway apply`, confirmed-operation `railway resume`, and
   read-only `railway verify` commands over encrypted rollout state, with exact
   credential, target, snapshot, manifest, service-ID, and record-revision

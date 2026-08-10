@@ -313,10 +313,10 @@ func (adapter *Adapter) graphql(ctx context.Context, operation, query string, va
 				code = candidate
 			}
 		}
-		return provider.NewError(operation, response.StatusCode, code, provider.RetryNever)
+		return provider.NewError(operation, response.StatusCode, code, retryForResponse(operation, response.StatusCode))
 	}
 	if json.Unmarshal(envelope.Data, destination) != nil {
-		return provider.NewError(operation, response.StatusCode, "INVALID_RESPONSE", provider.RetryNever)
+		return provider.NewError(operation, response.StatusCode, "INVALID_RESPONSE", retryForResponse(operation, response.StatusCode))
 	}
 	return nil
 }
@@ -356,7 +356,7 @@ func resolveServices(values []struct {
 func exactNode(values []struct {
 	Node node `json:"node"`
 }, name, id string) bool {
-	nameCount, idCount := 0, 0
+	nameCount, idCount, exactCount := 0, 0, 0
 	for _, edge := range values {
 		if edge.Node.Name == name {
 			nameCount++
@@ -364,8 +364,11 @@ func exactNode(values []struct {
 		if edge.Node.ID == id {
 			idCount++
 		}
+		if edge.Node.Name == name && edge.Node.ID == id {
+			exactCount++
+		}
 	}
-	return nameCount == 1 && idCount == 1
+	return nameCount == 1 && idCount == 1 && exactCount == 1
 }
 
 func nodeIDExistsExactlyOnce(values []struct {
@@ -398,6 +401,9 @@ func safeCode(value string) bool {
 func retryForResponse(operation string, status int) provider.RetryClass {
 	if status == http.StatusTooManyRequests {
 		return provider.RetrySafe
+	}
+	if operation == "write" && status >= 200 && status <= 299 {
+		return provider.RetryAmbiguous
 	}
 	if status >= 500 {
 		if operation == "write" {

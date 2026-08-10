@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -93,6 +94,33 @@ func TestBindingFailsClosedOnIdentityAndServiceDrift(t *testing.T) {
 	var safe provider.Error
 	if !strings.Contains(fmt.Sprint(err), "TARGET_ID_MISMATCH") || !errors.As(err, &safe) {
 		t.Fatalf("wrong project token did not fail safely: %v", err)
+	}
+}
+
+func TestBindingRejectsEnvironmentNameAndScopedIDFromDifferentNodes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		if strings.Contains(body.Query, "Identity") {
+			fmt.Fprint(response, `{"data":{"projectToken":{"projectId":"project-id","environmentId":"staging-id"}}}`)
+			return
+		}
+		fmt.Fprint(response, `{"data":{"project":{"id":"project-id","name":"siftcut-staging","environments":{"edges":[{"node":{"id":"production-id","name":"production"}},{"node":{"id":"staging-id","name":"staging"}}]},"services":{"edges":[{"node":{"id":"api-id","name":"api"}}]}}}}`)
+	}))
+	defer server.Close()
+	adapter, err := New([]byte("token"), Options{Endpoint: server.URL, Client: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+
+	_, err = adapter.Bind(context.Background(), BindingRequest{Project: "siftcut-staging",
+		Environment: "production", Services: map[string]string{"api": "api-id"}})
+	var safe provider.Error
+	if !errors.As(err, &safe) || safe.Code != "ENVIRONMENT_MISMATCH" || safe.Retry != provider.RetryNever {
+		t.Fatalf("cross-environment binding did not fail safely: %v", err)
 	}
 }
 
@@ -193,6 +221,110 @@ func TestWriteUsesOnlySkipDeployVariableUpsertAndVerifyReadsNoValues(t *testing.
 		evidence.Presence != provider.PresenceUnknown || requests != 1 {
 		t.Fatalf("unexpected names-only verification: evidence=%+v requests=%d err=%v", evidence, requests, err)
 	}
+}
+
+func TestMalformedSuccessfulWriteResponsesAreAmbiguousAndSanitized(t *testing.T) {
+	const sentinel = "provider-response-secret-SENTINEL-93"
+	tests := []struct {
+		name string
+		body func() io.ReadCloser
+	}{
+		{name: "unreadable body", body: func() io.ReadCloser { return failingReadCloser{err: errors.New(sentinel)} }},
+		{name: "oversized body", body: func() io.ReadCloser {
+			return io.NopCloser(strings.NewReader(strings.Repeat("x", maxResponseBytes+1) + sentinel))
+		}},
+		{name: "malformed envelope", body: func() io.ReadCloser {
+			return io.NopCloser(strings.NewReader(`{"data":` + sentinel))
+		}},
+		{name: "null envelope", body: func() io.ReadCloser {
+			return io.NopCloser(strings.NewReader(`{"data":null,"ignored":"` + sentinel + `"}`))
+		}},
+		{name: "GraphQL errors", body: func() io.ReadCloser {
+			return io.NopCloser(strings.NewReader(`{"errors":[{"message":"` + sentinel + `","extensions":{"code":"unsafe ` + sentinel + `"}}]}`))
+		}},
+		{name: "invalid mutation result", body: func() io.ReadCloser {
+			return io.NopCloser(strings.NewReader(`{"data":{"variableUpsert":"` + sentinel + `"}}`))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: test.body(), Header: make(http.Header)}, nil
+			})}
+			adapter, err := New([]byte("token"), Options{Endpoint: "http://127.0.0.1/graphql", Client: client})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer adapter.Close()
+
+			write := testWriteRequest([]byte("write-secret"))
+			_, err = adapter.Write(context.Background(), write)
+			write.Destroy()
+			var safe provider.Error
+			if !errors.As(err, &safe) || safe.Status != http.StatusOK || safe.Retry != provider.RetryAmbiguous {
+				t.Fatalf("successful malformed write response was not ambiguous: %v", err)
+			}
+			if safe.Validate() != nil || strings.Contains(err.Error(), sentinel) {
+				t.Fatalf("write response error was not sanitized: %v", err)
+			}
+		})
+	}
+}
+
+func TestWriteHTTPErrorRetryClassificationIsStatusBased(t *testing.T) {
+	tests := []struct {
+		status int
+		retry  provider.RetryClass
+	}{
+		{status: http.StatusTooManyRequests, retry: provider.RetrySafe},
+		{status: http.StatusServiceUnavailable, retry: provider.RetryAmbiguous},
+		{status: http.StatusBadRequest, retry: provider.RetryNever},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprint(test.status), func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: test.status, Body: io.NopCloser(strings.NewReader(`{}`)),
+					Header: make(http.Header)}, nil
+			})}
+			adapter, err := New([]byte("token"), Options{Endpoint: "http://127.0.0.1/graphql", Client: client})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer adapter.Close()
+
+			write := testWriteRequest([]byte("write-secret"))
+			_, err = adapter.Write(context.Background(), write)
+			write.Destroy()
+			var safe provider.Error
+			if !errors.As(err, &safe) || safe.Status != test.status || safe.Retry != test.retry || safe.Code != "HTTP_ERROR" {
+				t.Fatalf("unexpected HTTP error classification: %v", err)
+			}
+		})
+	}
+}
+
+func testWriteRequest(secret []byte) provider.WriteRequest {
+	target := provider.Target{ProjectID: "project-id", EnvironmentID: "environment-id",
+		ServiceIDs: map[string]string{"api": "api-id"}}
+	return provider.NewWriteRequest("upsert", target, "api", "api-id", "SECRET", "ignored", secret)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+type failingReadCloser struct {
+	err error
+}
+
+func (reader failingReadCloser) Read([]byte) (int, error) {
+	return 0, reader.err
+}
+
+func (failingReadCloser) Close() error {
+	return nil
 }
 
 func targetResponse() string {
