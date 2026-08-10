@@ -2,6 +2,18 @@
 
 ## 2026-08-09
 
+- Added the provider-neutral rollout boundary with declared capability gates,
+  callback-scoped non-serializable secret requests, bounded metadata-only
+  evidence, and provider-error sanitization that discards arbitrary bodies.
+- Added digest-addressed 15-minute encrypted provider plans and encrypted
+  per-action rollout operations with exact identity, target, snapshot, and
+  record-revision validation; interactive and destructive confirmations;
+  durable in-flight checkpoints; idempotent retry; metadata reconciliation for
+  ambiguous writes; per-action verification; and honest limited results that
+  stop at `ready-to-deploy` without deployment behavior.
+- Covered cancellation, expiry, staleness, partial failure, non-duplication,
+  post-expiry resume, ambiguous non-idempotent outcomes, secret/error
+  redaction, capability gates, and verification limits with fake-adapter tests.
 - Added local `envbank bundle prepare` and `bundle status` workflows with
   deterministic bundle-scoped physical names, exact JSON stdin imports,
   policy-based generation, bounded topological derivation, optimistic record

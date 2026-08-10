@@ -1,8 +1,14 @@
 # Current work
 
-## Milestone 6: Provider-neutral rollout engine — pending
+## Milestone 7: Railway identity binding and names-only planning — pending
 
-- [ ] Define redaction-safe provider capabilities and request types, then add
+- [ ] Add an in-process Railway metadata adapter that binds the credential,
+  project, environment, and exact service IDs, then creates names-only plans
+  without value reads, provider writes, or deployment mutations.
+
+## Milestone 6: Provider-neutral rollout engine — complete
+
+- [x] Define redaction-safe provider capabilities and request types, then add
   expiring encrypted plans and a resumable local rollout state machine with a
   fake adapter before any live-provider integration.
 
