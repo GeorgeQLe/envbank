@@ -5,7 +5,7 @@ const canonicalBase = "https://envbank.vercel.app";
 const routes = [
   { path: "/", title: "EnvBank — Secrets stay yours", canonical: "" },
   { path: "/getting-started", title: "Getting started — EnvBank", canonical: "/getting-started" },
-  { path: "/install", title: "Install v0.1.1 — EnvBank", canonical: "/install" },
+  { path: "/install", title: "Install v0.2.0 — EnvBank", canonical: "/install" },
 ];
 
 for (const route of routes) {
@@ -16,7 +16,7 @@ for (const route of routes) {
   assert.ok(html.includes(`<title>${route.title}</title>`), `${route.path} title mismatch`);
   assert.ok(html.includes(`rel="canonical" href="${canonicalBase}${route.canonical}"`), `${route.path} canonical mismatch`);
   assert.equal((html.match(/<h1(?:\s|>)/g) ?? []).length, 1, `${route.path} should contain one h1`);
-  assert.ok(!/SiftCut|provider adapter|provider automation/i.test(html), `${route.path} contains unreleased claims`);
+  assert.ok(!/Clerk-specific adapter|capture.*Clerk dashboard/i.test(html), `${route.path} overclaims Clerk support`);
   assert.ok(html.includes("href=\"/getting-started\"") && html.includes("href=\"/install\""), `${route.path} should expose internal navigation`);
 }
 
@@ -31,7 +31,7 @@ assert.ok(!tutorial.includes("\n+"), "tutorial contains a malformed continuation
 const install = await (await fetch(`${base}/install`)).text();
 assert.ok(install.includes('aria-pressed="true"'), "install platform selection missing");
 assert.ok(install.includes("Unsigned macOS build"), "unsigned macOS warning missing");
-assert.ok(install.includes("envbank_0.1.1_darwin_arm64.tar.gz"), "default Apple Silicon artifact missing");
+assert.ok(install.includes("envbank_0.2.0_darwin_arm64.tar.gz"), "default Apple Silicon artifact missing");
 assert.ok(!install.includes("\n+"), "installer contains a malformed continuation line");
 
 for (const asset of ["/og.png", "/icon", "/robots.txt", "/sitemap.xml"]) {

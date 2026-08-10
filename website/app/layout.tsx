@@ -56,13 +56,13 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             <div>
               <Link className="brand" href="/"><span className="brand-mark" aria-hidden="true"><span /></span><span>ENVBANK</span></Link>
               <p>Small surface. Public evidence. Candid limits.</p>
-              <p className="version">v0.1.1 alpha · Apache-2.0</p>
+              <p className="version">v0.2.0 alpha · Apache-2.0</p>
             </div>
             <div className="footer-links" aria-label="Project resources">
               <a href={`${github}/blob/main/SECURITY.md`}>Security policy</a>
               <a href={`${github}/blob/main/docs/architecture.md`}>Architecture</a>
-              <a href={`${github}/releases/tag/v0.1.1`}>Release v0.1.1</a>
-              <a href={`${github}/blob/main/docs/release-evidence-v0.1.1.md`}>Release evidence</a>
+              <a href={`${github}/releases/tag/v0.2.0`}>Release v0.2.0</a>
+              <a href={`${github}/blob/main/docs/release-evidence-v0.2.0.md`}>Release evidence</a>
               <a href={`${github}/blob/main/docs/roadmap.md`}>Roadmap</a>
               <a href={`${github}/blob/main/CONTRIBUTING.md`}>Contribute</a>
             </div>

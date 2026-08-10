@@ -2,6 +2,16 @@
 
 ## 2026-08-10
 
+- Merged PR #23 through protected `main`, published the immutable annotated
+  v0.2.0 prerelease and `v0.2.0`/`0.2` multi-architecture GHCR image, and
+  completed every release workflow gate.
+- Verified the release anonymously across the exact eight assets, checksums,
+  Sigstore provenance, archive safety, native macOS Keychain linkage, both OCI
+  platforms, and the live container health endpoint; recorded immutable hashes
+  in `docs/release-evidence-v0.2.0.md`.
+- Installed the verified Darwin/ARM64 binary at `~/.local/bin/envbank`, confirmed
+  v0.2.0 metadata at the protected-main commit, and advanced the public website
+  installation and evidence surface from v0.1.1 to v0.2.0.
 - Prepared the v0.2.0 feature-alpha release for the completed manifest, bundle,
   provider-rollout, and Railway milestones while preserving v0.1.x tags and
   release assets.
