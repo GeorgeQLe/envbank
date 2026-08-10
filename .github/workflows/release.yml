@@ -1,15 +1,15 @@
-name: Release v0.1.1
+name: Release v0.2.0
 
 on:
   push:
     tags:
-      - v0.1.1
+      - v0.2.0
 
 permissions:
   contents: read
 
 env:
-  VERSION: v0.1.1
+  VERSION: v0.2.0
   IMAGE: ghcr.io/georgeqle/envbank
 
 jobs:
@@ -86,15 +86,19 @@ jobs:
           - goos: darwin
             goarch: amd64
             runner: macos-15-intel
+            cgo: "1"
           - goos: darwin
             goarch: arm64
             runner: macos-15
+            cgo: "1"
           - goos: linux
             goarch: amd64
             runner: ubuntu-24.04
+            cgo: "0"
           - goos: linux
             goarch: arm64
             runner: ubuntu-24.04-arm
+            cgo: "0"
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -106,22 +110,25 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
+          CGO_ENABLED: ${{ matrix.cgo }}
         run: |
           build_date="$(git show -s --format=%cI "$GITHUB_SHA")"
-          archive="envbank_0.1.1_${GOOS}_${GOARCH}"
+          archive="envbank_0.2.0_${GOOS}_${GOARCH}"
           mkdir "$archive"
           go build -trimpath \
             -ldflags="-s -w -X main.version=$VERSION -X main.commit=$GITHUB_SHA -X main.buildDate=$build_date" \
             -o "$archive/envbank" ./cmd/envbank
           "$archive/envbank" version | grep -F "envbank $VERSION (commit $GITHUB_SHA, built $build_date)"
+          if [[ "$GOOS" == darwin ]]; then
+            otool -L "$archive/envbank" | grep -F Security.framework
+          fi
           go version -m "$archive/envbank"
           cp LICENSE README.md "$archive/"
           tar -czf "$archive.tar.gz" "$archive"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: envbank-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: envbank_0.1.1_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
+          path: envbank_0.2.0_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
           if-no-files-found: error
 
   artifacts:
@@ -145,16 +152,16 @@ jobs:
         run: sha256sum envbank_*.tar.gz > SHA256SUMS
       - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
       - name: Generate SPDX JSON dependency SBOM
-        run: syft dir:. -o spdx-json=dist/envbank_0.1.1_sbom.spdx.json
+        run: syft dir:. -o spdx-json=dist/envbank_0.2.0_sbom.spdx.json
       - id: attest
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
         with:
           subject-path: |
             dist/envbank_*.tar.gz
             dist/SHA256SUMS
-            dist/envbank_0.1.1_sbom.spdx.json
+            dist/envbank_0.2.0_sbom.spdx.json
       - name: Preserve artifact provenance bundle
-        run: cp "${{ steps.attest.outputs.bundle-path }}" dist/envbank_0.1.1_artifacts.provenance.json
+        run: cp "${{ steps.attest.outputs.bundle-path }}" dist/envbank_0.2.0_artifacts.provenance.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets
@@ -194,10 +201,10 @@ jobs:
           push: true
           provenance: false
           tags: |
-            ghcr.io/georgeqle/envbank:v0.1.1
-            ghcr.io/georgeqle/envbank:0.1
+            ghcr.io/georgeqle/envbank:v0.2.0
+            ghcr.io/georgeqle/envbank:0.2
           build-args: |
-            VERSION=v0.1.1
+            VERSION=v0.2.0
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.metadata.outputs.build_date }}
       - id: attest
@@ -205,14 +212,14 @@ jobs:
         with:
           subject-name: ghcr.io/georgeqle/envbank
           subject-digest: ${{ steps.push.outputs.digest }}
-          subject-version: v0.1.1
+          subject-version: v0.2.0
           push-to-registry: true
       - name: Preserve image provenance bundle
-        run: cp "${{ steps.attest.outputs.bundle-path }}" envbank_0.1.1_image.provenance.json
+        run: cp "${{ steps.attest.outputs.bundle-path }}" envbank_0.2.0_image.provenance.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: image-provenance
-          path: envbank_0.1.1_image.provenance.json
+          path: envbank_0.2.0_image.provenance.json
           if-no-files-found: error
 
   publish:
@@ -243,7 +250,7 @@ jobs:
           fi
           gh release create "$VERSION" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "EnvBank v0.1.1 alpha" \
-            --notes-file .github/release-notes-v0.1.1.md \
+            --title "EnvBank v0.2.0 alpha" \
+            --notes-file .github/release-notes-v0.2.0.md \
             --prerelease \
             --verify-tag

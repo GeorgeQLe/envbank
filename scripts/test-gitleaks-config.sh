@@ -1,9 +1,12 @@
 #!/bin/sh
 set -eu
 
-repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 scan_dir=$(mktemp -d "${TMPDIR:-/tmp}/envbank-gitleaks.XXXXXX")
 trap 'rm -rf "$scan_dir"' EXIT HUP INT TERM
+
+gitleaks git --redact --config "$repository_root/.gitleaks.toml" \
+	"$repository_root"
 
 # Assemble the fixture so the test script itself does not contain a detectable
 # credential. This value is synthetic and never used for authentication.
