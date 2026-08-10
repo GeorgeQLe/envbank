@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="v0.1.1"
+VERSION="v0.2.0"
 REPOSITORY="GeorgeQLe/envbank"
 LEGACY_REPOSITORY="GeorgeQLe/invisible-envs-bank"
 IMAGE="ghcr.io/georgeqle/envbank"
@@ -12,13 +12,13 @@ LEGACY_URL="https://github.com/${LEGACY_REPOSITORY}"
 
 expected_assets=(
   SHA256SUMS
-  envbank_0.1.1_artifacts.provenance.json
-  envbank_0.1.1_darwin_amd64.tar.gz
-  envbank_0.1.1_darwin_arm64.tar.gz
-  envbank_0.1.1_image.provenance.json
-  envbank_0.1.1_linux_amd64.tar.gz
-  envbank_0.1.1_linux_arm64.tar.gz
-  envbank_0.1.1_sbom.spdx.json
+  envbank_0.2.0_artifacts.provenance.json
+  envbank_0.2.0_darwin_amd64.tar.gz
+  envbank_0.2.0_darwin_arm64.tar.gz
+  envbank_0.2.0_image.provenance.json
+  envbank_0.2.0_linux_amd64.tar.gz
+  envbank_0.2.0_linux_arm64.tar.gz
+  envbank_0.2.0_sbom.spdx.json
 )
 
 fail() {
@@ -48,7 +48,7 @@ assert_safe_archive_types() {
 
 archive_safety_self_test() {
   local unsafe
-  assert_safe_archive_entry 'envbank_0.1.1_linux_amd64/envbank'
+  assert_safe_archive_entry 'envbank_0.2.0_linux_amd64/envbank'
   for unsafe in \
     '/absolute/path' \
     '../escape' \
@@ -84,10 +84,10 @@ else
   fail 'required command not found: sha256sum or shasum'
 fi
 
-verification_root=$(mktemp -d "${TMPDIR:-/tmp}/envbank-v0.1.1-anonymous.XXXXXX")
+verification_root=$(mktemp -d "${TMPDIR:-/tmp}/envbank-v0.2.0-anonymous.XXXXXX")
 download_dir="$verification_root/downloads"
-container_name="envbank-v011-verify-$$"
-volume_name="envbank-v011-verify-$$"
+container_name="envbank-v020-verify-$$"
+volume_name="envbank-v020-verify-$$"
 immutable_image=''
 image_was_present=false
 container_created=false
@@ -164,10 +164,10 @@ for asset in "${expected_assets[@]}"; do
 done
 
 expected_archives=(
-  envbank_0.1.1_darwin_amd64.tar.gz
-  envbank_0.1.1_darwin_arm64.tar.gz
-  envbank_0.1.1_linux_amd64.tar.gz
-  envbank_0.1.1_linux_arm64.tar.gz
+  envbank_0.2.0_darwin_amd64.tar.gz
+  envbank_0.2.0_darwin_arm64.tar.gz
+  envbank_0.2.0_linux_amd64.tar.gz
+  envbank_0.2.0_linux_arm64.tar.gz
 )
 checksum_names=$(awk '{print $2}' "$download_dir/SHA256SUMS" | sed 's/^\*//' | LC_ALL=C sort)
 expected_archive_list=$(printf '%s\n' "${expected_archives[@]}" | LC_ALL=C sort)
@@ -201,13 +201,13 @@ jq -e '
   .dataLicense == "CC0-1.0" and
   (.creationInfo.created | type == "string") and
   (.packages | type == "array" and length > 0)
-' "$download_dir/envbank_0.1.1_sbom.spdx.json" >/dev/null
+' "$download_dir/envbank_0.2.0_sbom.spdx.json" >/dev/null
 
 printf 'Verifying Sigstore bundles and release provenance...\n'
 trusted_root="$verification_root/trusted_root.jsonl"
 gh attestation trusted-root > "$trusted_root"
-artifact_bundle="$download_dir/envbank_0.1.1_artifacts.provenance.json"
-for subject in "${expected_archives[@]}" SHA256SUMS envbank_0.1.1_sbom.spdx.json; do
+artifact_bundle="$download_dir/envbank_0.2.0_artifacts.provenance.json"
+for subject in "${expected_archives[@]}" SHA256SUMS envbank_0.2.0_sbom.spdx.json; do
   gh attestation verify "$download_dir/$subject" \
     --bundle "$artifact_bundle" \
     --custom-trusted-root "$trusted_root" \
@@ -218,10 +218,10 @@ for subject in "${expected_archives[@]}" SHA256SUMS envbank_0.1.1_sbom.spdx.json
 done
 
 case "$(uname -s)/$(uname -m)" in
-  Darwin/x86_64) host_archive=envbank_0.1.1_darwin_amd64.tar.gz ;;
-  Darwin/arm64) host_archive=envbank_0.1.1_darwin_arm64.tar.gz ;;
-  Linux/x86_64) host_archive=envbank_0.1.1_linux_amd64.tar.gz ;;
-  Linux/aarch64 | Linux/arm64) host_archive=envbank_0.1.1_linux_arm64.tar.gz ;;
+  Darwin/x86_64) host_archive=envbank_0.2.0_darwin_amd64.tar.gz ;;
+  Darwin/arm64) host_archive=envbank_0.2.0_darwin_arm64.tar.gz ;;
+  Linux/x86_64) host_archive=envbank_0.2.0_linux_amd64.tar.gz ;;
+  Linux/aarch64 | Linux/arm64) host_archive=envbank_0.2.0_linux_arm64.tar.gz ;;
   *) fail "unsupported verification host: $(uname -s)/$(uname -m)" ;;
 esac
 host_root=${host_archive%.tar.gz}
@@ -230,6 +230,11 @@ version_output=$("$verification_root/$host_root/envbank" version)
 expected_build_date=$(git -C "$verification_root/canonical" show -s --format=%cI "$tag_commit")
 [[ "$version_output" == "envbank $VERSION (commit $tag_commit, built $expected_build_date)" ]] ||
   fail "host binary metadata does not match $VERSION and $tag_commit: $version_output"
+if [[ $(uname -s) == Darwin ]]; then
+  need otool
+  otool -L "$verification_root/$host_root/envbank" | grep -F Security.framework >/dev/null ||
+    fail 'macOS archive does not include Security.framework Keychain support'
+fi
 
 printf 'Verifying the public multi-platform image by immutable digest...\n'
 manifest_json="$verification_root/manifest.json"
@@ -251,7 +256,7 @@ image_digest=$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2)
 [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'could not resolve OCI index digest'
 immutable_image="$IMAGE@$image_digest"
 gh attestation verify "oci://$immutable_image" \
-  --bundle "$download_dir/envbank_0.1.1_image.provenance.json" \
+  --bundle "$download_dir/envbank_0.2.0_image.provenance.json" \
   --custom-trusted-root "$trusted_root" \
   --repo "$REPOSITORY" \
   --signer-workflow "$WORKFLOW" \

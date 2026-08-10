@@ -2,13 +2,13 @@
 
 Website: [envbank.vercel.app](https://envbank.vercel.app) ·
 [Getting started](https://envbank.vercel.app/getting-started) ·
-[Install v0.1.1](https://envbank.vercel.app/install)
+[Install](https://envbank.vercel.app/install)
 
 [![CI](https://github.com/GeorgeQLe/envbank/actions/workflows/ci.yml/badge.svg)](https://github.com/GeorgeQLe/envbank/actions/workflows/ci.yml)
 [![Security](https://github.com/GeorgeQLe/envbank/actions/workflows/security.yml/badge.svg)](https://github.com/GeorgeQLe/envbank/actions/workflows/security.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-> **v0.1.1-alpha:** EnvBank is prerelease software for evaluation. It has not
+> **v0.2.0-alpha:** EnvBank is prerelease software for evaluation. It has not
 > reached a stable compatibility or operations baseline. Do not treat it as a
 > KMS, HSM, enterprise secrets manager, or a substitute for provider-side
 > access controls, rotation, auditing, and recovery.
@@ -44,9 +44,10 @@ Operators should also read the
 disposable recovery drill, and maintain a separate
 [encrypted recovery artifact](docs/recovery.md).
 
-The unreleased SiftCut bundle workflow is documented in
-[local bundle preparation](docs/bundles.md). It prepares encrypted local state
-only and does not contact or deploy to a provider.
+The released bundle and Railway workflow is documented in
+[bundle preparation and Railway rollout](docs/bundles.md). Bundle preparation
+is local-only. Railway writes require a separate interactive confirmation, use
+`skipDeploys: true`, and never deploy a service.
 
 ## What works
 
@@ -66,51 +67,55 @@ only and does not contact or deploy to a provider.
   plaintext output
 - Local, resumable bundle preparation with stdin-only imports, bounded
   derivation, encrypted snapshots, and names-only status
+- Railway project/environment identity binding, exact-service names-only plans,
+  separately confirmed variable upserts, durable resume, and limited
+  verification without provider value reads or deployment mutations
 - Direct child-process environment injection without writing a `.env` file
 - Exact-origin browser authorization stored inside each encrypted record
 - A macOS Keychain-gated Chrome native host and dependency-free MV3 extension
 - A transactional SQLite sync service that supports multiple service processes
 
-## Install v0.1.1
+## Install v0.2.0
 
 Release archives support macOS and Linux on AMD64 and ARM64. The macOS binaries
-are unsigned and not notarized. Browser filling, Chrome native-host
-installation, Keychain storage, and local rotation notifications are macOS-only;
-the core CLI and sync service remain available on every released platform.
+include Keychain support but are unsigned and not notarized. Browser filling,
+Chrome native-host installation, Railway credential storage, and local rotation
+notifications are macOS-only; the core CLI and sync service remain available
+on every released platform.
 
 Download the archive for your platform from the
-[v0.1.1 prerelease](https://github.com/GeorgeQLe/envbank/releases/tag/v0.1.1),
+[v0.2.0 prerelease](https://github.com/GeorgeQLe/envbank/releases/tag/v0.2.0),
 then verify it before extracting:
 
 ```sh
-gh release download v0.1.1 \
+gh release download v0.2.0 \
   --repo GeorgeQLe/envbank \
-  --pattern 'envbank_0.1.1_linux_amd64.tar.gz' \
+  --pattern 'envbank_0.2.0_linux_amd64.tar.gz' \
   --pattern SHA256SUMS \
-  --pattern 'envbank_0.1.1_sbom.spdx.json' \
-  --pattern 'envbank_0.1.1_artifacts.provenance.json'
+  --pattern 'envbank_0.2.0_sbom.spdx.json' \
+  --pattern 'envbank_0.2.0_artifacts.provenance.json'
 sha256sum --ignore-missing --check SHA256SUMS
-gh attestation verify envbank_0.1.1_linux_amd64.tar.gz \
-  --bundle envbank_0.1.1_artifacts.provenance.json \
+gh attestation verify envbank_0.2.0_linux_amd64.tar.gz \
+  --bundle envbank_0.2.0_artifacts.provenance.json \
   --repo GeorgeQLe/envbank \
   --signer-workflow GeorgeQLe/envbank/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.1.1
-tar -xzf envbank_0.1.1_linux_amd64.tar.gz
-./envbank_0.1.1_linux_amd64/envbank version
+  --source-ref refs/tags/v0.2.0
+tar -xzf envbank_0.2.0_linux_amd64.tar.gz
+./envbank_0.2.0_linux_amd64/envbank version
 ```
 
 On macOS, verify a single downloaded archive with
-`grep 'envbank_0.1.1_darwin_arm64.tar.gz' SHA256SUMS | shasum -a 256 -c -`
+`grep 'envbank_0.2.0_darwin_arm64.tar.gz' SHA256SUMS | shasum -a 256 -c -`
 (substitute the archive name for your architecture). Inspect
-`envbank_0.1.1_sbom.spdx.json` with an SPDX-compatible tool and verify its
+`envbank_0.2.0_sbom.spdx.json` with an SPDX-compatible tool and verify its
 provenance the same way:
 
 ```sh
-gh attestation verify envbank_0.1.1_sbom.spdx.json \
-  --bundle envbank_0.1.1_artifacts.provenance.json \
+gh attestation verify envbank_0.2.0_sbom.spdx.json \
+  --bundle envbank_0.2.0_artifacts.provenance.json \
   --repo GeorgeQLe/envbank \
   --signer-workflow GeorgeQLe/envbank/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.1.1
+  --source-ref refs/tags/v0.2.0
 ```
 
 For the complete credential-isolated public verification, including locally
@@ -120,22 +125,22 @@ stored Sigstore bundles and trusted roots, run:
 ./scripts/verify-release-anonymous.sh
 ```
 
-The earlier v0.1.0 prerelease remains immutable and available, but its
-provenance was not published as downloadable bundle assets. Use v0.1.1 for
-anonymous verification.
+The earlier v0.1.0 and v0.1.1 prereleases remain immutable and available.
+v0.1.0 did not publish provenance as downloadable bundle assets. Use v0.2.0
+for the released bundle and Railway workflows.
 
 Run the multi-architecture container by immutable digest in deployments:
 
 ```sh
-docker pull ghcr.io/georgeqle/envbank:v0.1.1
-docker image inspect ghcr.io/georgeqle/envbank:v0.1.1 \
+docker pull ghcr.io/georgeqle/envbank:v0.2.0
+docker image inspect ghcr.io/georgeqle/envbank:v0.2.0 \
   --format '{{index .RepoDigests 0}}'
-gh attestation verify oci://ghcr.io/georgeqle/envbank:v0.1.1 \
+gh attestation verify oci://ghcr.io/georgeqle/envbank:v0.2.0 \
   --repo GeorgeQLe/envbank \
   --signer-workflow GeorgeQLe/envbank/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.1.1
+  --source-ref refs/tags/v0.2.0
 docker run --rm -p 127.0.0.1:7337:7337 \
-  -v envbank-data:/data ghcr.io/georgeqle/envbank:v0.1.1
+  -v envbank-data:/data ghcr.io/georgeqle/envbank:v0.2.0
 ```
 
 The image is shell-free, runs as UID/GID `65532`, and exposes `/healthz`.

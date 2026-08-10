@@ -1,5 +1,20 @@
 # History
 
+## 2026-08-10
+
+- Prepared the v0.2.0 feature-alpha release for the completed manifest, bundle,
+  provider-rollout, and Railway milestones while preserving v0.1.x tags and
+  release assets.
+- Fixed the first scheduled full-history Gitleaks run, which exposed that the
+  newer plural global-allowlist syntax was ignored by the action's pinned
+  Gitleaks 8.24.3 binary. Replaced it with the compatible singular form, kept
+  only two narrow known non-secret patterns, and added a full-history regression
+  before the synthetic-secret assertion.
+- Changed release archives to build macOS with cgo and assert linkage to
+  `Security.framework`, ensuring the downloadable binary contains the
+  Keychain implementation required by Railway credentials and the native host;
+  retained cgo-free Linux archives.
+
 ## 2026-08-09
 
 - Hardened the Milestone 8 Railway rollout after PR #22 review: environment

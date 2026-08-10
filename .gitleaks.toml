@@ -1,18 +1,13 @@
 title = "EnvBank Gitleaks configuration"
+minVersion = "8.24.3"
 
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "Public Chrome extension manifest key"
+[allowlist]
+description = "Known public and symbolic values documented in the repository"
 regexTarget = "line"
 regexes = [
-  '''\QMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxNjV2RX9ymbN8g2RDjSpkoLDGt1vl5OZR1frfwHkHahBAtzoHrHr/kMwtvIGqyVuy6ZrWKVItBb5nWcNPorMNPwEaUSkdTGMHx7kodNr0c/mKGiqu9wWLSS36JCDjv56/4YELL9LppoEZGqgZcJiy5Wk4vcGijazMNjcFS5bVrm1gHMVCyKp5Lv2k0X4xuupSVuc3DSHc97u6sP8clKn1XtWzLjVaSo36zT6DgoY9I/H95RSF5+JmZiBt6eLZ5ARKwcLDGEehE9Fl5J2WWCNzxYM58w/3H0kjvSuBin/NA2Nq1kdyDvU9bSkNOTZubI8m7H5KetWyvjJojHjmtA6kwIDAQAB\E''',
-]
-
-[[allowlists]]
-description = "Symbolic HMAC architecture example"
-regexTarget = "match"
-regexes = [
   '''vault_key, "envbank\.record\.id\.v1"''',
+  '''MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A.*KetWyvjJojHjmtA6kwIDAQAB''',
 ]
