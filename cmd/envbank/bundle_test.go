@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +17,69 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/vaultobject"
 )
+
+func TestBundlePrepareExecKeepsSourceOutputPrivate(t *testing.T) {
+	fixture := newCLIDeviceFixture(t)
+	manifest := `version: 1
+bundle: example/private-source/staging
+records:
+  IMPORTED:
+    source: import
+    sensitivity: secret
+targets:
+  railway:
+    project: example
+    environment: staging
+    services:
+      api:
+        order: 1
+        variables:
+          IMPORTED: {source: record, record: IMPORTED}
+`
+	manifestPath := filepath.Join(t.TempDir(), "private-source.yaml")
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sentinel = "prepare-exec-private-sentinel-8d31"
+	t.Setenv("BUNDLE_SOURCE_HELPER", "1")
+	t.Setenv("BUNDLE_SOURCE_SENTINEL", sentinel)
+	args := append([]string{"bundle", "prepare-exec", "--manifest", manifestPath,
+		"--allow-env", "BUNDLE_SOURCE_HELPER,BUNDLE_SOURCE_SENTINEL"},
+		authArgs(fixture, fixture.firstConfigPath)...)
+	args = append(args, "--", executable, "-test.run=^TestBundlePrepareExecHelper$")
+	stdout, stderr, err := captureRun(t, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBundleOutputIsRedacted(t, stdout+stderr, sentinel, "source-stderr-secret")
+	if !strings.Contains(stdout, "status: prepared") {
+		t.Fatalf("output = %q", stdout)
+	}
+	records := loadFixtureRecords(t, fixture.firstConfigPath, fixture.passphrasePath)
+	physical := bundle.PhysicalName("example/private-source/staging", "IMPORTED")
+	for _, record := range records {
+		if record.Name == physical {
+			if record.Value != sentinel {
+				t.Fatal("stored value does not match private source")
+			}
+			return
+		}
+	}
+	t.Fatal("private source record was not stored")
+}
+
+func TestBundlePrepareExecHelper(t *testing.T) {
+	if os.Getenv("BUNDLE_SOURCE_HELPER") != "1" {
+		return
+	}
+	fmt.Fprintf(os.Stdout, `{"IMPORTED":%q}`, os.Getenv("BUNDLE_SOURCE_SENTINEL"))
+	fmt.Fprint(os.Stderr, "source-stderr-secret")
+	os.Exit(0)
+}
 
 const bundlePrepareManifest = `version: 1
 bundle: example/siftcut/staging

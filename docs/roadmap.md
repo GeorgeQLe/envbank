@@ -74,6 +74,10 @@ fingerprint verification and approval by an active device.
 
 ### 3. Rotation engine
 
+The version-2 lifecycle and hermetic testlab foundation is implemented. Live
+provider acceptance and production workflow wiring remain required before the
+rotation-engine milestone can be marked complete.
+
 - Implement a durable create/store/validate/rollout/revoke state machine.
 - Resume safely after partial failures without losing the old credential or
   repeating irreversible operations.
