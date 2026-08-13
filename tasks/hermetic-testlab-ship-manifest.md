@@ -63,6 +63,7 @@ or agent-visible synthetic secret values.
 - `go test -race ./...`
 - `node --test extension/test/*.test.js`
 - `go vet ./...`
+- `go mod tidy -diff`
 - `test -z "$(gofmt -l .)"`
 - `./scripts/test-gitleaks-config.sh`
 - Built `/tmp/envbank-testlab` and completed a binary-level MCP tools/start smoke test.
