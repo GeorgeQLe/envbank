@@ -10,6 +10,20 @@ output, extension storage, clipboard operations, logs, or popup JavaScript.
 An authorized or compromised destination page can read a value after filling;
 exact-origin authorization is not protection from page-level compromise.
 
+`bundle prepare-exec` prevents a trusted source program's stdout and stderr
+from reaching the operator terminal, but it does not sandbox that program. A
+source receives only a small process environment plus names explicitly listed
+with `--allow-env`, may access the network, and can return incorrect values.
+Use only reviewed absolute-path executables, pin `--source-sha256` for
+unattended use, and never place values in source arguments. Provider, helper,
+EnvBank, and OS process memory may hold plaintext briefly even when UI,
+clipboard, logs, shell history, and named plaintext files are avoided.
+
+The local MCP surface is workflow-only. Unknown arguments are rejected, so it
+has no field that can accept a secret value. Capability, operation, policy,
+and health results contain identifiers and bounded status codes only. It is a
+local stdio server; no remote MCP listener is provided.
+
 ## Supported versions
 
 Only the latest release receives security fixes. Until a stable release exists,

@@ -1,5 +1,17 @@
 # Current work
 
+## Milestone 10: Hermetic agent-operable lifecycle testlab — complete
+
+- [x] Add version-2 lifecycle contracts, signed automation policy and evidence
+  foundations, callback-scoped secret sinks/sources, encrypted operations,
+  optimistic bundle leases, ordered deployments, and reverse rollback.
+- [x] Add private-pipe provider intake, the Stripe webhook adapter, the
+  terminal-safe Clerk helper, and the workflow-only production MCP surface.
+- [x] Add a separate `envbank-testlab` binary with encrypted ephemeral state,
+  loopback provider emulators, signed simulated browser capture, virtual time,
+  bounded faults, strict test-only MCP controls, resumable flow assertions,
+  rollback/quarantine, and leakage regression coverage.
+
 ## Milestone 9: EnvBank OSS v0.2.0 feature release — complete
 
 - [x] Repair the scheduled full-history Gitleaks scan with version-compatible,

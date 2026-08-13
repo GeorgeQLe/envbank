@@ -187,6 +187,21 @@ also read values. Staged writes and deployed state are reported separately;
 there is no delete, staged-change commit, deploy, redeploy, restart, domain,
 service-create, or service-delete GraphQL document.
 
+## Private provider intake
+
+`bundle prepare-exec` starts an explicitly selected absolute-path source
+without a shell or stdin. The child receives no `ENVBANK_*` environment
+variables. Its stdout terminates in a bounded private pipe owned by EnvBank,
+and its stderr is discarded. EnvBank waits for a successful exit, validates
+the complete imports object through the ordinary bundle preparer, and clears
+temporary byte buffers. Fixed errors exclude child diagnostics.
+
+The macOS Clerk helper composes the official authenticated Clerk CLI with a
+user-presence-protected Keychain item for the dashboard-only webhook signing
+secret. It refuses terminal export. This prevents Computer Use from observing
+secret pixels or terminal text, but it does not sandbox the source, remove
+plaintext from process memory, or protect against endpoint compromise.
+
 ## Device revocation
 
 Approved devices have an optional server-side revocation timestamp. Device
@@ -261,6 +276,35 @@ prompts, screenshots, logs, shell arguments, or clipboard history. That
 automation is intentionally left outside the core until provider-specific
 flows can meet those requirements.
 
+Manifest version 2 adds credential capability declarations, deployment
+transactions, health gates, rotation policy, and public configuration/browser
+recipes while retaining version-1 parsing. Validation rejects unknown
+provider capabilities, mode inflation, retry budgets above three, inadequate
+grace periods, missing rollback, and production targets without three health
+successes spanning at least 30 seconds.
+
+Lifecycle bookkeeping is encrypted in typed vault objects. A signed,
+90-day-bounded automation policy binds the exact vault, bundle, manifest,
+environment, provider identities, credential classes, targets, actions,
+health checks, grace period, rollback, and approving device. An optimistic
+bundle lease prevents concurrent workers. Signed evidence chains contain only
+stages and bounded codes. Operations retain the old record revision and old
+upstream identifier through validation and grace; rollback restores prior
+revisions and leaves the new upstream credential quarantined.
+
+Credential creation receives a single-use `SecretSink`. The sink returns only
+a record name and encrypted revision, and provider creation is not durable
+until that receipt exists. The Stripe adapter currently automates webhook
+endpoint secrets; restricted and ordinary application keys remain
+interactive. Deployment transactions stage all targets, activate in manifest
+order, require strong health evidence, and roll affected targets back in
+reverse order.
+
+`envbank mcp serve` exposes the nine workflow tools over local stdio. There is
+no raw record tool, secret argument, or remote listener. The portable
+run-due worker and platform timer packaging remain gated on completed Vercel
+and Railway activation adapters and live-provider acceptance.
+
 ## Browser boundary
 
 The Manifest V3 extension has only `activeTab`, `scripting`, and
@@ -324,6 +368,25 @@ published port to loopback, and back up the database. The HTTP server limits
 headers to 16 KiB, applies bounded read/write/idle timeouts, marks API responses
 `no-store` and `nosniff`, and allows ten seconds for graceful SIGINT/SIGTERM
 shutdown.
+
+## Hermetic workflow testlab
+
+`cmd/envbank-testlab` is a separate executable boundary around the production
+workflow MCP surface. It owns a temporary encrypted SQLite state store, virtual
+clock, fault table, synthetic provider state, write-only deployment state, and
+protocol-v2 browser simulator. The normal `envbank` executable does not import
+this package and therefore cannot expose test auto-approval, clock, or fault
+controls.
+
+The test oracle compares keyed digests internally across provider output, an
+exact encrypted record revision, staged targets, and active deployments. Only
+booleans and safe resource identifiers cross MCP. Persistent restart state is
+authenticated ciphertext; the oracle key remains session-only.
+
+Clerk dashboard capture is always described as `simulated-interactive`.
+Callback-scoped secret sources bind target staging to an exact record revision,
+and deployment failure restores prior material as a new revision before reverse
+target rollback and new-credential quarantine.
 
 ## Cryptographic agility
 

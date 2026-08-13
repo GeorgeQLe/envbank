@@ -24,6 +24,11 @@ const (
 	KindProviderPlan         = "provider-plan"
 	KindRolloutOperation     = "rollout-operation"
 	KindReadinessAttestation = "readiness-attestation"
+	KindAutomationPolicy     = "automation-policy"
+	KindLifecycleOperation   = "lifecycle-operation"
+	KindLifecycleLease       = "lifecycle-lease"
+	KindOperationEvidence    = "operation-evidence"
+	KindRollbackMaterial     = "rollback-material"
 
 	MaxKindBytes    = 64
 	MaxKeyBytes     = 512

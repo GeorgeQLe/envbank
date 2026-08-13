@@ -25,7 +25,9 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/bundle"
 	"github.com/GeorgeQLe/envbank/internal/client"
 	"github.com/GeorgeQLe/envbank/internal/contract"
+	"github.com/GeorgeQLe/envbank/internal/intake"
 	"github.com/GeorgeQLe/envbank/internal/keychain"
+	"github.com/GeorgeQLe/envbank/internal/mcpserver"
 	"github.com/GeorgeQLe/envbank/internal/nativehost"
 	"github.com/GeorgeQLe/envbank/internal/password"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
@@ -134,6 +136,8 @@ func run(args []string) error {
 		return bundleCommand(args[1:])
 	case "railway":
 		return railwayCommand(args[1:])
+	case "mcp":
+		return mcpCommand(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -180,12 +184,14 @@ Usage:
   envbank recovery-restore --resume --artifact PATH [recovery auth flags] [auth flags]
   envbank bundle check --manifest PATH
   envbank bundle prepare --manifest PATH [auth flags]  # missing imports from a JSON object on stdin
+  envbank bundle prepare-exec --manifest PATH [--allow-env NAMES] [--source-sha256 HEX] [--source-timeout DURATION] [auth flags] -- /ABSOLUTE/SOURCE [SAFE ARGS...]
   envbank bundle status --manifest PATH [auth flags]
   envbank railway bind --manifest PATH [auth flags]  # project token from trusted stdin
   envbank railway plan --manifest PATH [auth flags]
   envbank railway apply --plan PLAN_ID [auth flags]
   envbank railway resume --operation OPERATION_ID [auth flags]
   envbank railway verify --bundle BUNDLE [auth flags]
+  envbank mcp serve  # local stdio; workflow tools only
 
 Auth flags:
   --config PATH           encrypted device config
@@ -195,6 +201,13 @@ If --passphrase-file is omitted, ENVBANK_PASSPHRASE is used. Secret values are
 never accepted as command-line arguments. If --recovery-passphrase-file is
 omitted, ENVBANK_RECOVERY_PASSPHRASE is used.
 `)
+}
+
+func mcpCommand(args []string) error {
+	if len(args) != 1 || args[0] != "serve" {
+		return errors.New("mcp subcommand is required (supported: serve)")
+	}
+	return (mcpserver.Server{}).Serve(context.Background(), os.Stdin, os.Stdout)
 }
 
 var railwayCredentialStore keychain.Store = keychain.SystemStore{}
@@ -582,18 +595,88 @@ func clearBytes(value []byte) {
 
 func bundleCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("bundle subcommand is required (supported: check, prepare, status)")
+		return errors.New("bundle subcommand is required (supported: check, prepare, prepare-exec, status)")
 	}
 	switch args[0] {
 	case "check":
 		return bundleCheck(args[1:])
 	case "prepare":
 		return bundlePrepare(args[1:])
+	case "prepare-exec":
+		return bundlePrepareExec(args[1:])
 	case "status":
 		return bundleStatus(args[1:])
 	default:
 		return fmt.Errorf("unknown bundle subcommand %q", args[0])
 	}
+}
+
+func bundlePrepareExec(args []string) error {
+	separator := -1
+	for index, argument := range args {
+		if argument == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || separator == len(args)-1 {
+		return errors.New("bundle prepare-exec requires -- /ABSOLUTE/SOURCE [SAFE ARGS...]")
+	}
+	flagArgs, sourceArgs := args[:separator], args[separator+1:]
+	fs := flag.NewFlagSet("bundle prepare-exec", flag.ContinueOnError)
+	manifestPath := fs.String("manifest", "", "bundle manifest path")
+	allowEnvironment := fs.String("allow-env", "", "comma-separated source environment variable names")
+	sourceSHA256 := fs.String("source-sha256", "", "optional pinned source executable SHA-256")
+	sourceTimeout := fs.Duration("source-timeout", intake.DefaultTimeout, "source execution timeout")
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	if *manifestPath == "" || fs.NArg() != 0 {
+		return errors.New("bundle prepare-exec requires --manifest PATH and no positional arguments before --")
+	}
+	if auth.passphraseFile == "" {
+		return errors.New("bundle prepare-exec requires --passphrase-file; EnvBank passphrases are never inherited by a source")
+	}
+	document, err := loadBundleManifest(*manifestPath)
+	if err != nil {
+		return err
+	}
+	api, secrets, err := unlockedAPI(auth)
+	if err != nil {
+		return err
+	}
+	vaultKey, err := requireVaultKey(secrets)
+	if err != nil {
+		return err
+	}
+	preparer := &bundle.Preparer{API: api, VaultKey: vaultKey}
+	status, err := preparer.Status(document)
+	if err != nil {
+		return err
+	}
+	if status.State == "prepared" {
+		printBundleStatus(status)
+		return nil
+	}
+	allowed := []string{"HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "XDG_CONFIG_HOME"}
+	if *allowEnvironment != "" {
+		allowed = append(allowed, strings.Split(*allowEnvironment, ",")...)
+	}
+	raw, err := (intake.CommandSource{
+		Executable: sourceArgs[0], Arguments: sourceArgs[1:], Environment: os.Environ(),
+		AllowedEnvironment: allowed, ExecutableSHA256: *sourceSHA256, Timeout: *sourceTimeout,
+	}).Read(context.Background())
+	if err != nil {
+		return err
+	}
+	defer intake.Wipe(raw)
+	status, err = preparer.Prepare(document, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	printBundleStatus(status)
+	return nil
 }
 
 func bundleCheck(args []string) error {

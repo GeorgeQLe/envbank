@@ -49,6 +49,10 @@ The released bundle and Railway workflow is documented in
 is local-only. Railway writes require a separate interactive confirmation, use
 `skipDeploys: true`, and never deploy a service.
 
+Trusted password-manager and provider programs can feed missing imports over
+an EnvBank-owned private pipe without rendering values to an operator or UI
+automation layer. See [private provider intake](docs/provider-intake.md).
+
 ## What works
 
 - AES-256-GCM encrypted records with hidden, keyed record identifiers
@@ -67,6 +71,8 @@ is local-only. Railway writes require a separate interactive confirmation, use
   plaintext output
 - Local, resumable bundle preparation with stdin-only imports, bounded
   derivation, encrypted snapshots, and names-only status
+- Private-pipe intake from an absolute-path trusted provider program, including
+  a macOS Clerk/Keychain helper that refuses terminal export
 - Railway project/environment identity binding, exact-service names-only plans,
   separately confirmed variable upserts, durable resume, and limited
   verification without provider value reads or deployment mutations
@@ -364,6 +370,29 @@ This does not update the upstream provider. A safe provider/computer-use
 adapter must create the provider credential, commit it to EnvBank, validate the
 new credential, then revoke the old one. It must not expose values through model
 prompts, screenshots, logs, shell arguments, or clipboard history.
+
+The lifecycle foundation supports version-2 manifests, signed and expiring
+automation policies, optimistic per-bundle leases, secret-free evidence,
+ordered deployment with reverse rollback, and direct Stripe webhook-secret
+capture through an encrypted sink. Start the local workflow-only MCP server
+with `./envbank mcp serve`; it intentionally exposes no raw secret operations
+and no network listener. Provider capabilities remain honest: unsupported
+unattended creation is reported as interactive instead of being simulated.
+
+For hermetic agent-driven validation, build and run the separate test-only
+binary:
+
+```sh
+go build -o envbank-testlab ./cmd/envbank-testlab
+./envbank-testlab serve --scenario full-matrix
+```
+
+It speaks newline-delimited MCP JSON-RPC on stdout and creates a mode-0700,
+temporary encrypted SQLite vault by default. Its virtual clock, fault
+injection, simulated interactive browser capture, and digest-comparison
+assertions exist only in this binary. Synthetic provider values are generated
+inside the process and never accepted by or returned through MCP. Pass a
+private `--state-dir` only for restart and recovery tests.
 
 For a human-compatible random-character password instead of a URL-safe token,
 use `generate`. It defaults to 24 lowercase, uppercase, digit, and symbol

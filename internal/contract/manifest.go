@@ -31,6 +31,8 @@ const (
 	maxVariables     = 512
 	maxDependencies  = 64
 	maxTemplateBytes = 16 << 10
+	maxCredentials   = 128
+	maxRecipes       = 128
 )
 
 var (
@@ -40,11 +42,57 @@ var (
 )
 
 type Manifest struct {
-	Version  int                       `yaml:"version" json:"version"`
-	Bundle   string                    `yaml:"bundle" json:"bundle"`
-	Policies map[string]PasswordPolicy `yaml:"policies,omitempty" json:"policies,omitempty"`
-	Records  map[string]Record         `yaml:"records" json:"records"`
-	Targets  map[string]Target         `yaml:"targets" json:"targets"`
+	Version          int                       `yaml:"version" json:"version"`
+	Bundle           string                    `yaml:"bundle" json:"bundle"`
+	Environment      string                    `yaml:"environment,omitempty" json:"environment,omitempty"`
+	Policies         map[string]PasswordPolicy `yaml:"policies,omitempty" json:"policies,omitempty"`
+	Records          map[string]Record         `yaml:"records" json:"records"`
+	Targets          map[string]Target         `yaml:"targets" json:"targets"`
+	Credentials      map[string]Credential     `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+	RotationPolicies map[string]RotationPolicy `yaml:"rotation_policies,omitempty" json:"rotation_policies,omitempty"`
+	Configurations   []ConfigurationRecipe     `yaml:"configurations,omitempty" json:"configurations,omitempty"`
+	BrowserRecipes   []BrowserRecipe           `yaml:"browser_recipes,omitempty" json:"browser_recipes,omitempty"`
+}
+
+// Credential describes a lifecycle without containing provider-control or
+// produced credential material. Mode is checked against EnvBank's honest
+// capability registry during manifest validation.
+type Credential struct {
+	Provider   string   `yaml:"provider" json:"provider"`
+	Type       string   `yaml:"type" json:"type"`
+	Mode       string   `yaml:"mode" json:"mode"`
+	Record     string   `yaml:"record" json:"record"`
+	Validation string   `yaml:"validation" json:"validation"`
+	Revoke     string   `yaml:"revoke" json:"revoke"`
+	Actions    []string `yaml:"actions,omitempty" json:"actions,omitempty"`
+}
+
+type RotationPolicy struct {
+	Credentials     []string `yaml:"credentials" json:"credentials"`
+	Targets         []string `yaml:"targets" json:"targets"`
+	Schedule        string   `yaml:"schedule" json:"schedule"`
+	GracePeriod     string   `yaml:"grace_period" json:"grace_period"`
+	RetryLimit      int      `yaml:"retry_limit" json:"retry_limit"`
+	ActivationOrder []string `yaml:"activation_order" json:"activation_order"`
+	AllowedActions  []string `yaml:"allowed_actions" json:"allowed_actions"`
+	Rollback        string   `yaml:"rollback" json:"rollback"`
+}
+
+type ConfigurationRecipe struct {
+	Provider  string            `yaml:"provider" json:"provider"`
+	Operation string            `yaml:"operation" json:"operation"`
+	Resource  string            `yaml:"resource" json:"resource"`
+	Fields    map[string]string `yaml:"fields,omitempty" json:"fields,omitempty"`
+}
+
+type BrowserRecipe struct {
+	Provider    string `yaml:"provider" json:"provider"`
+	Origin      string `yaml:"origin" json:"origin"`
+	Route       string `yaml:"route" json:"route"`
+	Selector    string `yaml:"selector" json:"selector"`
+	Strategy    string `yaml:"strategy" json:"strategy"`
+	ValuePrefix string `yaml:"value_prefix" json:"value_prefix"`
+	Record      string `yaml:"record" json:"record"`
 }
 
 type PasswordPolicy struct {
@@ -64,11 +112,26 @@ type Record struct {
 }
 
 type Target struct {
+	Provider      string             `yaml:"provider,omitempty" json:"provider,omitempty"`
 	Project       string             `yaml:"project" json:"project"`
 	ProjectID     string             `yaml:"project_id,omitempty" json:"project_id,omitempty"`
 	Environment   string             `yaml:"environment" json:"environment"`
 	EnvironmentID string             `yaml:"environment_id,omitempty" json:"environment_id,omitempty"`
 	Services      map[string]Service `yaml:"services" json:"services"`
+	Stage         string             `yaml:"stage,omitempty" json:"stage,omitempty"`
+	Activation    string             `yaml:"activation,omitempty" json:"activation,omitempty"`
+	HealthChecks  []HealthCheck      `yaml:"health_checks,omitempty" json:"health_checks,omitempty"`
+	Promotion     string             `yaml:"promotion,omitempty" json:"promotion,omitempty"`
+	Rollback      string             `yaml:"rollback,omitempty" json:"rollback,omitempty"`
+}
+
+type HealthCheck struct {
+	URL             string `yaml:"url" json:"url"`
+	Method          string `yaml:"method,omitempty" json:"method,omitempty"`
+	ExpectedStatus  int    `yaml:"expected_status" json:"expected_status"`
+	Successes       int    `yaml:"successes" json:"successes"`
+	MinimumDuration string `yaml:"minimum_duration" json:"minimum_duration"`
+	Timeout         string `yaml:"timeout" json:"timeout"`
 }
 
 type Service struct {
@@ -217,8 +280,12 @@ func locationError(node *yaml.Node, message string) error {
 }
 
 func validate(manifest *Manifest) ([]string, error) {
-	if manifest.Version != 1 {
-		return nil, errors.New("version: only manifest version 1 is supported")
+	if manifest.Version != 1 && manifest.Version != 2 {
+		return nil, errors.New("version: only manifest versions 1 and 2 are supported")
+	}
+	if manifest.Version == 1 && (manifest.Environment != "" || len(manifest.Credentials) != 0 ||
+		len(manifest.RotationPolicies) != 0 || len(manifest.Configurations) != 0 || len(manifest.BrowserRecipes) != 0) {
+		return nil, errors.New("version: lifecycle declarations require manifest version 2")
 	}
 	if len(manifest.Bundle) == 0 || len(manifest.Bundle) > maxBundleLength || !bundlePattern.MatchString(manifest.Bundle) || strings.Contains(manifest.Bundle, "//") {
 		return nil, fmt.Errorf("bundle: must be a valid identifier of at most %d characters", maxBundleLength)
@@ -298,6 +365,9 @@ func validate(manifest *Manifest) ([]string, error) {
 	for _, provider := range sortedMapKeys(manifest.Targets) {
 		target := manifest.Targets[provider]
 		path := "targets." + provider
+		if manifest.Version == 1 && (target.Provider != "" || target.Stage != "" || target.Activation != "" || len(target.HealthChecks) != 0 || target.Promotion != "" || target.Rollback != "") {
+			return nil, fmt.Errorf("%s: deployment lifecycle fields require manifest version 2", path)
+		}
 		if !providerPattern.MatchString(provider) || target.Project == "" || target.Environment == "" {
 			return nil, fmt.Errorf("%s: provider, project, and environment names are required", path)
 		}
@@ -341,6 +411,11 @@ func validate(manifest *Manifest) ([]string, error) {
 					return nil, fmt.Errorf("%s.variables.%s: %w", servicePath, name, err)
 				}
 			}
+		}
+	}
+	if manifest.Version == 2 {
+		if err := validateLifecycle(manifest); err != nil {
+			return nil, err
 		}
 	}
 	return derived, nil

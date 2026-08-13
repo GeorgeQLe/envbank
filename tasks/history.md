@@ -1,5 +1,22 @@
 # History
 
+## 2026-08-13
+
+- Added the version-2 lifecycle contract and safety foundations: signed,
+  expiring policies and evidence; encrypted operations and rollback material;
+  callback-scoped secret sinks/sources; optimistic per-bundle leases; and
+  ordered deployment with reverse rollback.
+- Added private-pipe provider intake, a terminal-safe Clerk/Keychain helper,
+  Stripe webhook lifecycle support, and a strict workflow-only MCP surface
+  that accepts and returns no credential-shaped fields.
+- Added the separate `envbank-testlab` executable with encrypted temporary
+  SQLite state, ephemeral signer/oracle keys, loopback provider emulators,
+  signed protocol-v2 simulated browser capture, virtual time, bounded fault
+  injection, resumable checkpoints, lease races, rollback/quarantine, and
+  boolean-only end-to-end secret-flow assertions.
+- Verified the full Go and extension suites, full Go race suite, formatting,
+  vet, build/smoke behavior, and the repository secret-scan self-test.
+
 ## 2026-08-10
 
 - Merged PR #23 through protected `main`, published the immutable annotated

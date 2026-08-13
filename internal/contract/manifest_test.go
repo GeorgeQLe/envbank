@@ -70,6 +70,55 @@ func TestParseSiftCutManifest(t *testing.T) {
 	}
 }
 
+func TestParseLifecycleManifestV2(t *testing.T) {
+	input := strings.Replace(validManifest, "version: 1", "version: 2\nenvironment: production", 1) + `credentials:
+  stripe-webhook:
+    provider: stripe
+    type: webhook-signing-secret
+    mode: automatic
+    record: CLERK_SECRET_KEY
+    validation: webhook-delivery
+    revoke: delete-endpoint
+    actions: [create, validate, revoke]
+rotation_policies:
+  daily:
+    credentials: [stripe-webhook]
+    targets: [railway]
+    schedule: "0 3 * * *"
+    grace_period: 24h
+    retry_limit: 3
+    activation_order: [railway]
+    allowed_actions: [create, validate, revoke]
+    rollback: restore-last-known-good
+`
+	input = strings.Replace(input, "    services:\n", "    stage: variables-skip-deploys\n    activation: deploy-services\n    rollback: restore-last-known-good\n    health_checks:\n      - url: https://example.test/health\n        method: GET\n        expected_status: 200\n        successes: 3\n        minimum_duration: 30s\n        timeout: 10m\n    services:\n", 1)
+	input = strings.Replace(input, "    environment: staging\n", "    environment: staging\n    project_id: project-id\n    environment_id: environment-id\n", 1)
+	document, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Manifest.Version != 2 || document.Manifest.Credentials["stripe-webhook"].Mode != "automatic" {
+		t.Fatal("v2 lifecycle declarations missing")
+	}
+}
+
+func TestParseLifecycleRejectsInteractiveAutomaticRotation(t *testing.T) {
+	input := strings.Replace(validManifest, "version: 1", "version: 2\nenvironment: staging", 1) + `credentials:
+  clerk-key:
+    provider: clerk
+    type: application-key
+    mode: automatic
+    record: CLERK_SECRET_KEY
+    validation: identity
+    revoke: revoke-key
+    actions: [create, validate, revoke]
+rotation_policies: {}
+`
+	if _, err := Parse([]byte(input)); err == nil || !strings.Contains(err.Error(), "requires interactive") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestCanonicalDigestStableAcrossMapOrderAndFormatting(t *testing.T) {
 	first, err := Parse([]byte(validManifest))
 	if err != nil {

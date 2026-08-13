@@ -2,6 +2,7 @@
 
 build:
 	go build -o envbank ./cmd/envbank
+	go build -o envbank-testlab ./cmd/envbank-testlab
 
 test: test-go test-extension
 
