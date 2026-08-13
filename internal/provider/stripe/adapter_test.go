@@ -62,8 +62,20 @@ func TestWebhookCreateNeverReturnsResponseSecretInError(t *testing.T) {
 	adapter, _ := New([]byte("sk_test_control"), Options{Endpoint: "http://localhost", Client: client})
 	defer adapter.Close()
 	sink, _ := lifecycle.NewSecretSink(&writer{}, "TOKEN")
-	_, err := adapter.Create(context.Background(), lifecycle.CredentialRequest{ProviderIdentity: "acct_123", CredentialType: "webhook-signing-secret", DestinationRecord: "TOKEN", Parameters: map[string][]string{"url": {"https://example.test/webhook"}, "enabled_events": {"*"}}}, sink)
+	_, err := adapter.Create(context.Background(), lifecycle.CredentialRequest{ProviderIdentity: "acct_123", CredentialType: "webhook-signing-secret", DestinationRecord: "TOKEN", IdempotencyKey: "operation-error", Parameters: map[string][]string{"url": {"https://example.test/webhook"}, "enabled_events": {"*"}}}, sink)
 	if err == nil || strings.Contains(err.Error(), sentinel) {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestWebhookCreateRequiresStableIdempotencyKey(t *testing.T) {
+	called := false
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { called = true; return nil, nil })}
+	adapter, _ := New([]byte("sk_test_control"), Options{Endpoint: "http://localhost", Client: client})
+	defer adapter.Close()
+	sink, _ := lifecycle.NewSecretSink(&writer{}, "TOKEN")
+	_, err := adapter.Create(context.Background(), lifecycle.CredentialRequest{ProviderIdentity: "acct_123", CredentialType: "webhook-signing-secret", DestinationRecord: "TOKEN", Parameters: map[string][]string{"url": {"https://example.test/webhook"}, "enabled_events": {"*"}}}, sink)
+	if err == nil || called {
+		t.Fatal("non-idempotent creation reached Stripe")
 	}
 }

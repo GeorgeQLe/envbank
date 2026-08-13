@@ -83,7 +83,7 @@ func (operation *Operation) Move(to State, now time.Time) error {
 // destructive upstream operation.
 func (operation Operation) RevocationAllowed(binding AuthorizationBinding, recordRevision int64, healthEvidenceDigest string, now time.Time, policy AutomationPolicy) error {
 	policyDigest, err := policy.Digest()
-	if err != nil || operation.Validate() != nil || operation.State != StateRevoking || operation.NewRecordRevision != recordRevision || operation.HealthEvidenceDigest != healthEvidenceDigest || operation.PolicyDigest != policyDigest || operation.ManifestDigest != binding.ManifestDigest || operation.ProviderIdentity != binding.ProviderIdentity || operation.Target != binding.Target {
+	if err != nil || operation.Validate() != nil || operation.State != StateRevoking || operation.NewRecordRevision != recordRevision || operation.HealthEvidenceDigest != healthEvidenceDigest || operation.PolicyDigest != policyDigest || operation.VaultID != binding.VaultID || operation.Bundle != binding.Bundle || operation.ManifestDigest != binding.ManifestDigest || operation.Provider != binding.Provider || operation.ProviderIdentity != binding.ProviderIdentity || operation.CredentialClass != binding.CredentialClass || operation.Target != binding.Target {
 		return errors.New("revocation safety evidence changed")
 	}
 	if operation.GraceEndsAt == "" {

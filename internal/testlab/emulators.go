@@ -12,17 +12,22 @@ import (
 
 // providerEmulators are loopback-only protocol fakes. Their addresses and
 // control plane never cross MCP; production code has no import path to them.
-type providerEmulators struct{ Stripe, Clerk, Vercel, Railway *httptest.Server }
+type stripeCredential struct {
+	value     []byte
+	delivered bool
+}
+type stripeStore struct {
+	sync.Mutex
+	idempotent map[string]stripeCredential
+	byID       map[string][]byte
+}
+type providerEmulators struct {
+	Stripe, Clerk, Vercel, Railway *httptest.Server
+	stripe                         *stripeStore
+}
 
 func startProviderEmulators() (*providerEmulators, error) {
-	type stripeCredential struct {
-		value     []byte
-		delivered bool
-	}
-	stripeState := struct {
-		sync.Mutex
-		idempotent map[string]stripeCredential
-	}{idempotent: map[string]stripeCredential{}}
+	stripeState := &stripeStore{idempotent: map[string]stripeCredential{}, byID: map[string][]byte{}}
 	stripe := newLoopbackServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch {
@@ -39,12 +44,14 @@ func startProviderEmulators() (*providerEmulators, error) {
 			if !exists {
 				credential.value, _ = synthetic("stripe")
 			}
-			response := map[string]string{"id": "we_testlab"}
+			id := "we_" + strings.ReplaceAll(key, "-", "_")
+			response := map[string]string{"id": id}
 			if !credential.delivered {
 				response["secret"] = string(credential.value)
 				credential.delivered = true
 			}
 			stripeState.idempotent[key] = credential
+			stripeState.byID[id] = append([]byte(nil), credential.value...)
 			stripeState.Unlock()
 			json.NewEncoder(writer).Encode(response)
 		case request.Method == http.MethodDelete && strings.HasPrefix(request.URL.Path, "/v1/webhook_endpoints/"):
@@ -86,7 +93,16 @@ func startProviderEmulators() (*providerEmulators, error) {
 		}
 		json.NewEncoder(writer).Encode(map[string]any{"data": map[string]any{"project": map[string]string{"id": "railway-project"}, "status": "SUCCESS"}})
 	}))
-	return &providerEmulators{Stripe: stripe, Clerk: clerk, Vercel: vercel, Railway: railway}, nil
+	return &providerEmulators{Stripe: stripe, Clerk: clerk, Vercel: vercel, Railway: railway, stripe: stripeState}, nil
+}
+
+func (emulators *providerEmulators) stripeSecret(id string) []byte {
+	if emulators == nil || emulators.stripe == nil {
+		return nil
+	}
+	emulators.stripe.Lock()
+	defer emulators.stripe.Unlock()
+	return append([]byte(nil), emulators.stripe.byID[id]...)
 }
 
 func newLoopbackServer(handler http.Handler) *httptest.Server {

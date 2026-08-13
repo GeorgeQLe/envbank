@@ -136,6 +136,9 @@ func validateLifecycle(manifest *Manifest) error {
 				return fmt.Errorf("%s.activation_order: target %s is not selected", path, target)
 			}
 		}
+		if len(policy.ActivationOrder) != len(policy.Targets) || duplicateStrings(policy.ActivationOrder) {
+			return fmt.Errorf("%s.activation_order: must contain every selected target exactly once", path)
+		}
 		if err := validateActions(path+".allowed_actions", policy.AllowedActions); err != nil {
 			return err
 		}
@@ -164,6 +167,17 @@ func validateLifecycle(manifest *Manifest) error {
 		}
 	}
 	return nil
+}
+
+func duplicateStrings(values []string) bool {
+	seen := map[string]bool{}
+	for _, value := range values {
+		if seen[value] {
+			return true
+		}
+		seen[value] = true
+	}
+	return false
 }
 
 func validateActions(path string, actions []string) error {

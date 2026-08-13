@@ -16,6 +16,10 @@
   boolean-only end-to-end secret-flow assertions.
 - Verified the full Go and extension suites, full Go race suite, formatting,
   vet, build/smoke behavior, and the repository secret-scan self-test.
+- Addressed all five automated PR review findings by binding every immutable
+  revocation field, rolling back all staged targets, requiring Stripe
+  idempotency, enforcing exact activation permutations, and routing testlab
+  Stripe acquisition through the loopback emulator and production adapter.
 
 ## 2026-08-10
 

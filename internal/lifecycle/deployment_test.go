@@ -66,6 +66,21 @@ func TestDeployInOrderRollsBackInReverse(t *testing.T) {
 	}
 }
 
+func TestActivationFailureRollsBackEveryStagedTarget(t *testing.T) {
+	calls := []string{}
+	targets := []NamedDeployment{{"vercel", &fakeDeployment{"vercel", &calls, "activate"}}, {"railway", &fakeDeployment{"railway", &calls, ""}}}
+	requests := map[string]DeploymentRequest{"vercel": {OperationID: "op"}, "railway": {OperationID: "op"}}
+	if _, err := DeployInOrder(context.Background(), targets, requests); err == nil {
+		t.Fatal("activation failure accepted")
+	}
+	wantSuffix := []string{"rollback:railway", "rollback:vercel"}
+	for index, wanted := range wantSuffix {
+		if calls[len(calls)-2+index] != wanted {
+			t.Fatalf("calls=%v", calls)
+		}
+	}
+}
+
 func TestHealthEvidenceRequiresThreeChecksOverThirtySeconds(t *testing.T) {
 	first := time.Now().UTC()
 	for _, evidence := range []HealthEvidence{{Healthy: true, SuccessfulChecks: 2, FirstSuccessAt: first.Format(time.RFC3339), LastSuccessAt: first.Add(time.Minute).Format(time.RFC3339)}, {Healthy: true, SuccessfulChecks: 3, FirstSuccessAt: first.Format(time.RFC3339), LastSuccessAt: first.Add(29 * time.Second).Format(time.RFC3339)}} {

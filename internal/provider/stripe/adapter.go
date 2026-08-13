@@ -87,7 +87,7 @@ func (adapter *Adapter) Identify(ctx context.Context) (provider.Identity, error)
 }
 
 func (adapter *Adapter) Create(ctx context.Context, request lifecycle.CredentialRequest, sink *lifecycle.SecretSink) (lifecycle.CredentialEvidence, error) {
-	if request.CredentialType != "webhook-signing-secret" || request.ProviderIdentity == "" || request.DestinationRecord == "" || sink == nil {
+	if request.CredentialType != "webhook-signing-secret" || request.ProviderIdentity == "" || request.DestinationRecord == "" || sink == nil || len(request.IdempotencyKey) == 0 || len(request.IdempotencyKey) > 255 || strings.IndexFunc(request.IdempotencyKey, func(character rune) bool { return character <= ' ' || character == 0x7f }) >= 0 {
 		return lifecycle.CredentialEvidence{}, provider.NewError("create", 0, "INVALID_REQUEST", provider.RetryNever)
 	}
 	values := url.Values{}

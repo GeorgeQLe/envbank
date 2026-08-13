@@ -23,6 +23,7 @@ import (
 
 	"github.com/GeorgeQLe/envbank/internal/lifecycle"
 	"github.com/GeorgeQLe/envbank/internal/mcpserver"
+	stripeprovider "github.com/GeorgeQLe/envbank/internal/provider/stripe"
 	"github.com/GeorgeQLe/envbank/internal/secure"
 	_ "modernc.org/sqlite"
 )
@@ -293,13 +294,7 @@ func (lab *Lab) startLocked(ctx context.Context, provider string) (mcpserver.Res
 
 func (lab *Lab) continueLocked(ctx context.Context, op *operation) (mcpserver.Result, error) {
 	if op.Revision == 0 {
-		secret, err := synthetic(op.Provider)
-		if err != nil {
-			return mcpserver.Result{}, err
-		}
-		defer wipe(secret)
-		lab.state.Flows[op.ID] = secretFlow{Provider: append([]byte(nil), secret...)}
-		if err := lab.storeSecretLocked(ctx, op, secret); err != nil {
+		if err := lab.acquireCredentialLocked(ctx, op); err != nil {
 			return lab.failureLocked(op, err)
 		}
 	}
@@ -327,6 +322,42 @@ func (lab *Lab) continueLocked(ctx context.Context, op *operation) (mcpserver.Re
 		return mcpserver.Result{}, err
 	}
 	return lab.resultLocked(op.ID)
+}
+
+func (lab *Lab) acquireCredentialLocked(ctx context.Context, op *operation) error {
+	if op.Provider == "stripe" && lab.emulators != nil && lab.emulators.Stripe != nil {
+		adapter, err := stripeprovider.New([]byte("testlab-control"), stripeprovider.Options{Endpoint: lab.emulators.Stripe.URL})
+		if err != nil {
+			return err
+		}
+		defer adapter.Close()
+		identity, err := adapter.Identify(ctx)
+		if err != nil {
+			return err
+		}
+		writer := &recordWriter{lab: lab, op: op}
+		sink, _ := lifecycle.NewSecretSink(writer, op.Record)
+		evidence, err := adapter.Create(ctx, lifecycle.CredentialRequest{ProviderIdentity: identity.ID, CredentialType: "webhook-signing-secret", DestinationRecord: op.Record, IdempotencyKey: op.ID, Parameters: map[string][]string{"url": {"https://receiver.test/webhook"}, "enabled_events": {"checkout.session.completed"}}}, sink)
+		if err != nil {
+			return err
+		}
+		op.CredentialID = evidence.CredentialID
+		op.Revision = evidence.Receipt.Revision
+		value := lab.emulators.stripeSecret(evidence.CredentialID)
+		defer wipe(value)
+		if len(value) == 0 {
+			return errors.New("provider credential capture failed")
+		}
+		lab.state.Flows[op.ID] = secretFlow{Provider: append([]byte(nil), value...)}
+		return nil
+	}
+	secret, err := synthetic(op.Provider)
+	if err != nil {
+		return err
+	}
+	defer wipe(secret)
+	lab.state.Flows[op.ID] = secretFlow{Provider: append([]byte(nil), secret...)}
+	return lab.storeSecretLocked(ctx, op, secret)
 }
 
 func (lab *Lab) resumeLocked(ctx context.Context, id string) (mcpserver.Result, error) {

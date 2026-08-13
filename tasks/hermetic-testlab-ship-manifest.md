@@ -87,8 +87,12 @@ Reviewed the complete diff for credential-shaped schemas, arbitrary provider
 error propagation, stdout/stderr leakage, environment inheritance, unbounded
 reads, unsafe network listeners, test-control imports in production, plaintext
 SQLite persistence, stale record staging, rollback ordering, and lease races.
-Executable regressions cover the highest-risk boundaries. No blocking finding
-remains. The source executable hash check has a local filesystem TOCTOU window;
+The automated PR review then identified and the implementation fixed five
+issues: incomplete revocation binding, partial staged-target rollback, optional
+Stripe idempotency, incomplete activation ordering, and a Stripe-emulator
+bypass in the testlab workflow. Focused regressions and the full Go suite cover
+those fixes. No blocking finding remains. The source executable hash check has
+a local filesystem TOCTOU window;
 the source is explicitly a trusted local program and unattended callers should
 also use OS ownership/permission controls.
 

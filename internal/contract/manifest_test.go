@@ -102,6 +102,14 @@ rotation_policies:
 	}
 }
 
+func TestLifecycleActivationOrderMustBeExactPermutation(t *testing.T) {
+	// Direct validation isolates ordering from the other required v2 fields.
+	manifest := Manifest{Version: 2, Environment: "staging", Records: map[string]Record{"TOKEN": {}}, Credentials: map[string]Credential{"credential": {Provider: "stripe", Type: "webhook-signing-secret", Mode: "automatic", Record: "TOKEN", Validation: "webhook-delivery", Revoke: "delete-endpoint", Actions: []string{"create"}}}, Targets: map[string]Target{"one": {Provider: "vercel", ProjectID: "p1", EnvironmentID: "e1", Stage: "write", Activation: "deploy", Rollback: "restore"}, "two": {Provider: "railway", ProjectID: "p2", EnvironmentID: "e2", Stage: "write", Activation: "deploy", Rollback: "restore"}}, RotationPolicies: map[string]RotationPolicy{"policy": {Credentials: []string{"credential"}, Targets: []string{"one", "two"}, Schedule: "daily", GracePeriod: "15m", RetryLimit: 1, ActivationOrder: []string{"one", "one"}, AllowedActions: []string{"create"}, Rollback: "restore"}}}
+	if err := validateLifecycle(&manifest); err == nil || !strings.Contains(err.Error(), "exactly once") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestParseLifecycleRejectsInteractiveAutomaticRotation(t *testing.T) {
 	input := strings.Replace(validManifest, "version: 1", "version: 2\nenvironment: staging", 1) + `credentials:
   clerk-key:

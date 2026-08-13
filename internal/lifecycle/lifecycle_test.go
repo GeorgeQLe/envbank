@@ -173,4 +173,18 @@ func TestRevocationRechecksPolicyRecordTargetAndHealth(t *testing.T) {
 	if err := operation.RevocationAllowed(binding, 2, strings.Repeat("c", 64), now, policy); err == nil {
 		t.Fatal("changed health evidence accepted")
 	}
+	for name, mutate := range map[string]func(*AuthorizationBinding){
+		"vault":            func(value *AuthorizationBinding) { value.VaultID = "other" },
+		"bundle":           func(value *AuthorizationBinding) { value.Bundle = "other" },
+		"provider":         func(value *AuthorizationBinding) { value.Provider = "clerk" },
+		"credential class": func(value *AuthorizationBinding) { value.CredentialClass = "secret-key" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := binding
+			mutate(&changed)
+			if err := operation.RevocationAllowed(changed, 2, strings.Repeat("b", 64), now, policy); err == nil {
+				t.Fatal("changed operation binding accepted")
+			}
+		})
+	}
 }

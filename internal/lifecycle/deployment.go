@@ -50,13 +50,13 @@ func DeployInOrder(ctx context.Context, targets []NamedDeployment, requests map[
 	for index, target := range targets {
 		activated, err := target.Adapter.Activate(ctx, staged[index])
 		if err != nil {
-			rolled := rollback(ctx, targets[:index+1], staged[:index+1])
+			rolled := rollback(ctx, targets, staged)
 			return nil, DeploymentFailure{Stage: "activating", Target: target.Name, RolledBack: rolled}
 		}
 		health, err := target.Adapter.Verify(ctx, activated)
 		if err != nil || health.Validate() != nil {
 			staged[index] = activated
-			rolled := rollback(ctx, targets[:index+1], staged[:index+1])
+			rolled := rollback(ctx, targets, staged)
 			return nil, DeploymentFailure{Stage: "verifying", Target: target.Name, RolledBack: rolled}
 		}
 		staged[index] = activated
