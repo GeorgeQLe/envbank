@@ -189,6 +189,13 @@ Findings fixed:
 - Repeated generic authentication instructions caused an approval during a
   denial check; the runner and lesson now label every handoff as an explicit
   approval or denial check.
+- The required Actions E2E job failed inside the binary matrix while discarding
+  the only useful child-process output. Failure handling now emits at most 8192
+  bytes per known output stream, but only after a full marker scan; diagnostics
+  are withheld entirely if any synthetic plaintext is present.
+- Leakage scanners used match-printing mode, which could echo the marker they
+  were meant to detect. They now use quiet detection and report only fixed
+  failure text.
 
 **Correction enforcement:** `tasks/lessons.md` records the repeatable rule, and
 `scripts/e2e-keychain.sh` enforces distinct **APPROVAL CHECK — Allow Once** and

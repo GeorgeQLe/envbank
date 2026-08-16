@@ -14,6 +14,8 @@
 - Advanced the minimum Go toolchain and pinned container builder from 1.25.12
   to 1.25.13 after the pre-ship vulnerability scan found five fixed standard-
   library vulnerabilities; the post-upgrade scan reported no reachable issue.
+- Hardened E2E failure reporting so leakage checks never echo matched plaintext
+  and the binary matrix exposes only bounded, marker-gated diagnostics in CI.
 
 ## 2026-08-14
 

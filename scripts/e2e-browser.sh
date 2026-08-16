@@ -28,7 +28,7 @@ go build -o "$WORK_DIR/envbank-e2e-nativehost" ./e2e/browser/nativehost
 chmod 700 "$WORK_DIR/envbank-e2e-nativehost"
 if [[ "$(uname -s)" == Darwin ]]; then DEFAULT_BROWSER_CACHE="$REAL_HOME/Library/Caches/ms-playwright"; else DEFAULT_BROWSER_CACHE="$REAL_HOME/.cache/ms-playwright"; fi
 PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-$DEFAULT_BROWSER_CACHE} HOME="$WORK_DIR/home" npm --prefix "$BROWSER_DIR" test -- "$REPO_DIR" "$WORK_DIR/profile" "$WORK_DIR/envbank-e2e-nativehost" "$WORK_DIR/artifacts" >"$WORK_DIR/output.log" 2>"$WORK_DIR/error.log"
-if rg -a -n 'ENVBANK_E2E_SECRET_DO_NOT_LEAK' "$WORK_DIR/output.log" "$WORK_DIR/error.log" "$WORK_DIR/artifacts"; then
+if rg -a -q 'ENVBANK_E2E_SECRET_DO_NOT_LEAK' "$WORK_DIR/output.log" "$WORK_DIR/error.log" "$WORK_DIR/artifacts"; then
 	printf 'e2e-browser: FAIL plaintext marker in observable artifacts\n' >&2; exit 1
 fi
 printf 'e2e-browser: RESULT=PASS\n'

@@ -86,8 +86,8 @@ WEBSITE_PID=
 
 # These are the production-shaped synthetic credential prefixes. Scan every
 # observable artifact after all child processes have stopped.
-if rg -a -n 'whsec_testlab_[A-Za-z0-9_-]{20}|sk_testlab_[A-Za-z0-9_-]{20}|ENVBANK_E2E_SECRET_DO_NOT_LEAK' \
-	"$E2E_DIR"/*.out "$E2E_DIR"/*.err >"$E2E_DIR/leak-scan.out"; then
+if rg -a -q 'whsec_testlab_[A-Za-z0-9_-]{20}|sk_testlab_[A-Za-z0-9_-]{20}|ENVBANK_E2E_SECRET_DO_NOT_LEAK' \
+	"$E2E_DIR"/*.out "$E2E_DIR"/*.err; then
 	fail "synthetic plaintext marker appeared in observable artifacts"
 fi
 printf 'e2e: PASS plaintext-leakage-scan\n'
