@@ -153,7 +153,7 @@ The image is shell-free, runs as UID/GID `65532`, and exposes `/healthz`.
 
 ## Build and test
 
-Go 1.25.12 or later is required. Install `govulncheck` separately with
+Go 1.25.13 or later is required. Install `govulncheck` separately with
 `go install golang.org/x/vuln/cmd/govulncheck@v1.6.0`; it is a review tool, not
 an application dependency.
 
@@ -438,6 +438,12 @@ Prepare the native host after building the binary:
 
 ./envbank browser-install --config .envbank/laptop.json
 ```
+
+Google Chrome is the default target. For Chrome for Testing 146 or newer, use
+`--browser chrome-for-testing`; Chromium uses `--browser chromium`. Pass the
+same browser target and any `--profile-dir` to `browser-uninstall` during
+cleanup. Each browser/profile manifest receives an isolated native-host binary
+and configuration locator.
 
 Then open `chrome://extensions`, enable developer mode, choose **Load
 unpacked**, and select the repository's `extension` directory. The checked-in

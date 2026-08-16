@@ -62,6 +62,41 @@ function backgroundHarness(tabURL, onNativeRequest) {
   return { message, nativeRequests, sent, timers };
 }
 
+test("native bridge bounds a silent host request", async () => {
+  let timeout;
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  global.setTimeout = (fn) => { timeout = fn; return 7; };
+  global.clearTimeout = () => {};
+  try {
+    const port = { postMessage() {}, disconnect() {}, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } };
+    const bridge = new NativeBridge({ connectNative() { return port; } }, null, 25);
+    const request = bridge.request("list_for_origin", { origin: "https://example.com" });
+    timeout();
+    await assert.rejects(request, /timed out/);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+  }
+});
+
+test("native bridge allows a bounded five-minute user-presence window by default", async () => {
+  let delay;
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  global.setTimeout = (_fn, milliseconds) => { delay = milliseconds; return 7; };
+  global.clearTimeout = () => {};
+  try {
+    const port = { postMessage() {}, disconnect() {}, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } };
+    const bridge = new NativeBridge({ connectNative() { return port; } });
+    void bridge.request("list_for_origin", { origin: "https://example.com" });
+    assert.equal(delay, 300000);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+  }
+});
+
 test("approval rejects an origin change before contacting the native host", async () => {
   const harness = backgroundHarness("https://other.example/path");
   const response = await harness.message({ type: "allow", tabId: 5, name: "TOKEN", origin: "https://example.com" });

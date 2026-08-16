@@ -1,4 +1,4 @@
-.PHONY: build test test-go test-extension format-check race vet security secret-scan-test build-cross recovery-drill
+.PHONY: build test test-go test-extension format-check race vet security secret-scan-test build-cross recovery-drill e2e e2e-release-local e2e-browser e2e-keychain e2e-live
 
 build:
 	go build -o envbank ./cmd/envbank
@@ -35,3 +35,18 @@ build-cross:
 
 recovery-drill:
 	./scripts/recovery-drill.sh
+
+e2e:
+	./scripts/e2e.sh
+
+e2e-release-local:
+	./scripts/e2e-release-local.sh
+
+e2e-browser:
+	./scripts/e2e-browser.sh
+
+e2e-keychain:
+	./scripts/e2e-keychain.sh
+
+e2e-live:
+	./scripts/e2e-live.sh "$(PROVIDER)"

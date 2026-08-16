@@ -45,3 +45,24 @@ func TestSystemStoreIntegration(t *testing.T) {
 		t.Fatalf("deleted item lookup returned %v", err)
 	}
 }
+
+// This separate opt-in path is successful only when the user cancels the
+// system authentication sheet. It never treats cancellation as approval.
+func TestSystemStoreCancellation(t *testing.T) {
+	if os.Getenv("ENVBANK_KEYCHAIN_EXPECT_CANCEL") != "1" {
+		t.Skip("set ENVBANK_KEYCHAIN_EXPECT_CANCEL=1 to exercise user cancellation")
+	}
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
+		t.Fatal(err)
+	}
+	account := "integration-cancel:" + hex.EncodeToString(random)
+	store := SystemStore{}
+	t.Cleanup(func() { _ = store.Delete(Service, account) })
+	if err := store.Put(Service, account, []byte("envbank-cancel-test")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(Service, account, "Cancel this EnvBank integration test prompt"); err == nil {
+		t.Fatal("Keychain cancellation was unexpectedly accepted")
+	}
+}

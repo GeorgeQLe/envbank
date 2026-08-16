@@ -1,5 +1,16 @@
 # Current work
 
+## Milestone 11: $0 end-to-end execution — implementation complete
+
+- [x] Add the required network-free `make e2e` gate, binary restart matrix,
+  fault coverage, recovery/extension/website orchestration, and leakage scan.
+- [x] Add local release, disposable headed-browser, interactive Keychain, and
+  explicitly authorized provider-acceptance entry points plus a full runbook.
+- [x] Execute disposable browser and production native-host Keychain/Touch ID
+  approval/denial observations on the release Mac and record sanitized evidence.
+- [ ] Execute the explicitly authorized Stripe, Clerk Development, and Railway
+  Free observations against dedicated marked resources before the next release.
+
 ## Milestone 10: Hermetic agent-operable lifecycle testlab — complete
 
 - [x] Add version-2 lifecycle contracts, signed automation policy and evidence

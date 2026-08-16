@@ -39,6 +39,30 @@ static OSStatus envbank_put(const char *service, const char *account,
   CFDictionaryRef attrs = CFDictionaryCreate(NULL, keys, vals, 5, NULL, NULL);
   OSStatus status = SecItemAdd(attrs, NULL);
   CFRelease(attrs); CFRelease(data); CFRelease(svc); CFRelease(acct); CFRelease(access);
+  if (status == errSecMissingEntitlement) {
+    // Unsigned command-line tools have no default data-protection Keychain
+    // access group. Fall back to the macOS file Keychain with an empty trusted
+    // application list, which requires user confirmation on every secret read.
+    // The modern user-presence item above remains preferred for signed builds.
+    CFMutableArrayRef trusted = CFArrayCreateMutable(
+        kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+    CFStringRef descriptor = envbank_string("EnvBank credential");
+    SecAccessRef legacyAccess = NULL;
+    OSStatus accessStatus = SecAccessCreate(descriptor, trusted, &legacyAccess);
+    CFRelease(descriptor); CFRelease(trusted);
+    if (accessStatus != errSecSuccess || !legacyAccess) return accessStatus;
+    svc = envbank_string(service); acct = envbank_string(account);
+    data = CFDataCreate(NULL, secret, length);
+    const void *legacyKeys[] = { kSecClass, kSecAttrService, kSecAttrAccount,
+                                 kSecValueData, kSecAttrAccess };
+    const void *legacyVals[] = { kSecClassGenericPassword, svc, acct, data,
+                                 legacyAccess };
+    CFDictionaryRef legacyAttrs = CFDictionaryCreate(
+        NULL, legacyKeys, legacyVals, 5, NULL, NULL);
+    status = SecItemAdd(legacyAttrs, NULL);
+    CFRelease(legacyAttrs); CFRelease(data); CFRelease(svc); CFRelease(acct);
+    CFRelease(legacyAccess);
+  }
   return status;
 }
 

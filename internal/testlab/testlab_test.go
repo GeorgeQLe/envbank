@@ -166,3 +166,91 @@ func TestLeaseHasOneWinnerAndOneSafeNoOp(t *testing.T) {
 		t.Fatalf("winners=%d noops=%d", winners, noops)
 	}
 }
+
+func TestFaultMatrixReachesSafeTerminalStateAfterRestart(t *testing.T) {
+	cases := []struct {
+		name, checkpoint, behavior, initial string
+		recoverable                         bool
+	}{
+		{"retryable", "store", "retryable", "retryable", true},
+		{"ambiguous_commit", "stage:vercel", "ambiguous-commit", "reconciliation-required", true},
+		{"timeout", "activate:vercel", "timeout", "reconciliation-required", true},
+		{"revision_conflict", "stage:railway", "revision-conflict", "retryable", true},
+		{"interruption", "activate:railway", "interrupt-after-commit", "reconciliation-required", true},
+		{"unhealthy", "verify", "unhealthy", "rolled-back", false},
+		{"activation_failure", "activate:railway", "terminal", "rolled-back", false},
+		{"rollback_failure", "verify", "rollback-failure", "terminal-failure", false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			directory := t.TempDir()
+			lab, err := Open(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(map[string]any{"provider": "stripe", "checkpoint": testCase.checkpoint, "behavior": testCase.behavior, "count": 1})
+			if _, err := lab.Extension().Call(context.Background(), "envbank_test_fault_set", raw); err != nil {
+				t.Fatal(err)
+			}
+			result, err := lab.Production().Call(context.Background(), "envbank_workflow_start", mcpserver.Request{Provider: "stripe"})
+			if err != nil || result.Stage != testCase.initial {
+				t.Fatalf("initial stage=%q err=%v", result.Stage, err)
+			}
+			if err := lab.Close(); err != nil {
+				t.Fatal(err)
+			}
+			lab, err = Open(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lab.Close()
+			if !testCase.recoverable {
+				if status, _ := lab.Production().Call(context.Background(), "envbank_workflow_status", mcpserver.Request{OperationID: result.OperationID}); status.Stage != testCase.initial {
+					t.Fatalf("restart stage=%q", status.Stage)
+				}
+				return
+			}
+			result, err = lab.Production().Call(context.Background(), "envbank_workflow_resume", mcpserver.Request{OperationID: result.OperationID})
+			if err != nil || result.Stage != "verifying" {
+				t.Fatalf("resume stage=%q err=%v", result.Stage, err)
+			}
+			if _, _, err := lab.clock.Advance(30 * time.Second); err != nil {
+				t.Fatal(err)
+			}
+			result, _ = lab.Production().Call(context.Background(), "envbank_workflow_resume", mcpserver.Request{OperationID: result.OperationID})
+			if result.Stage != "grace-period" {
+				t.Fatalf("health stage=%q", result.Stage)
+			}
+			if _, _, err := lab.clock.Advance(15 * time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			result, _ = lab.Production().Call(context.Background(), "envbank_workflow_resume", mcpserver.Request{OperationID: result.OperationID})
+			if result.Stage != "complete" {
+				t.Fatalf("terminal stage=%q", result.Stage)
+			}
+		})
+	}
+}
+
+func TestRepeatedRetryOpensCircuitAndReleasesLease(t *testing.T) {
+	lab, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lab.Close()
+	raw := json.RawMessage(`{"provider":"stripe","checkpoint":"store","behavior":"retryable","count":3}`)
+	if _, err := lab.Extension().Call(context.Background(), "envbank_test_fault_set", raw); err != nil {
+		t.Fatal(err)
+	}
+	result, _ := lab.Production().Call(context.Background(), "envbank_workflow_start", mcpserver.Request{Provider: "stripe"})
+	for range 2 {
+		result, _ = lab.Production().Call(context.Background(), "envbank_workflow_resume", mcpserver.Request{OperationID: result.OperationID})
+	}
+	if result.Stage != "terminal-failure" || result.BlockerCode != "CIRCUIT_OPEN" {
+		t.Fatalf("result=%+v", result)
+	}
+	second, _ := lab.Production().Call(context.Background(), "envbank_workflow_start", mcpserver.Request{Provider: "clerk"})
+	if second.Stage == "safe-no-op" {
+		t.Fatal("terminal operation retained the bundle lease")
+	}
+}
