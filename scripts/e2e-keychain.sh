@@ -137,10 +137,15 @@ SCAN_PATHS=("$PROFILE" "$DB" "$CONFIG" "$RUN_DIR"/*.out "$RUN_DIR"/*.err)
 for sidecar in "$DB-wal" "$DB-shm"; do
 	if [[ -e "$sidecar" ]]; then SCAN_PATHS+=("$sidecar"); fi
 done
-if rg -a -l -f "$SECRET" "${SCAN_PATHS[@]}" \
-	--glob '!record.input' --glob '!passphrase.input' >"$RUN_DIR/leaks.out"; then
-	fail PLAINTEXT_PERSISTED
+LEAK_FOUND=0
+if command -v rg >/dev/null 2>&1; then
+	if rg -a -l -f "$SECRET" "${SCAN_PATHS[@]}" \
+		--glob '!record.input' --glob '!passphrase.input' >"$RUN_DIR/leaks.out"; then LEAK_FOUND=1; fi
+else
+	if grep -a -E -R -l -f "$SECRET" --exclude=record.input --exclude=passphrase.input \
+		"${SCAN_PATHS[@]}" >"$RUN_DIR/leaks.out"; then LEAK_FOUND=1; fi
 fi
+((LEAK_FOUND == 0)) || fail PLAINTEXT_PERSISTED
 printf 'e2e-keychain: PASS field=PLAINTEXT_PERSISTENCE_SCAN\n'
 
 "$BIN" browser-uninstall --browser chrome-for-testing --profile-dir "$PROFILE" --delete-keychain >/dev/null

@@ -46,16 +46,16 @@ for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
 	)
 	cp "$REPO_DIR/LICENSE" "$REPO_DIR/README.md" "$WORK_DIR/$root/"
 	(cd "$WORK_DIR" && tar -czf "$root.tar.gz" "$root")
-	if tar -tzf "$WORK_DIR/$root.tar.gz" | rg -q '(^/|(^|/)\.\.(/|$))'; then printf 'e2e-release-local: FAIL unsafe archive path\n' >&2; exit 1; fi
+	if tar -tzf "$WORK_DIR/$root.tar.gz" | grep -E -q '(^/|(^|/)\.\.(/|$))'; then printf 'e2e-release-local: FAIL unsafe archive path\n' >&2; exit 1; fi
 	mkdir "$WORK_DIR/extract-$GOOS-$GOARCH"
 	tar -xzf "$WORK_DIR/$root.tar.gz" -C "$WORK_DIR/extract-$GOOS-$GOARCH"
 	test -x "$WORK_DIR/extract-$GOOS-$GOARCH/$root/envbank"
 	digest=$(sha_file "$WORK_DIR/$root.tar.gz")
 	printf '%s  %s\n' "$digest" "$root.tar.gz" >>"$WORK_DIR/SHA256SUMS"
-	go version -m "$WORK_DIR/extract-$GOOS-$GOARCH/$root/envbank" | rg -F 'github.com/GeorgeQLe/envbank/cmd/envbank' >/dev/null
-	if [[ "$GOOS" == darwin && "$HOST_GOOS" == darwin ]]; then otool -L "$WORK_DIR/extract-$GOOS-$GOARCH/$root/envbank" | rg -F 'Security.framework' >/dev/null; fi
+	go version -m "$WORK_DIR/extract-$GOOS-$GOARCH/$root/envbank" | grep -F 'github.com/GeorgeQLe/envbank/cmd/envbank' >/dev/null
+	if [[ "$GOOS" == darwin && "$HOST_GOOS" == darwin ]]; then otool -L "$WORK_DIR/extract-$GOOS-$GOARCH/$root/envbank" | grep -F 'Security.framework' >/dev/null; fi
 	if [[ "$GOOS" == "$HOST_GOOS" && "$GOARCH" == "$HOST_GOARCH" ]]; then
-		"$WORK_DIR/extract-$GOOS-$GOARCH/$root/envbank" version | rg -F "envbank $VERSION (commit $COMMIT, built $BUILD_DATE)" >/dev/null
+		"$WORK_DIR/extract-$GOOS-$GOARCH/$root/envbank" version | grep -F "envbank $VERSION (commit $COMMIT, built $BUILD_DATE)" >/dev/null
 	fi
 	printf 'e2e-release-local: PASS archive %s/%s sha256=%s\n' "$GOOS" "$GOARCH" "$digest"
 done

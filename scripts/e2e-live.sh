@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=scripts/e2e-scan.sh
+source "$SCRIPT_DIR/e2e-scan.sh"
 PROVIDER=${1:-}
 [[ "${ENVBANK_LIVE_ACCEPTANCE:-}" == 1 ]] || { printf 'e2e-live: FAIL reason=EXPLICIT_AUTHORIZATION_REQUIRED\n' >&2; exit 1; }
 [[ -t 0 && -t 1 ]] || { printf 'e2e-live: FAIL reason=INTERACTIVE_TTY_REQUIRED\n' >&2; exit 1; }
@@ -27,10 +30,10 @@ clerk)
 	go build -o "$tmp/envbank-provider-clerk" ./cmd/envbank-provider-clerk
 	"$tmp/envbank" bundle prepare-exec --manifest "$CLERK_ACCEPTANCE_MANIFEST" --config "$CLERK_ACCEPTANCE_CONFIG" --passphrase-file "$CLERK_ACCEPTANCE_PASSPHRASE_FILE" -- \
 		"$tmp/envbank-provider-clerk" export --app "$CLERK_ACCEPTANCE_APP" --instance dev --authorized-party "$CLERK_ACCEPTANCE_AUTHORIZED_PARTY" --clerk "$CLERK_ACCEPTANCE_CLI" >"$tmp/result.out" 2>"$tmp/result.err"
-	[[ "$(rg -c '^  [A-Z0-9_]+: prepared$' "$tmp/result.out" || true)" == 5 ]] || { printf 'e2e-live: FAIL reason=EXPECTED_RECORD_SET_MISMATCH\n' >&2; exit 1; }
+	[[ "$(grep -E -c '^  [A-Z0-9_]+: prepared$' "$tmp/result.out" || true)" == 5 ]] || { printf 'e2e-live: FAIL reason=EXPECTED_RECORD_SET_MISMATCH\n' >&2; exit 1; }
 	"$tmp/envbank" list --config "$CLERK_ACCEPTANCE_CONFIG" --passphrase-file "$CLERK_ACCEPTANCE_PASSPHRASE_FILE" >"$tmp/records.out" 2>>"$tmp/result.err"
-	[[ "$(rg -c 'revision=[1-9][0-9]*$' "$tmp/records.out" || true)" -ge 5 ]] || { printf 'e2e-live: FAIL reason=REVISIONS_NOT_VERIFIED\n' >&2; exit 1; }
-	if rg -n '(^|[^A-Za-z])(sk_|pk_|whsec_)[A-Za-z0-9_-]{12}' "$tmp/result.out" "$tmp/records.out" "$tmp/result.err" >/dev/null; then printf 'e2e-live: FAIL reason=PLAINTEXT_OUTPUT_DETECTED\n' >&2; exit 1; fi
+	[[ "$(grep -E -c 'revision=[1-9][0-9]*$' "$tmp/records.out" || true)" -ge 5 ]] || { printf 'e2e-live: FAIL reason=REVISIONS_NOT_VERIFIED\n' >&2; exit 1; }
+	if e2e_scan_extended '(^|[^A-Za-z])(sk_|pk_|whsec_)[A-Za-z0-9_-]{12}' "$tmp/result.out" "$tmp/records.out" "$tmp/result.err"; then printf 'e2e-live: FAIL reason=PLAINTEXT_OUTPUT_DETECTED\n' >&2; exit 1; fi
 	printf 'e2e-live: provider=clerk records=5 verification=NAMES_AND_REVISIONS_ONLY result=PASS\n'
 	;;
 vercel)

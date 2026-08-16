@@ -16,6 +16,8 @@
   library vulnerabilities; the post-upgrade scan reported no reachable issue.
 - Hardened E2E failure reporting so leakage checks never echo matched plaintext
   and the binary matrix exposes only bounded, marker-gated diagnostics in CI.
+- Removed the E2E gate's accidental ripgrep prerequisite by adding a quiet,
+  portable grep fallback for every secret-marker scan in the required gate.
 
 ## 2026-08-14
 

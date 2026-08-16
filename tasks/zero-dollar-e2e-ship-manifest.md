@@ -196,6 +196,10 @@ Findings fixed:
 - Leakage scanners used match-printing mode, which could echo the marker they
   were meant to detect. They now use quiet detection and report only fixed
   failure text.
+- GitHub's Ubuntu image did not provide ripgrep, although the offline gate used
+  it for assertions and marker scans. Testlab assertions now use ubiquitous
+  tooling, and marker scans select ripgrep when present with a quiet recursive
+  grep fallback when it is absent.
 
 **Correction enforcement:** `tasks/lessons.md` records the repeatable rule, and
 `scripts/e2e-keychain.sh` enforces distinct **APPROVAL CHECK — Allow Once** and

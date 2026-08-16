@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=scripts/e2e-scan.sh
+source "$SCRIPT_DIR/e2e-scan.sh"
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/envbank-testlab-matrix.XXXXXX")
 MARKER_PATTERN='whsec_testlab_[A-Za-z0-9_-]{20}|sk_testlab_[A-Za-z0-9_-]{20}'
 diagnose_failure() {
-	if rg -a -q "$MARKER_PATTERN" "$WORK_DIR" 2>/dev/null; then
+	if e2e_scan_extended "$MARKER_PATTERN" "$WORK_DIR" 2>/dev/null; then
 		printf 'testlab-matrix: diagnostics withheld: synthetic marker detected\n' >&2
 		return
 	fi
@@ -40,10 +43,10 @@ EOF
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"envbank_test_assert_secret_flow","arguments":{"operation_id":"op-000001","vercel_project_id":"vercel-project","railway_project_id":"railway-project"}}}
 EOF
 
-rg -q '\\"stage\\":\\"grace-period\\"' "$WORK_DIR/first.out"
-rg -q '\\"stage\\":\\"complete\\"' "$WORK_DIR/second.out"
-rg -q '\\"all_match\\":true' "$WORK_DIR/second.out"
-if rg -a -q "$MARKER_PATTERN" \
+grep -F -q '\"stage\":\"grace-period\"' "$WORK_DIR/first.out"
+grep -F -q '\"stage\":\"complete\"' "$WORK_DIR/second.out"
+grep -F -q '\"all_match\":true' "$WORK_DIR/second.out"
+if e2e_scan_extended "$MARKER_PATTERN" \
 	"$WORK_DIR/first.out" "$WORK_DIR/second.out" "$WORK_DIR/state"; then
 	printf 'testlab-matrix: FAIL plaintext marker leaked\n' >&2
 	exit 1
