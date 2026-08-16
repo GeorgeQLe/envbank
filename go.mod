@@ -6,7 +6,7 @@ require (
 	github.com/mattn/go-isatty v0.0.24
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.yaml.in/yaml/v3 v3.0.5
-	golang.org/x/term v0.39.0
+	golang.org/x/term v0.45.0
 	modernc.org/sqlite v1.56.0
 )
 
