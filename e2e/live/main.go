@@ -135,12 +135,6 @@ func stripe(ctx context.Context, control []byte) error {
 	if err != nil {
 		return err
 	}
-	raw, _ := json.Marshal(struct {
-		ResourceID string `json:"resource_id"`
-	}{evidence.CredentialID})
-	if err := writeRecoveryState(recovery, raw); err != nil {
-		return err
-	}
 	defer func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 15*time.Second)
 		defer stop()
@@ -148,6 +142,12 @@ func stripe(ctx context.Context, control []byte) error {
 			_ = os.Remove(recovery)
 		}
 	}()
+	raw, _ := json.Marshal(struct {
+		ResourceID string `json:"resource_id"`
+	}{evidence.CredentialID})
+	if err := writeRecoveryState(recovery, raw); err != nil {
+		return err
+	}
 	verified, err := adapter.Validate(ctx, evidence.CredentialID)
 	if err != nil || verified.Presence != provider.PresencePresent || !writer.stored {
 		return errors.New("Stripe created resource could not be validated")

@@ -34,10 +34,10 @@ Date: 2026-08-15
   closed, the password field remained empty, and the randomized installation,
   Keychain item, host, locator, profile, and diagnostic files were removed.
 - Isolated-profile native-host installation: implemented with
-  `--profile-dir`, exclusive manifest creation, matching uninstall behavior,
-  and path validation tests. Chrome Safe Storage is isolated with its mock
-  browser Keychain while EnvBank continues to exercise the real macOS
-  Keychain.
+  `--profile-dir`, exclusive manifest creation, per-manifest binary and locator
+  state, matching uninstall behavior, and path validation tests. Chrome Safe
+  Storage is isolated with its mock browser Keychain while EnvBank continues to
+  exercise the real macOS Keychain.
 
 ## Implemented, release-machine execution required
 
@@ -200,6 +200,11 @@ Findings fixed:
   it for assertions and marker scans. Testlab assertions now use ubiquitous
   tooling, and marker scans select ripgrep when present with a quiet recursive
   grep fallback when it is absent.
+- Pre-merge review found that Stripe cleanup was armed after recovery-state
+  persistence, browser/profile manifests shared global support files, and an
+  invalid uninstall target could delete Keychain state before validation.
+  Cleanup is now armed immediately after creation, every manifest receives an
+  isolated binary/locator directory, and uninstall resolves the target first.
 
 **Correction enforcement:** `tasks/lessons.md` records the repeatable rule, and
 `scripts/e2e-keychain.sh` enforces distinct **APPROVAL CHECK — Allow Once** and

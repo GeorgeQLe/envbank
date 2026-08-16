@@ -78,19 +78,22 @@ request, and confirm the second field remains empty. Do not automate or
 screen-capture Touch ID.
 
 The native-host manifest is installed beneath the disposable Chrome user-data
-directory with `--profile-dir`; the host binary and configuration locator remain
-in their production locations so the real installation path is exercised. The
-manifest, host, locator, temporary profile, randomized Keychain entry, service
-database, and fixture are removed on success, failure, or a handled signal.
-Before installation the runner refuses any existing production host or locator,
-and the installer refuses to overwrite an existing profile manifest. It scans
-the disposable profile, logs, database, and serialized state for the randomized
-browser value before cleanup. If the runner cannot use an isolated profile, do
-not continue; record the release exception instead.
+directory with `--profile-dir`; the host binary and configuration locator use a
+production support directory derived from that manifest path. Each browser or
+profile installation therefore owns separate support artifacts. The manifest,
+host, locator, temporary profile, randomized Keychain entry, service database,
+and fixture are removed on success, failure, or a handled signal. The installer
+refuses to overwrite an existing profile manifest or its support artifacts. It
+scans the disposable profile, logs, database, and serialized state for the
+randomized browser value before cleanup. If the runner cannot use an isolated
+profile, do not continue; record the release exception instead.
 
 `envbank browser-install` also enforces this rule: it exits before installation
 when the Chrome native-host manifest already exists, and uses an exclusive
-create for the manifest to prevent a check/write race from overwriting it.
+create for the manifest to prevent a check/write race from overwriting it. Its
+matching uninstall validates the browser/profile target before any optional
+Keychain deletion.
+
 The release check targets the pinned headed browser with
 `--browser chrome-for-testing --profile-dir <disposable-profile>`; cleanup
 passes the same browser target and profile. Chrome launches with its mock

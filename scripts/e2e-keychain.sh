@@ -60,9 +60,8 @@ BROWSER=$(node -e "const {chromium}=require('./e2e/browser/node_modules/playwrig
 [[ -x "$BROWSER" ]] || fail HEADED_CHROME_FOR_TESTING_UNAVAILABLE
 command -v python3 >/dev/null || fail PYTHON3_REQUIRED
 
-LOCATOR="$HOME/Library/Application Support/EnvBank/native-config"
-HOST="$HOME/Library/Application Support/EnvBank/bin/envbank-native-host"
-[[ ! -e "$LOCATOR" && ! -e "$HOST" ]] || fail EXISTING_NATIVE_HOST_INSTALLATION
+LOCATOR=
+HOST=
 
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/envbank-keychain-e2e.XXXXXX")
 chmod 700 "$RUN_DIR"
@@ -100,6 +99,9 @@ curl -fsS "$URL/healthz" >/dev/null || fail SERVICE_UNHEALTHY
 "$BIN" keychain-store --config "$CONFIG" --passphrase-file "$PASSPHRASE" >/dev/null
 "$BIN" browser-install --browser chrome-for-testing --profile-dir "$PROFILE" --config "$CONFIG" >/dev/null
 INSTALLED=1
+HOST=$(node -e 'const fs=require("node:fs"); const manifest=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(manifest.path)' "$MANIFEST")
+LOCATOR="$(dirname "$HOST")/native-config"
+[[ -x "$HOST" && -f "$LOCATOR" ]] || fail NATIVE_HOST_SUPPORT_INCOMPLETE
 
 FIXTURE_PORT=$(select_loopback_port) || fail FIXTURE_PORT_UNAVAILABLE
 python3 -m http.server "$FIXTURE_PORT" --bind 127.0.0.1 --directory extension \

@@ -18,6 +18,9 @@
   and the binary matrix exposes only bounded, marker-gated diagnostics in CI.
 - Removed the E2E gate's accidental ripgrep prerequisite by adding a quiet,
   portable grep fallback for every secret-marker scan in the required gate.
+- Addressed the pre-merge safety review by arming Stripe cleanup immediately,
+  isolating native-host support state per browser/profile, and validating
+  uninstall targets before optional Keychain deletion.
 
 ## 2026-08-14
 

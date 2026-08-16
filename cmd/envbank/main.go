@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -1740,7 +1742,11 @@ func runNativeHost(args []string) error {
 		return errors.New("native-host accepts no positional arguments")
 	}
 	if *configPath == "" {
-		locator, err := os.ReadFile(browserLocatorPath())
+		executable, err := os.Executable()
+		if err != nil {
+			return errors.New("browser native-host executable path is unavailable")
+		}
+		locator, err := os.ReadFile(browserLocatorPathForExecutable(executable))
 		if err != nil {
 			return errors.New("browser configuration locator is unavailable; run browser-install")
 		}
@@ -1776,24 +1782,38 @@ func browserInstall(args []string) error {
 	if _, err := client.LoadConfig(absConfig); err != nil {
 		return fmt.Errorf("load config before install: %w", err)
 	}
-	manifestPath, err := browserManifestPathForProfile(*browser, *profileDir)
+	installation, err := browserInstallationPathsForProfile(*browser, *profileDir)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Lstat(manifestPath); err == nil {
-		return fmt.Errorf("refusing to overwrite existing Chrome native-host manifest: %s", manifestPath)
+	if _, err := os.Lstat(installation.manifest); err == nil {
+		return fmt.Errorf("refusing to overwrite existing Chrome native-host manifest: %s", installation.manifest)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect Chrome native-host manifest: %w", err)
+	}
+	for _, path := range []string{installation.binary, installation.locator} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("refusing to overwrite existing browser support artifact: %s", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect browser support artifact: %w", err)
+		}
 	}
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	binPath := browserBinaryPath()
-	if err := copyExecutable(executable, binPath); err != nil {
+	complete := false
+	defer func() {
+		if !complete {
+			_ = os.Remove(installation.locator)
+			_ = os.Remove(installation.binary)
+			_ = os.Remove(installation.directory)
+		}
+	}()
+	if err := copyExecutable(executable, installation.binary); err != nil {
 		return err
 	}
-	if err := writePrivateFile(browserLocatorPath(), []byte(absConfig+"\n")); err != nil {
+	if err := writePrivateFile(installation.locator, []byte(absConfig+"\n")); err != nil {
 		return err
 	}
 	manifest := struct {
@@ -1802,14 +1822,15 @@ func browserInstall(args []string) error {
 		Path           string   `json:"path"`
 		Type           string   `json:"type"`
 		AllowedOrigins []string `json:"allowed_origins"`
-	}{"com.envbank.native", "EnvBank browser fill native host", binPath, "stdio", []string{"chrome-extension://" + defaultExtensionID + "/"}}
+	}{"com.envbank.native", "EnvBank browser fill native host", installation.binary, "stdio", []string{"chrome-extension://" + defaultExtensionID + "/"}}
 	raw, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := writePrivateFileExclusive(manifestPath, append(raw, '\n')); err != nil {
+	if err := writePrivateFileExclusive(installation.manifest, append(raw, '\n')); err != nil {
 		return err
 	}
+	complete = true
 	fmt.Printf("installed native host for extension %s\n", defaultExtensionID)
 	fmt.Printf("load the unpacked extension from %s\n", extensionSourcePath(executable))
 	return nil
@@ -1829,8 +1850,12 @@ func browserUninstall(args []string) error {
 	if fs.NArg() != 0 {
 		return errors.New("browser-uninstall accepts no positional arguments")
 	}
+	installation, err := browserInstallationPathsForProfile(*browser, *profileDir)
+	if err != nil {
+		return err
+	}
 	if *deleteKeychain {
-		raw, err := os.ReadFile(browserLocatorPath())
+		raw, err := os.ReadFile(installation.locator)
 		if err != nil {
 			return errors.New("cannot identify the Keychain item because the browser locator is unavailable")
 		}
@@ -1842,15 +1867,12 @@ func browserUninstall(args []string) error {
 			return err
 		}
 	}
-	manifestPath, err := browserManifestPathForProfile(*browser, *profileDir)
-	if err != nil {
-		return err
-	}
-	for _, path := range []string{manifestPath, browserLocatorPath(), browserBinaryPath()} {
+	for _, path := range []string{installation.manifest, installation.locator, installation.binary} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
+	_ = os.Remove(installation.directory)
 	fmt.Println("removed the EnvBank native host; vault data was preserved")
 	if !*deleteKeychain {
 		fmt.Println("the Keychain passphrase was preserved")
@@ -1865,10 +1887,32 @@ func browserSupportDir() string {
 	}
 	return filepath.Join(home, "Library", "Application Support", "EnvBank")
 }
-func browserBinaryPath() string {
-	return filepath.Join(browserSupportDir(), "bin", "envbank-native-host")
+
+type browserInstallationPaths struct {
+	manifest  string
+	directory string
+	binary    string
+	locator   string
 }
-func browserLocatorPath() string { return filepath.Join(browserSupportDir(), "native-config") }
+
+func browserInstallationPathsForProfile(browser, profileDir string) (browserInstallationPaths, error) {
+	manifest, err := browserManifestPathForProfile(browser, profileDir)
+	if err != nil {
+		return browserInstallationPaths{}, err
+	}
+	digest := sha256.Sum256([]byte(filepath.Clean(manifest)))
+	directory := filepath.Join(browserSupportDir(), "installations", hex.EncodeToString(digest[:]))
+	return browserInstallationPaths{
+		manifest:  manifest,
+		directory: directory,
+		binary:    filepath.Join(directory, "envbank-native-host"),
+		locator:   filepath.Join(directory, "native-config"),
+	}, nil
+}
+
+func browserLocatorPathForExecutable(executable string) string {
+	return filepath.Join(filepath.Dir(executable), "native-config")
+}
 func browserManifestPath(browser string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

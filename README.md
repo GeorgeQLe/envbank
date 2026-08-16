@@ -441,7 +441,9 @@ Prepare the native host after building the binary:
 
 Google Chrome is the default target. For Chrome for Testing 146 or newer, use
 `--browser chrome-for-testing`; Chromium uses `--browser chromium`. Pass the
-same browser target to `browser-uninstall` during cleanup.
+same browser target and any `--profile-dir` to `browser-uninstall` during
+cleanup. Each browser/profile manifest receives an isolated native-host binary
+and configuration locator.
 
 Then open `chrome://extensions`, enable developer mode, choose **Load
 unpacked**, and select the repository's `extension` directory. The checked-in
