@@ -6,7 +6,7 @@ changes should preserve the documented threat model and fail closed.
 
 ## Development setup
 
-Install Go 1.25.12 or later and Node.js 24. Then run:
+Install Go 1.25.13 or later and Node.js 24. Then run:
 
 ```sh
 go mod download

@@ -39,8 +39,8 @@ Verify the digest against the release's trusted publication channel before
 starting it. Confirm that TCP 7337 is not allowed by the host or cloud firewall
 and that only authenticated private-network clients can reach the proxy.
 
-Release builders must use Go 1.25.12 or later. The repository Dockerfile pins
-the official `golang:1.25.12-alpine` multi-platform image by digest. Before
+Release builders must use Go 1.25.13 or later. The repository Dockerfile pins
+the official `golang:1.25.13-alpine` multi-platform image by digest. Before
 publishing an image, run `go mod verify`, the complete test suite, and
 `govulncheck ./...` using a separately installed current `govulncheck`; do not
 add the scanner to the application module dependencies.

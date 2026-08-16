@@ -153,7 +153,7 @@ The image is shell-free, runs as UID/GID `65532`, and exposes `/healthz`.
 
 ## Build and test
 
-Go 1.25.12 or later is required. Install `govulncheck` separately with
+Go 1.25.13 or later is required. Install `govulncheck` separately with
 `go install golang.org/x/vuln/cmd/govulncheck@v1.6.0`; it is a review tool, not
 an application dependency.
 

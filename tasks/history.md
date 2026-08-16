@@ -1,5 +1,32 @@
 # History
 
+## 2026-08-15
+
+- Completed the real Chrome for Testing production-native-host acceptance with
+  a disposable profile: exact-origin filling passed, Keychain denial failed
+  closed, and no normal Chrome state or generated host artifacts remained.
+- Added isolated `--profile-dir` native-host manifests, Chrome for Testing path
+  support, an unsigned-CLI Keychain fallback with an empty trusted-application
+  ACL, and explicit approval-versus-denial prompts.
+- Passed the complete offline E2E merge gate, headed browser harness, four-way
+  release archive/checksum verification, disposable container health, website
+  production smoke, module integrity, vet, race, and secret-scan regression.
+- Advanced the minimum Go toolchain and pinned container builder from 1.25.12
+  to 1.25.13 after the pre-ship vulnerability scan found five fixed standard-
+  library vulnerabilities; the post-upgrade scan reported no reachable issue.
+
+## 2026-08-14
+
+- Added the required `$0` offline E2E gate covering the complete Go suite,
+  binary testlab restart lifecycle, fault matrix, recovery drill, extension,
+  website production build/live smoke, disposable state, automatic loopback
+  ports, and synthetic-plaintext output/persistence scans.
+- Added local release-artifact, pinned headed-Playwright, interactive macOS
+  Keychain/Touch ID, and explicitly authorized Stripe/Clerk/Railway acceptance
+  interfaces with bounded cleanup and fail-closed marked targets.
+- Verified the offline, local release, and disposable browser gates; preserved
+  Keychain and free-provider checks as explicit release-machine observations.
+
 ## 2026-08-13
 
 - Added the version-2 lifecycle contract and safety foundations: signed,

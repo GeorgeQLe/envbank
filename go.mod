@@ -1,6 +1,6 @@
 module github.com/GeorgeQLe/envbank
 
-go 1.25.12
+go 1.25.13
 
 require (
 	github.com/mattn/go-isatty v0.0.24
