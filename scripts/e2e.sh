@@ -5,6 +5,7 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 KEEP_ARTIFACTS=${KEEP_ARTIFACTS:-0}
+MARKER_PATTERN='whsec_testlab_[A-Za-z0-9_-]{20}|sk_testlab_[A-Za-z0-9_-]{20}|ENVBANK_E2E_SECRET_DO_NOT_LEAK'
 E2E_DIR=
 WEBSITE_PID=
 
@@ -19,7 +20,7 @@ cleanup() {
 	if [[ -n "${WEBSITE_PID:-}" ]]; then kill "$WEBSITE_PID" 2>/dev/null || true; wait "$WEBSITE_PID" 2>/dev/null || true; fi
 	if [[ -n "${E2E_DIR:-}" && -d "$E2E_DIR" ]]; then
 		if [[ "$KEEP_ARTIFACTS" == 1 ]]; then
-			if rg -a -q 'whsec_testlab_[A-Za-z0-9_-]{20}|sk_testlab_[A-Za-z0-9_-]{20}|ENVBANK_E2E_SECRET_DO_NOT_LEAK' "$E2E_DIR"/*.out "$E2E_DIR"/*.err 2>/dev/null; then
+			if rg -a -q "$MARKER_PATTERN" "$E2E_DIR"/*.out "$E2E_DIR"/*.err 2>/dev/null; then
 				printf 'e2e: refusing to retain artifacts that contain a synthetic marker\n' >&2
 				rm -rf -- "$E2E_DIR"
 			else
@@ -48,7 +49,18 @@ run_logged() {
 	shift
 	printf 'e2e: RUN %s\n' "$name"
 	if ! "$@" >"$E2E_DIR/$name.out" 2>"$E2E_DIR/$name.err"; then
-		printf 'e2e: %s failed; output withheld pending leakage review\n' "$name" >&2
+		if rg -a -q "$MARKER_PATTERN" "$E2E_DIR/$name.out" "$E2E_DIR/$name.err" 2>/dev/null; then
+			printf 'e2e: %s failed; diagnostics withheld: synthetic marker detected\n' "$name" >&2
+		else
+			local stream
+			for stream in out err; do
+				if [[ -s "$E2E_DIR/$name.$stream" ]]; then
+					printf 'e2e: sanitized diagnostics (%s.%s, first 8192 bytes)\n' "$name" "$stream" >&2
+					head -c 8192 "$E2E_DIR/$name.$stream" >&2 || true
+					printf '\n' >&2
+				fi
+			done
+		fi
 		return 1
 	fi
 	printf 'e2e: PASS %s\n' "$name"
@@ -86,7 +98,7 @@ WEBSITE_PID=
 
 # These are the production-shaped synthetic credential prefixes. Scan every
 # observable artifact after all child processes have stopped.
-if rg -a -q 'whsec_testlab_[A-Za-z0-9_-]{20}|sk_testlab_[A-Za-z0-9_-]{20}|ENVBANK_E2E_SECRET_DO_NOT_LEAK' \
+if rg -a -q "$MARKER_PATTERN" \
 	"$E2E_DIR"/*.out "$E2E_DIR"/*.err; then
 	fail "synthetic plaintext marker appeared in observable artifacts"
 fi
