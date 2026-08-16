@@ -3,13 +3,12 @@
 set -Eeuo pipefail
 
 readonly EXPECTED_SCHEMA_VERSION=6
-readonly DEFAULT_PORT=17337
 readonly SQLITE_BIN=/usr/bin/sqlite3
 readonly CURL_BIN=/usr/bin/curl
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
-PORT=${ENVBANK_PORT:-$DEFAULT_PORT}
+PORT=${ENVBANK_PORT:-}
 KEEP_ARTIFACTS=${KEEP_ARTIFACTS:-0}
 ENVBANK_BIN=${ENVBANK_BIN:-}
 DRILL_DIR=
@@ -21,7 +20,7 @@ Usage: scripts/recovery-drill.sh [--port PORT] [--keep-artifacts]
 
 Environment overrides:
   ENVBANK_BIN     Existing EnvBank binary (default: build a disposable binary)
-  ENVBANK_PORT    Loopback port (default: 17337)
+  ENVBANK_PORT    Loopback port (default: choose an unused high port)
   KEEP_ARTIFACTS  Set to 1 to retain the temporary drill directory
 EOF
 }
@@ -88,6 +87,19 @@ while (($# > 0)); do
 		;;
 	esac
 done
+
+if [[ -z "$PORT" ]]; then
+	# Bind races cannot be eliminated in portable shell, so probe a bounded set
+	# and let start_service's ownership checks fail closed if another process wins.
+	for ((attempt = 0; attempt < 100; attempt++)); do
+		candidate=$((20000 + RANDOM % 30000))
+		if ! "$CURL_BIN" -sS --max-time 1 "http://127.0.0.1:$candidate/" >/dev/null 2>&1; then
+			PORT=$candidate
+			break
+		fi
+	done
+	[[ -n "$PORT" ]] || fail "could not select an unused loopback port"
+fi
 
 [[ "$PORT" =~ ^[0-9]+$ ]] || fail "port must be numeric"
 ((PORT >= 1 && PORT <= 65535)) || fail "port must be between 1 and 65535"

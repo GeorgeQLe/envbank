@@ -173,8 +173,8 @@ Usage:
   envbank browser-origins [auth flags] NAME
   envbank keychain-store [auth flags]
   envbank native-host [--config PATH]
-  envbank browser-install [--config PATH]
-  envbank browser-uninstall [--delete-keychain]
+  envbank browser-install [--config PATH] [--profile-dir PATH]
+  envbank browser-uninstall [--delete-keychain] [--profile-dir PATH]
   envbank recovery-export --output PATH --recovery-passphrase-file PATH [auth flags]
   envbank recovery-verify --artifact PATH [recovery auth flags]
   envbank recovery-list --artifact PATH [recovery auth flags]
@@ -1761,6 +1761,8 @@ func browserInstall(args []string) error {
 	}
 	fs := flag.NewFlagSet("browser-install", flag.ContinueOnError)
 	configPath := fs.String("config", defaultConfigPath(), "encrypted device config")
+	browser := fs.String("browser", "google-chrome", "browser target: google-chrome, chrome-for-testing, or chromium")
+	profileDir := fs.String("profile-dir", "", "isolated browser user-data directory for the native-host manifest")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1773,6 +1775,15 @@ func browserInstall(args []string) error {
 	}
 	if _, err := client.LoadConfig(absConfig); err != nil {
 		return fmt.Errorf("load config before install: %w", err)
+	}
+	manifestPath, err := browserManifestPathForProfile(*browser, *profileDir)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(manifestPath); err == nil {
+		return fmt.Errorf("refusing to overwrite existing Chrome native-host manifest: %s", manifestPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect Chrome native-host manifest: %w", err)
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -1796,7 +1807,7 @@ func browserInstall(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := writePrivateFile(browserManifestPath(), append(raw, '\n')); err != nil {
+	if err := writePrivateFileExclusive(manifestPath, append(raw, '\n')); err != nil {
 		return err
 	}
 	fmt.Printf("installed native host for extension %s\n", defaultExtensionID)
@@ -1810,6 +1821,8 @@ func browserUninstall(args []string) error {
 	}
 	fs := flag.NewFlagSet("browser-uninstall", flag.ContinueOnError)
 	deleteKeychain := fs.Bool("delete-keychain", false, "also delete this device's Keychain passphrase")
+	browser := fs.String("browser", "google-chrome", "browser target: google-chrome, chrome-for-testing, or chromium")
+	profileDir := fs.String("profile-dir", "", "isolated browser user-data directory containing the native-host manifest")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1829,7 +1842,11 @@ func browserUninstall(args []string) error {
 			return err
 		}
 	}
-	for _, path := range []string{browserManifestPath(), browserLocatorPath(), browserBinaryPath()} {
+	manifestPath, err := browserManifestPathForProfile(*browser, *profileDir)
+	if err != nil {
+		return err
+	}
+	for _, path := range []string{manifestPath, browserLocatorPath(), browserBinaryPath()} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -1852,12 +1869,42 @@ func browserBinaryPath() string {
 	return filepath.Join(browserSupportDir(), "bin", "envbank-native-host")
 }
 func browserLocatorPath() string { return filepath.Join(browserSupportDir(), "native-config") }
-func browserManifestPath() string {
+func browserManifestPath(browser string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "com.envbank.native.json"
+		return "", err
 	}
-	return filepath.Join(home, "Library", "Application Support", "Google", "Chrome", "NativeMessagingHosts", "com.envbank.native.json")
+	var supportDir string
+	switch browser {
+	case "google-chrome":
+		supportDir = filepath.Join("Google", "Chrome")
+	case "chrome-for-testing":
+		supportDir = filepath.Join("Google", "Chrome for Testing")
+	case "chromium":
+		supportDir = "Chromium"
+	default:
+		return "", fmt.Errorf("unsupported browser target %q", browser)
+	}
+	return filepath.Join(home, "Library", "Application Support", supportDir,
+		"NativeMessagingHosts", "com.envbank.native.json"), nil
+}
+func browserManifestPathForProfile(browser, profileDir string) (string, error) {
+	if _, err := browserManifestPath(browser); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(profileDir) == "" {
+		return browserManifestPath(browser)
+	}
+	absProfile, err := filepath.Abs(profileDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve browser profile directory: %w", err)
+	}
+	if info, err := os.Stat(absProfile); err == nil && !info.IsDir() {
+		return "", fmt.Errorf("browser profile path is not a directory: %s", absProfile)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("inspect browser profile directory: %w", err)
+	}
+	return filepath.Join(absProfile, "NativeMessagingHosts", "com.envbank.native.json"), nil
 }
 func extensionSourcePath(executable string) string {
 	return filepath.Join(filepath.Dir(executable), "extension")
@@ -1874,6 +1921,36 @@ func writePrivateFile(path string, contents []byte) error {
 		return err
 	}
 	return os.Chmod(path, 0600)
+}
+func writePrivateFileExclusive(path string, contents []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("refusing to overwrite existing file: %s", path)
+		}
+		return err
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			_ = file.Close()
+			_ = os.Remove(path)
+		}
+	}()
+	if _, err := file.Write(contents); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	complete = true
+	return nil
 }
 func copyExecutable(source, destination string) error {
 	raw, err := os.ReadFile(source)

@@ -55,6 +55,81 @@ func TestHTTPServerSecurityLimits(t *testing.T) {
 	}
 }
 
+func TestWritePrivateFileExclusiveRefusesExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "native-host.json")
+	if err := writePrivateFileExclusive(path, []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateFileExclusive(path, []byte("replacement")); err == nil {
+		t.Fatal("exclusive write overwrote an existing native-host manifest")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(contents), "original"; got != want {
+		t.Fatalf("existing contents = %q, want %q", got, want)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("exclusive file mode = %o, want 600", got)
+	}
+}
+
+func TestBrowserManifestPathTargets(t *testing.T) {
+	for browser, suffix := range map[string]string{
+		"google-chrome":      filepath.Join("Google", "Chrome", "NativeMessagingHosts", "com.envbank.native.json"),
+		"chrome-for-testing": filepath.Join("Google", "Chrome for Testing", "NativeMessagingHosts", "com.envbank.native.json"),
+		"chromium":           filepath.Join("Chromium", "NativeMessagingHosts", "com.envbank.native.json"),
+	} {
+		path, err := browserManifestPath(browser)
+		if err != nil {
+			t.Fatalf("browserManifestPath(%q): %v", browser, err)
+		}
+		if !strings.HasSuffix(path, suffix) {
+			t.Fatalf("browserManifestPath(%q) = %q, want suffix %q", browser, path, suffix)
+		}
+	}
+	if _, err := browserManifestPath("safari"); err == nil {
+		t.Fatal("unsupported browser target was accepted")
+	}
+}
+
+func TestBrowserManifestPathForProfile(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "isolated", "profile")
+	path, err := browserManifestPathForProfile("chrome-for-testing", profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(profile, "NativeMessagingHosts", "com.envbank.native.json")
+	if path != want {
+		t.Fatalf("profile manifest path = %q, want %q", path, want)
+	}
+
+	relative := filepath.Join("testdata", "..", "profile")
+	path, err = browserManifestPathForProfile("chromium", relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(path) || strings.Contains(path, "..") {
+		t.Fatalf("relative profile path was not cleaned and made absolute: %q", path)
+	}
+
+	filePath := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(filePath, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := browserManifestPathForProfile("google-chrome", filePath); err == nil {
+		t.Fatal("file profile path was accepted")
+	}
+	if _, err := browserManifestPathForProfile("safari", profile); err == nil {
+		t.Fatal("unsupported browser target was accepted with a profile directory")
+	}
+}
+
 func TestBundleCheck(t *testing.T) {
 	manifest := `version: 1
 bundle: example/siftcut/staging

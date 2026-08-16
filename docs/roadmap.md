@@ -34,6 +34,12 @@ Milestones are ordered. Safe access and recovery come before provider
 automation, and the first provider will be selected using actual usage
 frequency and lifecycle-API capability rather than chosen in advance.
 
+The next release milestone is the
+[$0 end-to-end execution gate](e2e-testing.md): the offline gate is required in
+CI; disposable browser and Keychain/Touch ID acceptance have been verified on
+the release Mac, while free-provider observations remain explicit opt-in local
+release checks.
+
 ### 1. Safe access and recovery
 
 - [x] Revoke an enrolled device without disrupting remaining approved devices.

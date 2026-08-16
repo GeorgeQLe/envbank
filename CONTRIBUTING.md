@@ -13,11 +13,17 @@ go mod download
 make format-check
 go mod verify
 make test
+make e2e
 make race
 make vet
 make recovery-drill
 make build-cross
 ```
+
+Install website dependencies with `npm ci --prefix website` before running the
+network-free E2E gate. Browser, Keychain, release-artifact, and opt-in provider
+acceptance are documented in the [E2E runbook](docs/e2e-testing.md); they are
+local release checks and are not substitutes for `make e2e`.
 
 Install `govulncheck` and Gitleaks to run the remaining security checks:
 

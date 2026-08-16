@@ -439,6 +439,10 @@ Prepare the native host after building the binary:
 ./envbank browser-install --config .envbank/laptop.json
 ```
 
+Google Chrome is the default target. For Chrome for Testing 146 or newer, use
+`--browser chrome-for-testing`; Chromium uses `--browser chromium`. Pass the
+same browser target to `browser-uninstall` during cleanup.
+
 Then open `chrome://extensions`, enable developer mode, choose **Load
 unpacked**, and select the repository's `extension` directory. The checked-in
 development public key fixes the extension ID to
