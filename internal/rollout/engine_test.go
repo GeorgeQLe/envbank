@@ -97,9 +97,10 @@ type fakeAdapter struct {
 
 type fakeBatchAdapter struct {
 	*fakeAdapter
-	stages        int
-	stagedValues  []string
-	verifyVersion []string
+	stages         int
+	stagedValues   []string
+	verifyVersion  []string
+	verifyExpected []provider.Presence
 }
 
 func (adapter *fakeBatchAdapter) Stage(_ context.Context, requests []provider.WriteRequest) (provider.WriteEvidence, error) {
@@ -118,7 +119,8 @@ func (adapter *fakeBatchAdapter) Stage(_ context.Context, requests []provider.Wr
 
 func (adapter *fakeBatchAdapter) Verify(_ context.Context, request provider.VerifyRequest) (provider.VerifyEvidence, error) {
 	adapter.verifyVersion = append(adapter.verifyVersion, request.ProviderOperationID)
-	return provider.VerifyEvidence{Result: provider.VerificationVerified, Presence: provider.PresencePresent,
+	adapter.verifyExpected = append(adapter.verifyExpected, request.ExpectedPresence)
+	return provider.VerifyEvidence{Result: provider.VerificationVerified, Presence: request.ExpectedPresence,
 		VerifiedAt: rolloutTime.Format(time.RFC3339)}, nil
 }
 
@@ -254,6 +256,26 @@ func TestEngineStagesAtomicAdapterOnce(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "plaintext-SENTINEL") {
 		t.Fatal("atomic operation evidence retained plaintext")
+	}
+}
+
+func TestEngineAtomicRevokeVerifiesExpectedAbsence(t *testing.T) {
+	engine, _, ordinary, input := fixtureEngine(1)
+	batch := &fakeBatchAdapter{fakeAdapter: ordinary}
+	engine.Adapter = batch
+	input.Actions[0] = Action{ID: "revoke-1", Operation: "revoke", Service: "api",
+		ServiceID: "api-id", Name: "OLD_SECRET"}
+	plan, err := engine.Plan(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := engine.Apply(context.Background(), plan.ID(), allowConfirmation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.Status != StatusReady || len(batch.verifyExpected) != 1 ||
+		batch.verifyExpected[0] != provider.PresenceAbsent {
+		t.Fatalf("revoke verification: status=%s expected=%v", operation.Status, batch.verifyExpected)
 	}
 }
 

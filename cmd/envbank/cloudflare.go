@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -285,14 +286,12 @@ func cloudflareVerify(args []string) error {
 		if item.WriteEvidence == nil {
 			return errors.New("Cloudflare operation has no staged version evidence")
 		}
+		expected := expectedCloudflarePresence(item.Action.Operation)
 		evidence, err := adapter.Verify(context.Background(), provider.VerifyRequest{Target: provider.Target{
 			ProjectID: operation.Target.ProjectID, EnvironmentID: operation.Target.EnvironmentID,
 			ServiceIDs: operation.Target.ServiceIDs}, Service: item.Action.Service, ServiceID: item.Action.ServiceID,
-			Name: item.Action.Name, ProviderOperationID: item.WriteEvidence.ProviderOperationID})
-		expected := provider.PresencePresent
-		if item.Action.Operation == "revoke" {
-			expected = provider.PresenceAbsent
-		}
+			Name: item.Action.Name, ProviderOperationID: item.WriteEvidence.ProviderOperationID,
+			ExpectedPresence: expected})
 		if err != nil || evidence.Presence != expected {
 			return errors.New("Cloudflare staged version binding verification failed")
 		}
@@ -356,17 +355,18 @@ func cloudflarePromote(args []string) error {
 		return err
 	}
 	for _, item := range operation.Actions {
+		expected := expectedCloudflarePresence(item.Action.Operation)
 		evidence, verifyErr := adapter.Verify(context.Background(), provider.VerifyRequest{Target: provider.Target{
 			ProjectID: operation.Target.ProjectID, EnvironmentID: operation.Target.EnvironmentID,
 			ServiceIDs: operation.Target.ServiceIDs}, Service: item.Action.Service, ServiceID: item.Action.ServiceID,
-			Name: item.Action.Name, ProviderOperationID: stagedVersion})
-		expected := provider.PresencePresent
-		if item.Action.Operation == "revoke" {
-			expected = provider.PresenceAbsent
-		}
+			Name: item.Action.Name, ProviderOperationID: stagedVersion, ExpectedPresence: expected})
 		if verifyErr != nil || evidence.Presence != expected {
 			return errors.New("Cloudflare staged version no longer matches the plan")
 		}
+	}
+	healthChecks := document.Manifest.Targets[cloudflareprovider.ProviderName].HealthChecks
+	if err := validateCloudflareHealthChecks(api, healthChecks); err != nil {
+		return err
 	}
 	if err := cloudflareConfirmation(context.Background(), rollout.Confirmation{Kind: "promote", Provider: "cloudflare",
 		Bundle: operation.Bundle, ActionCount: len(operation.Actions), Destructive: true}); err != nil {
@@ -384,7 +384,6 @@ func cloudflarePromote(args []string) error {
 	if err != nil {
 		return fmt.Errorf("Cloudflare version was promoted but evidence could not be saved: %w", err)
 	}
-	healthChecks := document.Manifest.Targets[cloudflareprovider.ProviderName].HealthChecks
 	if err := runCloudflareHealthChecks(context.Background(), api, healthChecks); err != nil {
 		rollbackID, rollbackErr := adapter.Rollback(context.Background(), operation.ProviderRevision)
 		if rollbackErr != nil {
@@ -562,14 +561,11 @@ func confirmCloudflareAction(_ context.Context, request rollout.Confirmation) er
 }
 
 func runCloudflareHealthChecks(ctx context.Context, api *client.API, checks []contract.HealthCheck) error {
-	if len(checks) == 0 {
-		return errors.New("Cloudflare promotion requires health checks")
+	if err := validateCloudflareHealthChecks(api, checks); err != nil {
+		return err
 	}
 	for _, check := range checks {
-		duration, err := time.ParseDuration(check.MinimumDuration)
-		if err != nil || check.Successes < 3 || duration < 30*time.Second {
-			return errors.New("Cloudflare health check requires at least three successes over 30 seconds")
-		}
+		duration, _ := time.ParseDuration(check.MinimumDuration)
 		method := check.Method
 		if method == "" {
 			method = http.MethodGet
@@ -582,10 +578,7 @@ func runCloudflareHealthChecks(ctx context.Context, api *client.API, checks []co
 				case <-time.After(duration / time.Duration(check.Successes-1)):
 				}
 			}
-			request, err := http.NewRequestWithContext(ctx, method, check.URL, nil)
-			if err != nil {
-				return errors.New("Cloudflare health check URL is invalid")
-			}
+			request, _ := http.NewRequestWithContext(ctx, method, check.URL, nil)
 			if api.Access != nil {
 				request.Header.Set("CF-Access-Client-Id", api.Access.ClientID)
 				request.Header.Set("CF-Access-Client-Secret", api.Access.ClientSecret)
@@ -603,6 +596,35 @@ func runCloudflareHealthChecks(ctx context.Context, api *client.API, checks []co
 		}
 	}
 	return nil
+}
+
+func validateCloudflareHealthChecks(api *client.API, checks []contract.HealthCheck) error {
+	if len(checks) == 0 {
+		return errors.New("Cloudflare promotion requires health checks")
+	}
+	base, baseErr := url.Parse(api.BaseURL)
+	for _, check := range checks {
+		duration, err := time.ParseDuration(check.MinimumDuration)
+		if err != nil || check.Successes < 3 || duration < 30*time.Second {
+			return errors.New("Cloudflare health check requires at least three successes over 30 seconds")
+		}
+		checkURL, err := url.Parse(check.URL)
+		if err != nil || checkURL.Scheme != "https" || checkURL.Host == "" || checkURL.User != nil {
+			return errors.New("Cloudflare health check URL is invalid")
+		}
+		if api.Access != nil && (baseErr != nil || base.Scheme != checkURL.Scheme ||
+			!strings.EqualFold(base.Host, checkURL.Host)) {
+			return errors.New("Cloudflare Access health check must use the configured EnvBank origin")
+		}
+	}
+	return nil
+}
+
+func expectedCloudflarePresence(operation string) provider.Presence {
+	if operation == "revoke" {
+		return provider.PresenceAbsent
+	}
+	return provider.PresencePresent
 }
 
 func printCloudflareOperation(operation rollout.Operation) {

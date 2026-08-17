@@ -312,10 +312,14 @@ func (engine *Engine) advance(ctx context.Context, plan ProviderPlan, operation 
 			item.Status = ActionLimited
 			limited = true
 		} else {
+			expectedPresence := provider.PresencePresent
+			if item.Action.Operation == "revoke" {
+				expectedPresence = provider.PresenceAbsent
+			}
 			evidence, verifyErr := engine.Adapter.Verify(ctx, provider.VerifyRequest{
 				Target: providerTarget(plan.Target), Service: item.Action.Service,
 				ServiceID: item.Action.ServiceID, Name: item.Action.Name, WriteKey: item.WriteKey,
-				ProviderOperationID: item.WriteEvidence.ProviderOperationID,
+				ProviderOperationID: item.WriteEvidence.ProviderOperationID, ExpectedPresence: expectedPresence,
 			})
 			if verifyErr != nil {
 				safe := provider.SanitizeError("verify", verifyErr)

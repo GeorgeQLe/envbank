@@ -139,12 +139,13 @@ func (request WriteRequest) String() string {
 }
 
 type VerifyRequest struct {
-	Target              Target `json:"target"`
-	Service             string `json:"service"`
-	ServiceID           string `json:"service_id"`
-	Name                string `json:"name"`
-	WriteKey            string `json:"write_key,omitempty"`
-	ProviderOperationID string `json:"provider_operation_id,omitempty"`
+	Target              Target   `json:"target"`
+	Service             string   `json:"service"`
+	ServiceID           string   `json:"service_id"`
+	Name                string   `json:"name"`
+	WriteKey            string   `json:"write_key,omitempty"`
+	ProviderOperationID string   `json:"provider_operation_id,omitempty"`
+	ExpectedPresence    Presence `json:"expected_presence,omitempty"`
 }
 
 type WriteEvidence struct {

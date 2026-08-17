@@ -47,18 +47,20 @@ to its separate repository.
   revision/version evidence to the provider boundary.
 - `internal/provider/cloudflare/adapter.go`, `api.go`, `credential.go`, and
   `planner.go` — implement immutable Cloudflare target binding, Keychain token
-  storage, names-only inspection, one-version atomic staging, deployment, and
-  rollback.
-- `internal/provider/cloudflare/api_test.go` and `credential_test.go` — verify
-  multipart staging, strict inheritance, exact binding metadata, a single
-  version upload, and stable scoped opaque credential-account derivation.
+  storage, desired-presence verification, names-only inspection, one-version
+  atomic staging, deployment, and rollback.
+- `internal/provider/cloudflare/adapter_test.go`, `api_test.go`, and
+  `credential_test.go` — verify desired absence, multipart staging, strict
+  inheritance, exact binding metadata, a single version upload, and stable
+  scoped opaque credential-account derivation.
 - `internal/rollout/plan.go`, `state.go`, and `engine.go` — add binding-name
   plans, provider revision checks, atomic staging, staged-version verification,
   and encrypted promotion/rollback evidence.
 - `internal/rollout/engine_test.go` — covers one-shot atomic staging and
   staged-version verification without plaintext persistence.
-- `cmd/envbank/cloudflare.go` — implements bind, plan, apply, resume, verify,
-  promote, and rollback with fresh confirmation and health policy.
+- `cmd/envbank/cloudflare.go` and `cloudflare_test.go` — implement and test bind,
+  plan, apply, resume, verify, promote, rollback, fresh confirmation, and
+  same-origin Access health policy.
 - `e2e/live/main.go` and `scripts/e2e-live.sh` — add the marker-gated
   Cloudflare sentinel stage/promote/health/rollback/delete acceptance path and
   forbid environment-token intake.
@@ -101,8 +103,13 @@ are excluded from the shipping boundary. `.agents/project.json` did not change.
   test.
 - `npx wrangler deploy --dry-run` — passed Worker bundling and Durable Object
   binding validation without contacting or changing a deployment.
-- Local `wrangler dev` smoke — returned 200 from `/healthz` and created a vault
-  with 201 through the SQLite Durable Object; the process was then stopped.
+- Local `wrangler dev` smoke — returned 200 from `/healthz`, created a vault,
+  and created a public enrollment with 201 through the SQLite Durable Object;
+  the latter executed transactional audit insertion and pruning before the
+  process was stopped.
+- Focused `go test ./cmd/envbank ./internal/provider/cloudflare
+  ./internal/rollout` — passed same-origin health policy, expected-absence,
+  credential-account, and rollout regression coverage after review fixes.
 - `scripts/test-gitleaks-config.sh` — passed the history scan and expected
   synthetic-secret detection fixture.
 - `gitleaks git --staged --redact --config .gitleaks.toml .` — passed the exact
@@ -152,6 +159,17 @@ Findings fixed:
   domain-separated HMAC-SHA-256 construction, with stability, scope, and
   opacity regression coverage; the focused Go test and rerun security check
   must pass before merge.
+- PR review found that expected-absent bindings were reported as limited,
+  blocking promotion of intentional revocations. Verification now carries the
+  desired presence through the rollout engine and treats an observed expected
+  absence as fully verified, with focused adapter coverage.
+- PR review found that a cross-origin health-check URL could receive stored
+  Cloudflare Access credentials. Promotion now validates all checks before
+  deployment and requires an exact scheme/host match with the configured
+  EnvBank origin whenever Access credentials are present.
+- PR review found that Durable Object access events were unbounded. Every
+  transactional audit insert now applies the legacy 90-day retention window
+  and separate 10,000 verified/2,000 unverified caps.
 
 ## Residual risk
 

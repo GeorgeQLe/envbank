@@ -154,8 +154,13 @@ func (adapter *Adapter) Stage(ctx context.Context, requests []provider.WriteRequ
 }
 
 func (adapter *Adapter) Verify(ctx context.Context, request provider.VerifyRequest) (provider.VerifyEvidence, error) {
+	expected := request.ExpectedPresence
+	if expected == "" {
+		expected = provider.PresencePresent
+	}
 	if err := adapter.validateTarget(request.Target); err != nil || request.Service != adapter.Target.ScriptName ||
-		request.ServiceID != adapter.Target.ScriptName || request.Name == "" || request.ProviderOperationID == "" {
+		request.ServiceID != adapter.Target.ScriptName || request.Name == "" || request.ProviderOperationID == "" ||
+		(expected != provider.PresencePresent && expected != provider.PresenceAbsent) {
 		return provider.VerifyEvidence{}, errors.New("invalid Cloudflare version verification request")
 	}
 	names, err := adapter.API.VersionBindingNames(ctx, adapter.Target, request.ProviderOperationID)
@@ -164,12 +169,16 @@ func (adapter *Adapter) Verify(ctx context.Context, request provider.VerifyReque
 	}
 	sort.Strings(names)
 	index := sort.SearchStrings(names, request.Name)
+	presence := provider.PresencePresent
 	if index >= len(names) || names[index] != request.Name {
+		presence = provider.PresenceAbsent
+	}
+	if presence != expected {
 		return provider.VerifyEvidence{Result: provider.VerificationLimited,
-			Presence: provider.PresenceAbsent, VerifiedAt: adapter.now(), Reason: "binding-absent"}, nil
+			Presence: presence, VerifiedAt: adapter.now(), Reason: "binding-presence-mismatch"}, nil
 	}
 	return provider.VerifyEvidence{Result: provider.VerificationVerified,
-		Presence: provider.PresencePresent, VerifiedAt: adapter.now()}, nil
+		Presence: presence, VerifiedAt: adapter.now()}, nil
 }
 
 func (adapter *Adapter) Promote(ctx context.Context, versionID string) (string, error) {

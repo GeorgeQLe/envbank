@@ -17,6 +17,9 @@ type PublicDevice = {
 };
 
 const MAX_BODY = 1 << 20;
+const EVENT_MAX_AGE_MS = 90 * 24 * 60 * 60_000;
+const MAX_VERIFIED_EVENTS = 10_000;
+const MAX_UNVERIFIED_EVENTS = 2_000;
 const AUTH_HEADERS = {
   device: "X-EnvBank-Device",
   timestamp: "X-EnvBank-Timestamp",
@@ -308,6 +311,13 @@ CREATE TABLE IF NOT EXISTS invitations (
     this.sql.exec(`INSERT INTO access_events(id,timestamp,identity_id,identity_verified,target_identity_id,
       operation,outcome,reason) VALUES (?,?,?,?,?,?,?,?)`, randomID(), new Date().toISOString(),
       auth?.identityID ?? null, auth ? 1 : 0, target || null, operation, outcome, reason || null);
+    this.sql.exec("DELETE FROM access_events WHERE timestamp < ?",
+      new Date(Date.now() - EVENT_MAX_AGE_MS).toISOString());
+    for (const [verified, limit] of [[1, MAX_VERIFIED_EVENTS], [0, MAX_UNVERIFIED_EVENTS]] as const) {
+      this.sql.exec(`DELETE FROM access_events WHERE identity_verified=? AND sequence NOT IN (
+        SELECT sequence FROM access_events WHERE identity_verified=? ORDER BY sequence DESC LIMIT ?
+      )`, verified, verified, limit);
+    }
   }
 
   private async enrollments(request: Request, _vaultID: string, deviceID: string): Promise<Response> {

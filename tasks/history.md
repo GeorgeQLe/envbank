@@ -18,6 +18,10 @@
 - Verified the Go suite and vet, extension tests, Worker typecheck and protocol
   test, Wrangler dry-run and local Durable Object smoke, diff hygiene, and the
   secret-scan regression. No live Cloudflare resource was changed.
+- Remediated pre-merge CodeQL and review findings by using domain-separated
+  HMAC for opaque Keychain accounts, verifying desired binding absence,
+  restricting Access-bearing health checks to the configured origin, and
+  pruning Durable Object audit events to the legacy age and count limits.
 
 ## 2026-08-15
 
