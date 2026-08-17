@@ -140,6 +140,7 @@ func recoveryRestore(args []string) error {
 	serverURL := fs.String("server", "", "replacement sync service URL")
 	vaultName := fs.String("vault", "", "new vault name")
 	deviceName := fs.String("device", "", "new device name")
+	accessStdin := fs.Bool("access-credentials-stdin", false, "read Cloudflare Access JSON from trusted stdin")
 	recoveryAuth := addRecoveryFlags(fs)
 	auth := addAuthFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -165,10 +166,15 @@ func recoveryRestore(args []string) error {
 	if *serverURL == "" || *vaultName == "" || *deviceName == "" {
 		return errors.New("--server, --vault, and --device are required")
 	}
-	return beginRecoveryRestore(auth, snapshot, artifactID, *serverURL, *vaultName, *deviceName)
+	access, err := bootstrapAccessCredentials(*accessStdin)
+	if err != nil {
+		return err
+	}
+	return beginRecoveryRestore(auth, snapshot, artifactID, *serverURL, *vaultName, *deviceName, access)
 }
 
-func beginRecoveryRestore(auth *authFlags, snapshot recovery.Snapshot, artifactID, serverURL, vaultName, deviceName string) error {
+func beginRecoveryRestore(auth *authFlags, snapshot recovery.Snapshot, artifactID, serverURL, vaultName, deviceName string,
+	access *client.AccessCredentials) error {
 	if _, err := os.Stat(auth.configPath); err == nil {
 		return fmt.Errorf("config already exists at %s", auth.configPath)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -188,6 +194,7 @@ func beginRecoveryRestore(auth *authFlags, snapshot recovery.Snapshot, artifactI
 	}
 	keys.Secrets.VaultKey = secure.Encode(vaultKey)
 	api := client.NewAPI(serverURL)
+	api.Access = access
 	created, err := api.CreateVault(vaultName, protocol.PublicDevice{
 		Name: deviceName, SigningPublic: keys.SigningPublic, WrappingPublic: keys.WrappingPublic,
 	})
@@ -200,6 +207,11 @@ func beginRecoveryRestore(auth *authFlags, snapshot recovery.Snapshot, artifactI
 		return err
 	}
 	cfg.RecoveryArtifact = artifactID
+	if access != nil {
+		if err := cfg.SetAccessCredentials(*access); err != nil {
+			return err
+		}
+	}
 	if err := cfg.Lock(keys.Secrets, localPassphrase); err != nil {
 		return err
 	}

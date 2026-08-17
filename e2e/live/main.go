@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,6 +22,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/keychain"
 	"github.com/GeorgeQLe/envbank/internal/lifecycle"
 	"github.com/GeorgeQLe/envbank/internal/provider"
+	cloudflareprovider "github.com/GeorgeQLe/envbank/internal/provider/cloudflare"
 	railwayprovider "github.com/GeorgeQLe/envbank/internal/provider/railway"
 	stripeprovider "github.com/GeorgeQLe/envbank/internal/provider/stripe"
 	"golang.org/x/term"
@@ -36,13 +39,13 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) != 1 || (args[0] != "stripe" && args[0] != "railway") {
-		return errors.New("provider must be stripe or railway")
+	if len(args) != 1 || (args[0] != "stripe" && args[0] != "railway" && args[0] != "cloudflare") {
+		return errors.New("provider must be stripe, cloudflare, or railway")
 	}
 	if os.Getenv("ENVBANK_LIVE_ACCEPTANCE") != "1" {
 		return errors.New("live acceptance is not authorized")
 	}
-	for _, name := range []string{"STRIPE_SECRET_KEY", "STRIPE_API_KEY", "RAILWAY_TOKEN", "RAILWAY_API_TOKEN"} {
+	for _, name := range []string{"STRIPE_SECRET_KEY", "STRIPE_API_KEY", "RAILWAY_TOKEN", "RAILWAY_API_TOKEN", "CLOUDFLARE_API_TOKEN"} {
 		if os.Getenv(name) != "" {
 			return errors.New("provider credentials in environment variables are forbidden")
 		}
@@ -59,6 +62,9 @@ func run(args []string) error {
 	defer wipe(credential)
 	if args[0] == "stripe" {
 		return stripe(ctx, credential)
+	}
+	if args[0] == "cloudflare" {
+		return cloudflare(ctx, credential)
 	}
 	return railway(ctx, credential)
 }
@@ -221,6 +227,117 @@ func railway(ctx context.Context, token []byte) error {
 	}
 	fmt.Printf("e2e-live: provider=railway project_id=%s environment_id=%s service_id=%s variable=ENVBANK_ACCEPTANCE_SENTINEL verification=LIMITED_NAMES_ONLY result=PASS\n", target.ProjectID, target.EnvironmentID, target.ServiceIDs[service])
 	return nil
+}
+
+func cloudflare(ctx context.Context, token []byte) error {
+	accountID := strings.TrimSpace(os.Getenv("CLOUDFLARE_ACCEPTANCE_ACCOUNT_ID"))
+	zoneID := strings.TrimSpace(os.Getenv("CLOUDFLARE_ACCEPTANCE_ZONE_ID"))
+	script, err := requireMarked("CLOUDFLARE_ACCEPTANCE_SCRIPT", os.Getenv("CLOUDFLARE_ACCEPTANCE_SCRIPT"))
+	if err != nil {
+		return err
+	}
+	modulePath := strings.TrimSpace(os.Getenv("CLOUDFLARE_ACCEPTANCE_MODULE"))
+	healthURL := strings.TrimSpace(os.Getenv("CLOUDFLARE_ACCEPTANCE_HEALTH_URL"))
+	if accountID == "" || zoneID == "" || modulePath == "" || !strings.HasPrefix(healthURL, "https://") {
+		return errors.New("Cloudflare immutable target, module, and HTTPS health URL are required")
+	}
+	moduleFile, err := os.Open(modulePath)
+	if err != nil {
+		return errors.New("Cloudflare acceptance module is unavailable")
+	}
+	module, err := io.ReadAll(io.LimitReader(moduleFile, (20<<20)+1))
+	_ = moduleFile.Close()
+	if err != nil || len(module) == 0 || len(module) > 20<<20 {
+		wipe(module)
+		return errors.New("Cloudflare acceptance module is invalid")
+	}
+	defer wipe(module)
+	api, err := cloudflareprovider.New(token, cloudflareprovider.Options{Module: module})
+	if err != nil {
+		return err
+	}
+	defer api.Close()
+	target := cloudflareprovider.Target{AccountID: accountID, ZoneID: zoneID, ScriptName: script}
+	snapshot, err := api.Inspect(ctx, target)
+	if err != nil {
+		return err
+	}
+	randomSentinel := make([]byte, 32)
+	if _, err := rand.Read(randomSentinel); err != nil {
+		return err
+	}
+	sentinel := []byte(base64.RawURLEncoding.EncodeToString(randomSentinel))
+	wipe(randomSentinel)
+	defer wipe(sentinel)
+	versionID, err := api.Stage(ctx, cloudflareprovider.StageRequest{Target: target,
+		PriorVersionID: snapshot.PriorVersionID,
+		Secrets:        map[string][]byte{"ENVBANK_ACCEPTANCE_SENTINEL": sentinel}})
+	if err != nil {
+		return err
+	}
+	promoted := false
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if promoted {
+			_, _ = api.Deploy(cleanup, target, snapshot.PriorVersionID, true)
+		}
+		_ = api.DeleteVersion(cleanup, target, versionID)
+	}()
+	names, err := api.VersionBindingNames(ctx, target, versionID)
+	if err != nil || !contains(names, "ENVBANK_ACCEPTANCE_SENTINEL") {
+		return errors.New("Cloudflare staged sentinel binding name was not verified")
+	}
+	if _, err := api.Deploy(ctx, target, versionID, false); err != nil {
+		return err
+	}
+	promoted = true
+	start := time.Now()
+	for success := 0; success < 3; success++ {
+		if success > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(15 * time.Second):
+			}
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+		if err != nil {
+			return errors.New("Cloudflare acceptance health URL is invalid")
+		}
+		response, err := (&http.Client{Timeout: 15 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}).Do(request)
+		if err != nil {
+			return errors.New("Cloudflare acceptance health check failed")
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		_ = response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return errors.New("Cloudflare acceptance health status failed")
+		}
+	}
+	if time.Since(start) < 30*time.Second {
+		return errors.New("Cloudflare acceptance health duration was too short")
+	}
+	if _, err := api.Deploy(ctx, target, snapshot.PriorVersionID, true); err != nil {
+		return err
+	}
+	promoted = false
+	if err := api.DeleteVersion(ctx, target, versionID); err != nil {
+		return err
+	}
+	fmt.Printf("e2e-live: provider=cloudflare account_id=%s zone_id=%s script=%s staged_version=%s result=PASS\n",
+		accountID, zoneID, script, versionID)
+	return nil
+}
+
+func contains(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func recoveryPath(providerName string) (string, error) {

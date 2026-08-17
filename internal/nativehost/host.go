@@ -79,12 +79,17 @@ func (h *Host) unlock() error {
 	if err != nil {
 		return errors.New("stored credentials could not unlock EnvBank")
 	}
+	if cfg.Migrated() {
+		if err := cfg.Save(h.ConfigPath); err != nil {
+			return errors.New("migrated EnvBank configuration could not be saved")
+		}
+	}
 	vaultKey, err := decodeVaultKey(secrets)
 	if err != nil {
 		return err
 	}
 	api := client.NewAPI(cfg.Server)
-	api.Config, api.Secrets = cfg, secrets
+	api.Config, api.Secrets, api.Access = cfg, secrets, cfg.AccessCredentials()
 	h.api, h.vaultKey = api, vaultKey
 	return nil
 }

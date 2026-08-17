@@ -77,7 +77,7 @@ func (server Server) Call(ctx context.Context, name string, raw json.RawMessage)
 		}
 	}
 	if name == "envbank_capabilities" {
-		return Result{Capability: "stripe:webhook-signing-secret=automatic,clerk:application-key=interactive,vercel:deployment=automatic,railway:deployment=automatic"}, nil
+		return Result{Capability: "stripe:webhook-signing-secret=automatic,clerk:application-key=interactive,vercel:deployment=automatic,cloudflare:worker-version=automatic"}, nil
 	}
 	if server.Backend == nil {
 		return Result{BlockerCode: "WORKFLOW_BACKEND_UNAVAILABLE"}, nil

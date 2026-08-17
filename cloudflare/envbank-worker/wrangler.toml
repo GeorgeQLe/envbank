@@ -1,0 +1,21 @@
+name = "envbank-staging"
+main = "src/index.ts"
+compatibility_date = "2026-08-16"
+
+[placement]
+mode = "smart"
+
+[[durable_objects.bindings]]
+name = "VAULTS"
+class_name = "VaultDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["VaultDurableObject"]
+
+[observability]
+enabled = true
+
+# Cloudflare Access is configured on the route/hostname. The Worker continues
+# to require EnvBank request signatures; Access service-token headers are not
+# part of the signed message.

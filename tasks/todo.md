@@ -1,5 +1,23 @@
 # Current work
 
+## Milestone 12: Cloudflare-first migration — foundation complete
+
+- [x] Add the staging EnvBank Worker with one SQLite-backed Durable Object per
+  vault, encrypted client-config v2 with Cloudflare Access credentials, and
+  redirect-safe Access headers outside the v1 signature.
+- [x] Add exact-account/zone/script Cloudflare binding, atomic undeployed
+  Worker-version staging, names-only verification, separate promotion and
+  rollback, and a marked live-provider acceptance path.
+- [ ] Complete the cross-language v1 parity harness and close every Worker
+  route, error, audit, pagination, concurrency, and schema-migration gap before
+  any production data or hostname is placed on the Worker.
+- [ ] Build the authenticated resumable SQLite-to-Durable-Object importer with
+  per-vault transactional import and identifier/ciphertext-free count and
+  digest comparison.
+- [ ] Deploy marked staging resources, run the full migration and restore
+  journeys, complete the maintenance-window cutover and seven-day observation,
+  then retire the legacy Go/Docker/Railway production paths.
+
 ## Milestone 11: $0 end-to-end execution — implementation complete
 
 - [x] Add the required network-free `make e2e` gate, binary restart matrix,
@@ -8,8 +26,9 @@
   explicitly authorized provider-acceptance entry points plus a full runbook.
 - [x] Execute disposable browser and production native-host Keychain/Touch ID
   approval/denial observations on the release Mac and record sanitized evidence.
-- [ ] Execute the explicitly authorized Stripe, Clerk Development, and Railway
-  Free observations against dedicated marked resources before the next release.
+- [ ] Execute the explicitly authorized Stripe, Clerk Development, and
+  Cloudflare observations against dedicated marked resources before the next
+  release.
 
 ## Milestone 10: Hermetic agent-operable lifecycle testlab — complete
 
@@ -140,4 +159,7 @@ Later milestones are tracked in the [product roadmap](../docs/roadmap.md).
 
 ## Blockers
 
-None.
+- SiftCut Cloud implementation belongs to the separate `short-editor`
+  repository, which is outside this workspace's writable scope. Its D1/R2/
+  Queues/Workers AI/Containers refactor and PostgreSQL-to-D1 importer remain
+  unimplemented here.

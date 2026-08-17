@@ -95,6 +95,35 @@ type fakeAdapter struct {
 	verifyResult provider.Verification
 }
 
+type fakeBatchAdapter struct {
+	*fakeAdapter
+	stages         int
+	stagedValues   []string
+	verifyVersion  []string
+	verifyExpected []provider.Presence
+}
+
+func (adapter *fakeBatchAdapter) Stage(_ context.Context, requests []provider.WriteRequest) (provider.WriteEvidence, error) {
+	adapter.stages++
+	for _, request := range requests {
+		if err := request.ViewSecret(func(value []byte) error {
+			adapter.stagedValues = append(adapter.stagedValues, string(value))
+			return nil
+		}); err != nil {
+			return provider.WriteEvidence{}, err
+		}
+	}
+	return provider.WriteEvidence{ProviderOperationID: "staged-version-id",
+		CommittedAt: rolloutTime.Format(time.RFC3339)}, nil
+}
+
+func (adapter *fakeBatchAdapter) Verify(_ context.Context, request provider.VerifyRequest) (provider.VerifyEvidence, error) {
+	adapter.verifyVersion = append(adapter.verifyVersion, request.ProviderOperationID)
+	adapter.verifyExpected = append(adapter.verifyExpected, request.ExpectedPresence)
+	return provider.VerifyEvidence{Result: provider.VerificationVerified, Presence: request.ExpectedPresence,
+		VerifiedAt: rolloutTime.Format(time.RFC3339)}, nil
+}
+
 func (adapter *fakeAdapter) Capabilities() provider.Capabilities { return adapter.capabilities }
 func (adapter *fakeAdapter) Identity(context.Context) (provider.Identity, error) {
 	return adapter.identity, nil
@@ -196,6 +225,57 @@ func TestEnginePlansAppliesAndPersistsRedactedEvidence(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "plaintext-SENTINEL") {
 		t.Fatal("encrypted operation payload schema retained plaintext")
+	}
+}
+
+func TestEngineStagesAtomicAdapterOnce(t *testing.T) {
+	engine, store, ordinary, input := fixtureEngine(2)
+	batch := &fakeBatchAdapter{fakeAdapter: ordinary}
+	engine.Adapter = batch
+	plan, err := engine.Plan(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := engine.Apply(context.Background(), plan.ID(), allowConfirmation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.Status != StatusReady || batch.stages != 1 || len(ordinary.writes) != 0 ||
+		len(batch.stagedValues) != 2 || len(batch.verifyVersion) != 2 {
+		t.Fatalf("atomic stage result: status=%s stages=%d writes=%d values=%d verifies=%d",
+			operation.Status, batch.stages, len(ordinary.writes), len(batch.stagedValues), len(batch.verifyVersion))
+	}
+	for index, version := range batch.verifyVersion {
+		if version != "staged-version-id" || operation.Actions[index].WriteEvidence.ProviderOperationID != version {
+			t.Fatal("staged version evidence was not used for verification")
+		}
+	}
+	raw, err := json.Marshal(store.operations[operation.ID])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "plaintext-SENTINEL") {
+		t.Fatal("atomic operation evidence retained plaintext")
+	}
+}
+
+func TestEngineAtomicRevokeVerifiesExpectedAbsence(t *testing.T) {
+	engine, _, ordinary, input := fixtureEngine(1)
+	batch := &fakeBatchAdapter{fakeAdapter: ordinary}
+	engine.Adapter = batch
+	input.Actions[0] = Action{ID: "revoke-1", Operation: "revoke", Service: "api",
+		ServiceID: "api-id", Name: "OLD_SECRET"}
+	plan, err := engine.Plan(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := engine.Apply(context.Background(), plan.ID(), allowConfirmation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.Status != StatusReady || len(batch.verifyExpected) != 1 ||
+		batch.verifyExpected[0] != provider.PresenceAbsent {
+		t.Fatalf("revoke verification: status=%s expected=%v", operation.Status, batch.verifyExpected)
 	}
 }
 

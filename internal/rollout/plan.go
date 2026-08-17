@@ -19,9 +19,13 @@ const (
 
 type PlanKind string
 
-const PlanKindNamesOnly PlanKind = "names-only"
+const (
+	PlanKindNamesOnly    PlanKind = "names-only"
+	PlanKindBindingNames PlanKind = "binding-names"
+)
 
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var evidencePattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 
 type ProviderPlan struct {
 	Version          int           `json:"version"`
@@ -30,6 +34,7 @@ type ProviderPlan struct {
 	SnapshotRevision int64         `json:"snapshot_revision"`
 	Provider         string        `json:"provider"`
 	ProviderIdentity string        `json:"provider_identity"`
+	ProviderRevision string        `json:"provider_revision,omitempty"`
 	Target           TargetBinding `json:"target"`
 	Kind             PlanKind      `json:"kind,omitempty"`
 	Names            []PlannedName `json:"names,omitempty"`
@@ -97,6 +102,9 @@ func (plan ProviderPlan) Validate(now time.Time) error {
 		plan.SnapshotRevision < 1 || plan.Provider == "" || plan.ProviderIdentity == "" {
 		return errors.New("provider plan identity is invalid")
 	}
+	if plan.ProviderRevision != "" && !evidencePattern.MatchString(plan.ProviderRevision) {
+		return errors.New("provider plan revision evidence is invalid")
+	}
 	created, err := time.Parse(time.RFC3339, plan.CreatedAt)
 	if err != nil || created.UTC().Format(time.RFC3339) != plan.CreatedAt {
 		return errors.New("provider plan creation time is invalid")
@@ -115,10 +123,10 @@ func (plan ProviderPlan) Validate(now time.Time) error {
 	if plan.Target.ProjectID == "" || plan.Target.EnvironmentID == "" || plan.Target.ServiceIDs == nil {
 		return errors.New("provider plan target binding is incomplete")
 	}
-	if plan.Kind != "" && plan.Kind != PlanKindNamesOnly {
+	if plan.Kind != "" && plan.Kind != PlanKindNamesOnly && plan.Kind != PlanKindBindingNames {
 		return errors.New("provider plan kind is invalid")
 	}
-	if plan.Kind == PlanKindNamesOnly {
+	if plan.Kind == PlanKindNamesOnly || plan.Kind == PlanKindBindingNames {
 		if len(plan.Names) == 0 || len(plan.Names) > MaxActions || len(plan.Actions) > MaxActions {
 			return fmt.Errorf("names-only provider plan must contain between 1 and %d names", MaxActions)
 		}
@@ -148,8 +156,8 @@ func (plan ProviderPlan) Validate(now time.Time) error {
 			return err
 		}
 	}
-	if plan.Kind == PlanKindNamesOnly {
-		if err := validateNamesOnlyActions(plan.Names, plan.Actions); err != nil {
+	if plan.Kind == PlanKindNamesOnly || plan.Kind == PlanKindBindingNames {
+		if err := validateNamedActions(plan.Kind, plan.Names, plan.Actions); err != nil {
 			return err
 		}
 	}
@@ -160,15 +168,17 @@ func (plan ProviderPlan) Validate(now time.Time) error {
 	return nil
 }
 
-func validateNamesOnlyActions(names []PlannedName, actions []Action) error {
+func validateNamedActions(kind PlanKind, names []PlannedName, actions []Action) error {
 	byTarget := make(map[string]PlannedName, len(names))
 	for _, item := range names {
 		byTarget[item.Service+"\x00"+item.Name] = item
 	}
 	for index, action := range actions {
 		item, exists := byTarget[action.Service+"\x00"+action.Name]
-		if !exists || item.Desired != "present" || action.Operation != "upsert" ||
-			action.Record != item.Record || action.ExpectedRecordRevision != item.ExpectedRecordRevision {
+		upsert := item.Desired == "present" && action.Operation == "upsert" &&
+			action.Record == item.Record && action.ExpectedRecordRevision == item.ExpectedRecordRevision
+		revoke := kind == PlanKindBindingNames && item.Desired == "absent" && action.Operation == "revoke"
+		if !exists || !upsert && !revoke {
 			return fmt.Errorf("names-only provider plan action %d does not match a desired-present name", index)
 		}
 	}
@@ -180,7 +190,8 @@ func validateNames(names []PlannedName, target TargetBinding) error {
 	for index, item := range names {
 		if item.Service == "" || item.ServiceID == "" || item.Name == "" ||
 			target.ServiceIDs[item.Service] != item.ServiceID ||
-			(item.Desired != "present" && item.Desired != "absent") || item.State != "unverifiable" {
+			(item.Desired != "present" && item.Desired != "absent") ||
+			(item.State != "unverifiable" && item.State != "present" && item.State != "absent") {
 			return fmt.Errorf("names-only provider plan entry %d is invalid", index)
 		}
 		key := item.Service + "\x00" + item.Name

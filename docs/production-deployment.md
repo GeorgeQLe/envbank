@@ -1,7 +1,13 @@
 # Production deployment
 
-This is EnvBank's supported production baseline: one Docker host, one EnvBank
-container, one local Docker volume, and one TLS reverse proxy on the same host.
+> Migration status: Cloudflare Workers is the production target. The Docker
+> runbook below is retained only for the read-only rollback window and must not
+> be used for a new deployment. Remove it, the image publication, and `serve`
+> only after the migration validation, seven clean days, and restore drill in
+> [the Cloudflare migration runbook](cloudflare-migration.md).
+
+The legacy baseline was one Docker host, one EnvBank container, one local
+Docker volume, and one TLS reverse proxy on the same host.
 The proxy must be reachable only through an authenticated private network such
 as a device-authenticated VPN. EnvBank and its port must never be exposed
 directly to the public Internet.

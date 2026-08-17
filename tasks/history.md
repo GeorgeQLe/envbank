@@ -1,5 +1,28 @@
 # History
 
+## 2026-08-16
+
+- Added the Cloudflare EnvBank staging runtime with one SQLite-backed Durable
+  Object per vault, v1 signed-request verification, transactional replay and
+  mutation state, and a Worker-local protocol golden vector.
+- Added encrypted client-config v2 for Cloudflare Access service credentials,
+  transparent unlocked v1 migration, bind/rotate/remove commands, bootstrap
+  credential intake, and authenticated redirect refusal.
+- Added exact Cloudflare account/zone/script binding plus atomic undeployed
+  Worker-version staging, staged binding-name verification, separately
+  confirmed promotion, three health checks over at least 30 seconds, automatic
+  rollback, and encrypted deployment evidence.
+- Added a marker-gated Cloudflare live acceptance probe and migration runbook;
+  retained the legacy Go/Docker/Railway surfaces until parity, migration,
+  staging, seven-day observation, and restore gates are complete.
+- Verified the Go suite and vet, extension tests, Worker typecheck and protocol
+  test, Wrangler dry-run and local Durable Object smoke, diff hygiene, and the
+  secret-scan regression. No live Cloudflare resource was changed.
+- Remediated pre-merge CodeQL and review findings by using domain-separated
+  HMAC for opaque Keychain accounts, verifying desired binding absence,
+  restricting Access-bearing health checks to the configured origin, and
+  pruning Durable Object audit events to the legacy age and count limits.
+
 ## 2026-08-15
 
 - Completed the real Chrome for Testing production-native-host acceptance with

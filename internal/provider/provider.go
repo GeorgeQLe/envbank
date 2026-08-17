@@ -61,6 +61,7 @@ type VariableMetadata struct {
 type MetadataState struct {
 	Target    Target                                 `json:"target"`
 	Variables map[string]map[string]VariableMetadata `json:"variables"`
+	Revision  string                                 `json:"revision,omitempty"`
 }
 
 type secretValue struct {
@@ -138,11 +139,13 @@ func (request WriteRequest) String() string {
 }
 
 type VerifyRequest struct {
-	Target    Target `json:"target"`
-	Service   string `json:"service"`
-	ServiceID string `json:"service_id"`
-	Name      string `json:"name"`
-	WriteKey  string `json:"write_key,omitempty"`
+	Target              Target   `json:"target"`
+	Service             string   `json:"service"`
+	ServiceID           string   `json:"service_id"`
+	Name                string   `json:"name"`
+	WriteKey            string   `json:"write_key,omitempty"`
+	ProviderOperationID string   `json:"provider_operation_id,omitempty"`
+	ExpectedPresence    Presence `json:"expected_presence,omitempty"`
 }
 
 type WriteEvidence struct {
@@ -198,6 +201,14 @@ type Adapter interface {
 	Inspect(context.Context, Target) (MetadataState, error)
 	Write(context.Context, WriteRequest) (WriteEvidence, error)
 	Verify(context.Context, VerifyRequest) (VerifyEvidence, error)
+}
+
+// AtomicBatchAdapter stages a complete set of bindings in one provider
+// operation. Cloudflare uses this to create one undeployed Worker version;
+// adapters implementing it are never called through Write for that batch.
+type AtomicBatchAdapter interface {
+	Adapter
+	Stage(context.Context, []WriteRequest) (WriteEvidence, error)
 }
 
 type RetryClass string

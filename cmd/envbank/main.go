@@ -138,6 +138,10 @@ func run(args []string) error {
 		return bundleCommand(args[1:])
 	case "railway":
 		return railwayCommand(args[1:])
+	case "access":
+		return accessCommand(args[1:])
+	case "cloudflare":
+		return cloudflareCommand(args[1:])
 	case "mcp":
 		return mcpCommand(args[1:])
 	case "help", "-h", "--help":
@@ -155,8 +159,8 @@ func usage() {
 Usage:
   envbank version
   envbank serve [--listen 127.0.0.1:7337] [--database PATH]
-  envbank init --server URL --vault NAME --device NAME [auth flags]
-  envbank enroll-request --server URL --vault-id ID --device NAME [auth flags]
+  envbank init --server URL --vault NAME --device NAME [--access-credentials-stdin] [auth flags]
+  envbank enroll-request --server URL --vault-id ID --device NAME [--access-credentials-stdin] [auth flags]
   envbank enroll-list [auth flags]
   envbank enroll-approve --fingerprint HEX [auth flags] DEVICE_ID
   envbank enroll-accept [auth flags]
@@ -182,12 +186,22 @@ Usage:
   envbank recovery-list --artifact PATH [recovery auth flags]
   envbank recovery-get --artifact PATH [recovery auth flags] NAME
   envbank recovery-run --artifact PATH [recovery auth flags] -- COMMAND [ARGS...]
-  envbank recovery-restore --artifact PATH --server URL --vault NAME --device NAME [recovery auth flags] [auth flags]
+  envbank recovery-restore --artifact PATH --server URL --vault NAME --device NAME [--access-credentials-stdin] [recovery auth flags] [auth flags]
   envbank recovery-restore --resume --artifact PATH [recovery auth flags] [auth flags]
   envbank bundle check --manifest PATH
   envbank bundle prepare --manifest PATH [auth flags]  # missing imports from a JSON object on stdin
   envbank bundle prepare-exec --manifest PATH [--allow-env NAMES] [--source-sha256 HEX] [--source-timeout DURATION] [auth flags] -- /ABSOLUTE/SOURCE [SAFE ARGS...]
   envbank bundle status --manifest PATH [auth flags]
+  envbank access bind [auth flags]    # JSON credential from trusted stdin
+  envbank access rotate [auth flags]  # JSON credential from trusted stdin
+  envbank access remove [auth flags]
+  envbank cloudflare bind --manifest PATH [auth flags]  # API token from trusted stdin
+  envbank cloudflare plan --manifest PATH [auth flags]
+  envbank cloudflare apply --plan PLAN_ID --worker-module PATH [auth flags]
+  envbank cloudflare resume --operation OPERATION_ID --worker-module PATH [auth flags]
+  envbank cloudflare verify --operation OPERATION_ID [auth flags]
+  envbank cloudflare promote --operation OPERATION_ID --manifest PATH [auth flags]
+  envbank cloudflare rollback --operation OPERATION_ID [auth flags]
   envbank railway bind --manifest PATH [auth flags]  # project token from trusted stdin
   envbank railway plan --manifest PATH [auth flags]
   envbank railway apply --plan PLAN_ID [auth flags]
@@ -203,6 +217,94 @@ If --passphrase-file is omitted, ENVBANK_PASSPHRASE is used. Secret values are
 never accepted as command-line arguments. If --recovery-passphrase-file is
 omitted, ENVBANK_RECOVERY_PASSPHRASE is used.
 `)
+}
+
+func accessCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("access subcommand is required (supported: bind, rotate, remove)")
+	}
+	operation := args[0]
+	if operation != "bind" && operation != "rotate" && operation != "remove" {
+		return fmt.Errorf("unknown access subcommand %q", operation)
+	}
+	fs := flag.NewFlagSet("access "+operation, flag.ContinueOnError)
+	auth := addAuthFlags(fs)
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("access %s does not accept positional arguments", operation)
+	}
+	cfg, err := client.LoadConfig(auth.configPath)
+	if err != nil {
+		return err
+	}
+	passphrase, err := readPassphrase(auth.passphraseFile)
+	if err != nil {
+		return err
+	}
+	defer clearBytes(passphrase)
+	secrets, err := cfg.Unlock(passphrase)
+	if err != nil {
+		return err
+	}
+	existing := cfg.AccessCredentials()
+	switch operation {
+	case "bind":
+		if existing != nil {
+			return errors.New("Cloudflare Access credentials are already bound; use access rotate")
+		}
+		credentials, err := readAccessCredentials(os.Stdin)
+		if err != nil {
+			return err
+		}
+		if err := cfg.SetAccessCredentials(credentials); err != nil {
+			return err
+		}
+	case "rotate":
+		if existing == nil {
+			return errors.New("Cloudflare Access credentials are not bound; use access bind")
+		}
+		credentials, err := readAccessCredentials(os.Stdin)
+		if err != nil {
+			return err
+		}
+		if err := cfg.SetAccessCredentials(credentials); err != nil {
+			return err
+		}
+	case "remove":
+		if existing == nil {
+			return errors.New("Cloudflare Access credentials are not bound")
+		}
+		cfg.RemoveAccessCredentials()
+	}
+	if err := cfg.Lock(secrets, passphrase); err != nil {
+		return err
+	}
+	if err := cfg.Save(auth.configPath); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	fmt.Printf("Cloudflare Access credentials %s\n", map[string]string{
+		"bind": "bound", "rotate": "rotated", "remove": "removed",
+	}[operation])
+	return nil
+}
+
+func readAccessCredentials(reader io.Reader) (client.AccessCredentials, error) {
+	decoder := json.NewDecoder(io.LimitReader(reader, 8<<10))
+	decoder.DisallowUnknownFields()
+	var credentials client.AccessCredentials
+	if err := decoder.Decode(&credentials); err != nil {
+		return client.AccessCredentials{}, errors.New("Cloudflare Access credentials must be supplied as trusted JSON stdin")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return client.AccessCredentials{}, errors.New("Cloudflare Access credential input must contain one JSON object")
+	}
+	if err := credentials.Validate(); err != nil {
+		return client.AccessCredentials{}, err
+	}
+	return credentials, nil
 }
 
 func mcpCommand(args []string) error {
@@ -887,6 +989,7 @@ func initialize(args []string) error {
 	serverURL := fs.String("server", "", "sync service URL")
 	vaultName := fs.String("vault", "", "vault name")
 	deviceName := fs.String("device", "", "device name")
+	accessStdin := fs.Bool("access-credentials-stdin", false, "read Cloudflare Access JSON from trusted stdin")
 	auth := addAuthFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -903,6 +1006,10 @@ func initialize(args []string) error {
 	if err != nil {
 		return err
 	}
+	access, err := bootstrapAccessCredentials(*accessStdin)
+	if err != nil {
+		return err
+	}
 	keys, err := secure.NewDeviceKeys()
 	if err != nil {
 		return err
@@ -913,6 +1020,7 @@ func initialize(args []string) error {
 	}
 	keys.Secrets.VaultKey = secure.Encode(vaultKey)
 	api := client.NewAPI(*serverURL)
+	api.Access = access
 	created, err := api.CreateVault(*vaultName, protocol.PublicDevice{
 		Name: *deviceName, SigningPublic: keys.SigningPublic, WrappingPublic: keys.WrappingPublic,
 	})
@@ -922,6 +1030,14 @@ func initialize(args []string) error {
 	cfg, err := client.NewConfig(*serverURL, created.VaultID, created.DeviceID, *deviceName, keys, passphrase)
 	if err != nil {
 		return err
+	}
+	if access != nil {
+		if err := cfg.SetAccessCredentials(*access); err != nil {
+			return err
+		}
+		if err := cfg.Lock(keys.Secrets, passphrase); err != nil {
+			return err
+		}
 	}
 	if err := cfg.Save(auth.configPath); err != nil {
 		return fmt.Errorf("vault was created but local config could not be saved: %w", err)
@@ -936,6 +1052,7 @@ func enrollRequest(args []string) error {
 	serverURL := fs.String("server", "", "sync service URL")
 	vaultID := fs.String("vault-id", "", "existing vault ID")
 	deviceName := fs.String("device", "", "device name")
+	accessStdin := fs.Bool("access-credentials-stdin", false, "read Cloudflare Access JSON from trusted stdin")
 	auth := addAuthFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -950,11 +1067,16 @@ func enrollRequest(args []string) error {
 	if err != nil {
 		return err
 	}
+	access, err := bootstrapAccessCredentials(*accessStdin)
+	if err != nil {
+		return err
+	}
 	keys, err := secure.NewDeviceKeys()
 	if err != nil {
 		return err
 	}
 	api := client.NewAPI(*serverURL)
+	api.Access = access
 	status, err := api.RequestEnrollment(*vaultID, protocol.EnrollmentRequest{
 		Name: *deviceName, SigningPublic: keys.SigningPublic, WrappingPublic: keys.WrappingPublic,
 	})
@@ -965,12 +1087,31 @@ func enrollRequest(args []string) error {
 	if err != nil {
 		return err
 	}
+	if access != nil {
+		if err := cfg.SetAccessCredentials(*access); err != nil {
+			return err
+		}
+		if err := cfg.Lock(keys.Secrets, passphrase); err != nil {
+			return err
+		}
+	}
 	if err := cfg.Save(auth.configPath); err != nil {
 		return fmt.Errorf("enrollment was requested but local config could not be saved: %w", err)
 	}
 	fmt.Printf("enrollment requested for device %s\nfingerprint: %s\n",
 		status.Device.ID, status.Device.Fingerprint)
 	return nil
+}
+
+func bootstrapAccessCredentials(enabled bool) (*client.AccessCredentials, error) {
+	if !enabled {
+		return nil, nil
+	}
+	credentials, err := readAccessCredentials(os.Stdin)
+	if err != nil {
+		return nil, err
+	}
+	return &credentials, nil
 }
 
 func enrollList(args []string) error {
@@ -1588,6 +1729,12 @@ func unlockedAPIWithPassphrase(auth *authFlags) (*client.API, secure.DeviceSecre
 	api := client.NewAPI(cfg.Server)
 	api.Config = cfg
 	api.Secrets = secrets
+	api.Access = cfg.AccessCredentials()
+	if cfg.Migrated() {
+		if err := cfg.Save(auth.configPath); err != nil {
+			return nil, secure.DeviceSecrets{}, nil, fmt.Errorf("save migrated config: %w", err)
+		}
+	}
 	return api, secrets, passphrase, nil
 }
 

@@ -44,10 +44,10 @@ Operators should also read the
 disposable recovery drill, and maintain a separate
 [encrypted recovery artifact](docs/recovery.md).
 
-The released bundle and Railway workflow is documented in
-[bundle preparation and Railway rollout](docs/bundles.md). Bundle preparation
-is local-only. Railway writes require a separate interactive confirmation, use
-`skipDeploys: true`, and never deploy a service.
+The Cloudflare-first migration and rollout workflow is documented in the
+[Cloudflare migration runbook](docs/cloudflare-migration.md). Bundle preparation
+is local-only. Cloudflare version staging and promotion require separate
+interactive confirmations; staging uploads an undeployed version.
 
 Trusted password-manager and provider programs can feed missing imports over
 an EnvBank-owned private pipe without rendering values to an operator or UI
@@ -462,12 +462,12 @@ credential should also be removed.
 
 ## Production deployment
 
-The supported baseline is one hardened non-root container, one local Docker
-volume, a loopback-only published port, and a TLS reverse proxy reachable only
-through an authenticated private network. Follow the copy-ready
-[production deployment runbook](docs/production-deployment.md) for preflight,
-container limits, proxy policy, backup/recovery, upgrades, monitoring, incident
-isolation, and the readiness checklist.
+Cloudflare Workers with one SQLite-backed Durable Object per vault is the
+production target. The former hardened non-root container and local Docker
+volume baseline remains available only during the migration rollback window.
+Follow the [Cloudflare migration runbook](docs/cloudflare-migration.md) for the
+new deployment. The [legacy production runbook](docs/production-deployment.md)
+remains applicable only to the frozen rollback service until retirement.
 
 Deployment guidance is prepared, and the independent cryptographic review and
 clean-clone remediation re-review are complete. Read the
