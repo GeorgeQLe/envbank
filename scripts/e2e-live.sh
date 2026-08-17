@@ -7,11 +7,11 @@ source "$SCRIPT_DIR/e2e-scan.sh"
 PROVIDER=${1:-}
 [[ "${ENVBANK_LIVE_ACCEPTANCE:-}" == 1 ]] || { printf 'e2e-live: FAIL reason=EXPLICIT_AUTHORIZATION_REQUIRED\n' >&2; exit 1; }
 [[ -t 0 && -t 1 ]] || { printf 'e2e-live: FAIL reason=INTERACTIVE_TTY_REQUIRED\n' >&2; exit 1; }
-for forbidden in STRIPE_SECRET_KEY STRIPE_API_KEY RAILWAY_TOKEN RAILWAY_API_TOKEN CLERK_SECRET_KEY CLERK_API_KEY; do
+for forbidden in STRIPE_SECRET_KEY STRIPE_API_KEY RAILWAY_TOKEN RAILWAY_API_TOKEN CLOUDFLARE_API_TOKEN CLERK_SECRET_KEY CLERK_API_KEY; do
 	[[ -z "${!forbidden:-}" ]] || { printf 'e2e-live: FAIL reason=CREDENTIAL_ENVIRONMENT_FORBIDDEN\n' >&2; exit 1; }
 done
 case "$PROVIDER" in
-stripe | railway)
+stripe | railway | cloudflare)
 	go run ./e2e/live "$PROVIDER"
 	;;
 clerk)
@@ -41,7 +41,7 @@ vercel)
 	exit 1
 	;;
 *)
-	printf 'e2e-live: FAIL reason=PROVIDER_MUST_BE_STRIPE_CLERK_OR_RAILWAY\n' >&2
+	printf 'e2e-live: FAIL reason=PROVIDER_MUST_BE_STRIPE_CLERK_CLOUDFLARE_OR_RAILWAY\n' >&2
 	exit 1
 	;;
 esac

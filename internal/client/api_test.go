@@ -2,13 +2,60 @@ package client
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/secure"
 )
+
+func TestAccessHeadersAreOutsideSignedMessage(t *testing.T) {
+	keys, err := secure.NewDeviceKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI("https://example.invalid")
+	api.Config = &Config{VaultID: "vault", DeviceID: "device"}
+	api.Secrets = keys.Secrets
+	api.Access = &AccessCredentials{ClientID: "client-id", ClientSecret: "client-secret"}
+	api.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Header.Get("CF-Access-Client-Id") != "client-id" ||
+			request.Header.Get("CF-Access-Client-Secret") != "client-secret" {
+			t.Fatal("request omitted Cloudflare Access headers")
+		}
+		message := protocol.SignatureMessage(request.Method, request.URL.RequestURI(),
+			request.Header.Get(protocol.HeaderTimestamp), request.Header.Get(protocol.HeaderNonce), nil)
+		if !secure.Verify(keys.SigningPublic, message, request.Header.Get(protocol.HeaderSignature)) {
+			t.Fatal("Access headers changed the EnvBank signature message")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewBufferString("[]")), Header: make(http.Header)}, nil
+	})}
+	if _, err := api.ListRecords(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAuthenticatedRedirectIsRefusedWithoutForwardingHeaders(t *testing.T) {
+	requests := 0
+	api := NewAPI("https://source.example")
+	api.Access = &AccessCredentials{ClientID: "client-id", ClientSecret: "client-secret"}
+	api.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		location, _ := url.Parse("https://destination.example/v1/vaults")
+		return &http.Response{StatusCode: http.StatusTemporaryRedirect, Body: io.NopCloser(bytes.NewReader(nil)),
+			Header: http.Header{"Location": []string{location.String()}}}, nil
+	})}
+	err := api.do(http.MethodGet, "/v1/vaults", nil, nil, false)
+	if !errors.Is(err, ErrAuthenticatedRedirect) {
+		t.Fatalf("redirect error = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("authenticated redirect performed %d requests", requests)
+	}
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 

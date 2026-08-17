@@ -70,6 +70,16 @@ func (engine *Engine) Plan(ctx context.Context, input PlanInput) (ProviderPlan, 
 	if !sameProviderTarget(metadata.Target, target) {
 		return ProviderPlan{}, errors.New("provider target identity does not match the requested binding")
 	}
+	if input.Kind == PlanKindBindingNames {
+		for index := range input.Names {
+			variable := metadata.Variables[input.Names[index].Service][input.Names[index].Name]
+			if variable.Presence == provider.PresencePresent {
+				input.Names[index].State = "present"
+			} else {
+				input.Names[index].State = "absent"
+			}
+		}
+	}
 	if err := actionsSupported(input.Actions, capabilities); err != nil {
 		return ProviderPlan{}, err
 	}
@@ -77,7 +87,7 @@ func (engine *Engine) Plan(ctx context.Context, input PlanInput) (ProviderPlan, 
 	plan := ProviderPlan{
 		Version: PlanVersion, Bundle: input.Bundle, ManifestDigest: input.ManifestDigest,
 		SnapshotRevision: input.SnapshotRevision, Provider: identity.Provider,
-		ProviderIdentity: identity.ID, Target: cloneBinding(input.Target),
+		ProviderIdentity: identity.ID, ProviderRevision: metadata.Revision, Target: cloneBinding(input.Target),
 		Kind: input.Kind, Names: append([]PlannedName(nil), input.Names...),
 		Actions: append([]Action(nil), input.Actions...), CreatedAt: now.Format(time.RFC3339),
 		ExpiresAt: now.Add(PlanTTL).Format(time.RFC3339),
@@ -150,7 +160,8 @@ func (engine *Engine) Resume(ctx context.Context, operationID string) (Operation
 	if err != nil {
 		return Operation{}, err
 	}
-	if operation.Status == StatusReady || operation.Status == StatusLimited {
+	if operation.Status == StatusReady || operation.Status == StatusLimited ||
+		operation.Status == StatusPromoted || operation.Status == StatusRolledBack {
 		return operation, nil
 	}
 	if operation.Status == StatusFailed {
@@ -179,6 +190,13 @@ func (engine *Engine) advance(ctx context.Context, plan ProviderPlan, operation 
 	metadata, err := engine.Adapter.Inspect(ctx, providerTarget(plan.Target))
 	if err != nil {
 		return operation, provider.SanitizeError("inspect", err)
+	}
+	if batch, ok := engine.Adapter.(provider.AtomicBatchAdapter); ok {
+		var batchErr error
+		operation, revision, batchErr = engine.advanceAtomicBatch(ctx, batch, plan, operation, revision)
+		if batchErr != nil {
+			return operation, batchErr
+		}
 	}
 	for index := range operation.Actions {
 		item := &operation.Actions[index]
@@ -297,6 +315,7 @@ func (engine *Engine) advance(ctx context.Context, plan ProviderPlan, operation 
 			evidence, verifyErr := engine.Adapter.Verify(ctx, provider.VerifyRequest{
 				Target: providerTarget(plan.Target), Service: item.Action.Service,
 				ServiceID: item.Action.ServiceID, Name: item.Action.Name, WriteKey: item.WriteKey,
+				ProviderOperationID: item.WriteEvidence.ProviderOperationID,
 			})
 			if verifyErr != nil {
 				safe := provider.SanitizeError("verify", verifyErr)
@@ -343,6 +362,96 @@ func (engine *Engine) advance(ctx context.Context, plan ProviderPlan, operation 
 	return operation, nil
 }
 
+func (engine *Engine) advanceAtomicBatch(ctx context.Context, adapter provider.AtomicBatchAdapter,
+	plan ProviderPlan, operation Operation, revision int64) (Operation, int64, error) {
+	pending := false
+	for _, item := range operation.Actions {
+		if item.Status != ActionCommitted && item.Status != ActionVerified && item.Status != ActionLimited {
+			pending = true
+		}
+	}
+	if !pending {
+		return operation, revision, nil
+	}
+	for _, item := range operation.Actions {
+		if item.Status == ActionCommitted || item.Status == ActionVerified || item.Status == ActionLimited {
+			return operation, revision, errors.New("atomic rollout operation has partial commit evidence")
+		}
+	}
+	requests := make([]provider.WriteRequest, 0, len(operation.Actions))
+	defer func() {
+		for index := range requests {
+			requests[index].Destroy()
+		}
+	}()
+	for index := range operation.Actions {
+		item := &operation.Actions[index]
+		var value []byte
+		var err error
+		if item.Action.Record != "" {
+			value, err = engine.Store.LoadRecord(ctx, plan.Bundle, item.Action.Record,
+				item.Action.ExpectedRecordRevision)
+			if err != nil {
+				return operation, revision, err
+			}
+		} else {
+			value = []byte(item.Action.PublicValue)
+		}
+		requests = append(requests, provider.NewWriteRequest(item.Action.Operation,
+			providerTarget(plan.Target), item.Action.Service, item.Action.ServiceID,
+			item.Action.Name, item.WriteKey, value))
+		wipe(value)
+		item.Status = ActionInFlight
+		item.Attempts++
+		item.LastAttemptAt = engine.nowString()
+		item.LastError = nil
+	}
+	operation.Status = StatusWriting
+	operation.UpdatedAt = engine.nowString()
+	var err error
+	revision, err = engine.Store.SaveOperation(ctx, operation, revision)
+	if err != nil {
+		return operation, revision, err
+	}
+	evidence, stageErr := adapter.Stage(ctx, requests)
+	if stageErr != nil {
+		safe := provider.SanitizeError("stage", stageErr)
+		for index := range operation.Actions {
+			operation.Actions[index].LastError = &safe
+			if safe.Retry == provider.RetrySafe || safe.Retry == provider.RetryNever {
+				operation.Actions[index].Status = ActionPending
+			}
+		}
+		operation.Status = StatusRetryable
+		if safe.Retry == provider.RetryNever {
+			operation.Status = StatusFailed
+		} else if safe.Retry == provider.RetryAmbiguous {
+			operation.Status = StatusReconciliation
+		}
+		operation.UpdatedAt = engine.nowString()
+		revision, err = engine.Store.SaveOperation(ctx, operation, revision)
+		if err != nil {
+			return operation, revision, err
+		}
+		return operation, revision, safe
+	}
+	if evidence.CommittedAt == "" {
+		evidence.CommittedAt = engine.nowString()
+	}
+	if evidence.ProviderOperationID == "" || evidence.Validate() != nil {
+		return operation, revision, errors.New("provider returned invalid atomic stage evidence")
+	}
+	for index := range operation.Actions {
+		copy := evidence
+		operation.Actions[index].WriteEvidence = &copy
+		operation.Actions[index].Status = ActionCommitted
+	}
+	operation.Status = StatusWritten
+	operation.UpdatedAt = engine.nowString()
+	revision, err = engine.Store.SaveOperation(ctx, operation, revision)
+	return operation, revision, err
+}
+
 func (engine *Engine) validatePlanContext(ctx context.Context, plan ProviderPlan, enforceExpiry bool) error {
 	validationTime := engine.now()
 	if !enforceExpiry {
@@ -372,6 +481,9 @@ func (engine *Engine) validatePlanContext(ctx context.Context, plan ProviderPlan
 	if !sameProviderTarget(metadata.Target, providerTarget(plan.Target)) {
 		return errors.New("provider target does not match the plan")
 	}
+	if plan.ProviderRevision != "" && metadata.Revision != plan.ProviderRevision {
+		return errors.New("provider deployed revision does not match the plan")
+	}
 	return actionsSupported(plan.Actions, engine.Adapter.Capabilities())
 }
 
@@ -392,7 +504,8 @@ func (engine *Engine) newOperation(plan ProviderPlan) (Operation, error) {
 	operation := Operation{Version: OperationVersion, ID: id, PlanID: plan.ID(), PlanDigest: plan.Digest,
 		Bundle: plan.Bundle, ManifestDigest: plan.ManifestDigest, SnapshotRevision: plan.SnapshotRevision,
 		Provider: plan.Provider, ProviderIdentity: plan.ProviderIdentity, Target: cloneBinding(plan.Target),
-		Status: StatusConfirmed, CreatedAt: now, UpdatedAt: now,
+		ProviderRevision: plan.ProviderRevision,
+		Status:           StatusConfirmed, CreatedAt: now, UpdatedAt: now,
 		Actions: make([]OperationAction, len(plan.Actions))}
 	for index, action := range plan.Actions {
 		sum := sha256.Sum256([]byte("envbank.rollout.write.v1\x00" + id + "\x00" + action.ID))
@@ -473,6 +586,7 @@ func operationMatchesPlan(operation Operation, plan ProviderPlan) bool {
 	if operation.PlanDigest != plan.Digest || operation.Bundle != plan.Bundle ||
 		operation.ManifestDigest != plan.ManifestDigest || operation.SnapshotRevision != plan.SnapshotRevision ||
 		operation.Provider != plan.Provider || operation.ProviderIdentity != plan.ProviderIdentity ||
+		operation.ProviderRevision != plan.ProviderRevision ||
 		!sameBinding(operation.Target, plan.Target) || len(operation.Actions) != len(plan.Actions) {
 		return false
 	}

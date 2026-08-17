@@ -21,7 +21,10 @@ type API struct {
 	Config     *Config
 	Secrets    secure.DeviceSecrets
 	Now        func() time.Time
+	Access     *AccessCredentials
 }
+
+var ErrAuthenticatedRedirect = errors.New("refusing to follow a redirect for an authenticated request")
 
 func NewAPI(baseURL string) *API {
 	return &API{
@@ -190,6 +193,13 @@ func (a *API) do(method, path string, request any, response any, authenticated b
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if a.Access != nil {
+		if err := a.Access.Validate(); err != nil {
+			return err
+		}
+		req.Header.Set("CF-Access-Client-Id", a.Access.ClientID)
+		req.Header.Set("CF-Access-Client-Secret", a.Access.ClientSecret)
+	}
 	if authenticated {
 		if a.Config == nil || a.Secrets.SigningPrivate == "" {
 			return errors.New("authenticated client is not unlocked")
@@ -214,7 +224,31 @@ func (a *API) do(method, path string, request any, response any, authenticated b
 		req.Header.Set(protocol.HeaderNonce, nonce)
 		req.Header.Set(protocol.HeaderSignature, signature)
 	}
-	res, err := a.HTTPClient.Do(req)
+	httpClient := a.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 15 * time.Second}
+	}
+	clientCopy := *httpClient
+	originalRedirectPolicy := clientCopy.CheckRedirect
+	clientCopy.CheckRedirect = func(redirect *http.Request, via []*http.Request) error {
+		for _, header := range []string{
+			"CF-Access-Client-Id", "CF-Access-Client-Secret", protocol.HeaderDevice,
+			protocol.HeaderTimestamp, protocol.HeaderNonce, protocol.HeaderSignature,
+		} {
+			redirect.Header.Del(header)
+		}
+		if a.Access != nil || authenticated {
+			return ErrAuthenticatedRedirect
+		}
+		if originalRedirectPolicy != nil {
+			return originalRedirectPolicy(redirect, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	res, err := clientCopy.Do(req)
 	if err != nil {
 		return fmt.Errorf("server request failed: %w", err)
 	}

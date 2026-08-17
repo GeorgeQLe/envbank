@@ -24,6 +24,8 @@ const (
 	StatusVerifying      OperationStatus = "verifying"
 	StatusReady          OperationStatus = "ready-to-deploy"
 	StatusLimited        OperationStatus = "limited"
+	StatusPromoted       OperationStatus = "promoted"
+	StatusRolledBack     OperationStatus = "rolled-back"
 	StatusFailed         OperationStatus = "failed"
 )
 
@@ -49,11 +51,17 @@ type Operation struct {
 	SnapshotRevision int64             `json:"snapshot_revision"`
 	Provider         string            `json:"provider"`
 	ProviderIdentity string            `json:"provider_identity"`
+	ProviderRevision string            `json:"provider_revision,omitempty"`
 	Target           TargetBinding     `json:"target"`
 	Status           OperationStatus   `json:"status"`
 	Actions          []OperationAction `json:"actions"`
 	CreatedAt        string            `json:"created_at"`
 	UpdatedAt        string            `json:"updated_at"`
+	DeploymentID     string            `json:"deployment_id,omitempty"`
+	DeployedVersion  string            `json:"deployed_version,omitempty"`
+	PromotedAt       string            `json:"promoted_at,omitempty"`
+	RollbackID       string            `json:"rollback_deployment_id,omitempty"`
+	RolledBackAt     string            `json:"rolled_back_at,omitempty"`
 }
 
 type OperationAction struct {
@@ -73,6 +81,28 @@ func (operation Operation) Validate() error {
 		operation.Bundle == "" || !digestPattern.MatchString(operation.ManifestDigest) ||
 		operation.SnapshotRevision < 1 || operation.Provider == "" || operation.ProviderIdentity == "" {
 		return errors.New("rollout operation identity is invalid")
+	}
+	if operation.ProviderRevision != "" && !evidencePattern.MatchString(operation.ProviderRevision) {
+		return errors.New("rollout operation provider revision is invalid")
+	}
+	if operation.DeploymentID != "" && !evidencePattern.MatchString(operation.DeploymentID) ||
+		operation.DeployedVersion != "" && !evidencePattern.MatchString(operation.DeployedVersion) ||
+		operation.RollbackID != "" && !evidencePattern.MatchString(operation.RollbackID) {
+		return errors.New("rollout operation deployment evidence is invalid")
+	}
+	if operation.PromotedAt != "" {
+		if _, err := canonicalTime(operation.PromotedAt); err != nil {
+			return errors.New("rollout operation promotion time is invalid")
+		}
+	}
+	if operation.RolledBackAt != "" {
+		if _, err := canonicalTime(operation.RolledBackAt); err != nil {
+			return errors.New("rollout operation rollback time is invalid")
+		}
+	}
+	if operation.Status == StatusPromoted && (operation.DeploymentID == "" || operation.DeployedVersion == "" || operation.PromotedAt == "") ||
+		operation.Status == StatusRolledBack && (operation.RollbackID == "" || operation.RolledBackAt == "") {
+		return errors.New("rollout operation deployment evidence is incomplete")
 	}
 	if !validOperationStatus(operation.Status) || len(operation.Actions) == 0 || len(operation.Actions) > MaxActions {
 		return errors.New("rollout operation status is invalid")
@@ -125,7 +155,8 @@ func (operation Operation) Validate() error {
 			}
 		}
 	}
-	if operation.Status == StatusReady || operation.Status == StatusLimited {
+	if operation.Status == StatusReady || operation.Status == StatusLimited ||
+		operation.Status == StatusPromoted || operation.Status == StatusRolledBack {
 		limited := false
 		for index, item := range operation.Actions {
 			if item.Status != ActionVerified && item.Status != ActionLimited {
@@ -152,7 +183,7 @@ func validOperationStatus(status OperationStatus) bool {
 	switch status {
 	case StatusDraft, StatusPrepared, StatusPlanned, StatusConfirmed, StatusWriting,
 		StatusRetryable, StatusReconciliation, StatusWritten, StatusVerifying, StatusReady, StatusLimited,
-		StatusFailed:
+		StatusPromoted, StatusRolledBack, StatusFailed:
 		return true
 	default:
 		return false
