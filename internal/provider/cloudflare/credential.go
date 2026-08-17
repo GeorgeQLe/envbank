@@ -1,6 +1,7 @@
 package cloudflare
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -12,8 +13,9 @@ func CredentialAccount(vaultID, bundleID string) (string, error) {
 	if vaultID == "" || bundleID == "" {
 		return "", errors.New("Cloudflare credential account is incomplete")
 	}
-	sum := sha256.Sum256([]byte("envbank.cloudflare.credential.v1\x00" + vaultID + "\x00" + bundleID))
-	return "v1:" + hex.EncodeToString(sum[:]), nil
+	digest := hmac.New(sha256.New, []byte("envbank.cloudflare.credential-account.v1"))
+	_, _ = digest.Write([]byte(vaultID + "\x00" + bundleID))
+	return "v1:" + hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func LoadCredential(store keychain.Store, account string) ([]byte, error) {

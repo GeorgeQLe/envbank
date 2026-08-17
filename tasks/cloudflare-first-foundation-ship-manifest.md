@@ -49,8 +49,9 @@ to its separate repository.
   `planner.go` — implement immutable Cloudflare target binding, Keychain token
   storage, names-only inspection, one-version atomic staging, deployment, and
   rollback.
-- `internal/provider/cloudflare/api_test.go` — verifies multipart staging,
-  strict inheritance, exact binding metadata, and a single version upload.
+- `internal/provider/cloudflare/api_test.go` and `credential_test.go` — verify
+  multipart staging, strict inheritance, exact binding metadata, a single
+  version upload, and stable scoped opaque credential-account derivation.
 - `internal/rollout/plan.go`, `state.go`, and `engine.go` — add binding-name
   plans, provider revision checks, atomic staging, staged-version verification,
   and encrypted promotion/rollback evidence.
@@ -146,6 +147,11 @@ Findings fixed:
   the Worker returned 204; the Worker now validates the full wrapped envelope,
   rejects invitation-linked legacy approval, handles already-approved state,
   and returns the compatible public-device response.
+- GitHub's CodeQL aggregate check classified the deterministic Keychain-account
+  SHA-256 digest as password hashing. The account derivation now uses a
+  domain-separated HMAC-SHA-256 construction, with stability, scope, and
+  opacity regression coverage; the focused Go test and rerun security check
+  must pass before merge.
 
 ## Residual risk
 
