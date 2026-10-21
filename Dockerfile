@@ -1,4 +1,5 @@
-FROM golang:1.25.13-alpine@sha256:844b27705f54e73773e0f9bc3c780633b9d7f4b4831bf35cdad02a81a4c80bd0 AS build
+FROM golang:1.27.3-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS build
+RUN apk add --no-cache "ca-certificates>=20261020-r0" && update-ca-certificates
 WORKDIR /src
 ARG VERSION=dev
 ARG COMMIT=unknown
