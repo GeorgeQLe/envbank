@@ -1,6 +1,7 @@
 package nativehost
 
 import (
+	"context"
 	"errors"
 	"io"
 	"time"
@@ -11,18 +12,20 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/password"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/secure"
+	"github.com/GeorgeQLe/envbank/pkg/protectedfill"
 )
 
 const ProtocolVersion = 1
 
 type Request struct {
-	Version          int             `json:"version"`
-	ID               string          `json:"id"`
-	Action           string          `json:"action"`
-	Name             string          `json:"name,omitempty"`
-	Origin           string          `json:"origin,omitempty"`
-	Policy           password.Policy `json:"policy,omitempty"`
-	ExpectedRevision int64           `json:"expected_revision,omitempty"`
+	Version          int                   `json:"version"`
+	ID               string                `json:"id"`
+	Action           string                `json:"action"`
+	Name             string                `json:"name,omitempty"`
+	Origin           string                `json:"origin,omitempty"`
+	Policy           password.Policy       `json:"policy,omitempty"`
+	ExpectedRevision int64                 `json:"expected_revision,omitempty"`
+	Target           *protectedfill.Target `json:"target,omitempty"`
 }
 
 type Response struct {
@@ -52,12 +55,25 @@ type Host struct {
 	Idle       time.Duration
 	Now        func() time.Time
 
+	// Trusted controller bootstrap only. Never set by a flag or native message.
+	Protection  *protectedfill.Coordinator
+	ComputerUse bool
+
 	api      *client.API
 	vaultKey []byte
 }
 
 func New(configPath string, store Keychain) *Host {
 	return &Host{ConfigPath: configPath, Keychain: store, Idle: 10 * time.Minute, Now: time.Now}
+}
+
+// NewForComputerUse disables unprotected value release and credential mutations
+// even when controller protection is unavailable. The controller owns the Gate.
+func NewForComputerUse(configPath string, store Keychain, protection *protectedfill.Coordinator) *Host {
+	h := New(configPath, store)
+	h.ComputerUse = true
+	h.Protection = protection
+	return h
 }
 
 func (h *Host) account(cfg *client.Config) string { return cfg.VaultID + ":" + cfg.DeviceID }
@@ -134,6 +150,15 @@ func (h *Host) Handle(request Request) (Response, bool) {
 		response.Error = "unsupported protocol request"
 		return response, false
 	}
+	if request.Action == "protected_status" {
+		response.OK = true
+		response.Result = map[string]any{"available": h.Protection.Available(), "computer_use": h.ComputerUse, "standard_fill_agent_safe": false}
+		return response, false
+	}
+	if h.ComputerUse && (request.Action == "get_for_fill" || request.Action == "generate_password" || request.Action == "allow_origin" || request.Action == "deny_origin") {
+		response.Error = "standard credential operations are unavailable during computer use"
+		return response, false
+	}
 	if request.Action == "lock" {
 		h.clear()
 		response.OK = true
@@ -188,6 +213,28 @@ func (h *Host) Handle(request Request) (Response, bool) {
 			break
 		}
 		response.OK, response.Result = true, result
+	case "protected_execute":
+		if !h.Protection.Configured() {
+			response.OK, response.Result = true, protectedfill.Receipt{Status: "HOST_PROTECTION_UNAVAILABLE"}
+			break
+		}
+		if request.Target == nil || request.Target.Record != request.Name || request.Target.Origin != origin {
+			response.OK, response.Result = true, protectedfill.Receipt{Status: "TARGET_REJECTED"}
+			break
+		}
+		receipt := h.Protection.Run(context.Background(), *request.Target, func() ([]byte, error) {
+			records, err := h.loadRecords()
+			if err != nil {
+				return nil, errors.New("RECORD_UNAVAILABLE")
+			}
+			for _, record := range records {
+				if record.Name == request.Name && browser.ContainsOrigin(record.AllowedOrigins, origin) {
+					return []byte(record.Value), nil
+				}
+			}
+			return nil, errors.New("RECORD_UNAVAILABLE")
+		})
+		response.OK, response.Result = true, receipt
 	case "get_for_fill":
 		if request.Name == "" {
 			response.Error = "variable name is required"

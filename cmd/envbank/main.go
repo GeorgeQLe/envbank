@@ -1914,7 +1914,7 @@ func browserInstall(args []string) error {
 	}
 	fs := flag.NewFlagSet("browser-install", flag.ContinueOnError)
 	configPath := fs.String("config", defaultConfigPath(), "encrypted device config")
-	browser := fs.String("browser", "google-chrome", "browser target: google-chrome, chrome-for-testing, or chromium")
+	browser := fs.String("browser", "brave", "browser target: brave, google-chrome, chrome-for-testing, or chromium")
 	profileDir := fs.String("profile-dir", "", "isolated browser user-data directory for the native-host manifest")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1934,9 +1934,9 @@ func browserInstall(args []string) error {
 		return err
 	}
 	if _, err := os.Lstat(installation.manifest); err == nil {
-		return fmt.Errorf("refusing to overwrite existing Chrome native-host manifest: %s", installation.manifest)
+		return fmt.Errorf("refusing to overwrite existing browser native-host manifest: %s", installation.manifest)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect Chrome native-host manifest: %w", err)
+		return fmt.Errorf("inspect browser native-host manifest: %w", err)
 	}
 	for _, path := range []string{installation.binary, installation.locator} {
 		if _, err := os.Lstat(path); err == nil {
@@ -1989,7 +1989,7 @@ func browserUninstall(args []string) error {
 	}
 	fs := flag.NewFlagSet("browser-uninstall", flag.ContinueOnError)
 	deleteKeychain := fs.Bool("delete-keychain", false, "also delete this device's Keychain passphrase")
-	browser := fs.String("browser", "google-chrome", "browser target: google-chrome, chrome-for-testing, or chromium")
+	browser := fs.String("browser", "brave", "browser target: brave, google-chrome, chrome-for-testing, or chromium")
 	profileDir := fs.String("profile-dir", "", "isolated browser user-data directory containing the native-host manifest")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -2067,6 +2067,8 @@ func browserManifestPath(browser string) (string, error) {
 	}
 	var supportDir string
 	switch browser {
+	case "brave":
+		supportDir = filepath.Join("BraveSoftware", "Brave-Browser")
 	case "google-chrome":
 		supportDir = filepath.Join("Google", "Chrome")
 	case "chrome-for-testing":

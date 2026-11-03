@@ -345,6 +345,14 @@ part of the page: page scripts, extensions with page access, and a compromised
 site may read it. Browser filling does not protect against that page-level
 threat.
 
+## Protected computer-use boundary
+
+The new protected-fill SDK and selection UI are described in
+[the controller integration contract](protected-computer-use.md). They do not
+make standard browser filling agent-safe. The standalone host refuses protected
+operations; a qualified controller must enforce the global capture/input gate
+and own private execution, context destruction and crash recovery.
+
 ## Server persistence and deployment
 
 The service stores ciphertext, public metadata, invitation lifecycle state,

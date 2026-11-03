@@ -1,0 +1,31 @@
+{
+  "date": "2026-11-03",
+  "scope": "Brave installer support and protected computer-use foundation",
+  "productionProtectedFillAvailable": false,
+  "realControllerIntegrated": false,
+  "realCredentialsAccessedOrTransferred": false,
+  "everydayBraveProfileModified": false,
+  "verification": {
+    "fullGoSuite": "passed",
+    "scopedRace": "passed: pkg/... and internal/nativehost",
+    "goVet": "passed",
+    "extensionUnitTests": 20,
+    "browserDomCases": 17,
+    "browserScope": "production selection and popup scripts in disposable headless pages; metadata-only bridge fixture",
+    "nativeOsCaptureConfidentialityQualified": false,
+    "actualBraveNativeMessagingQualified": false,
+    "sigkillRecoveryLatch": "passed using a killed disposable child process",
+    "hermeticEndToEnd": "passed: go, testlab, recovery, extension, website lint/types/build/smoke, plaintext-leakage scan"
+  },
+  "blockers": [
+    "Current computer-use host exposes no documented global observation/input barrier integration or qualified Driver",
+    "Actual Brave extension/native-host and human-approval acceptance",
+    "Integrated sentinel checks through native screenshots/OCR, AX, DOM, traces, clipboard and concurrent tool routes",
+    "Separate provider capture and Vercel project/environment/variable persistence qualification"
+  ],
+  "reviewFixes": [
+    "Gate Close cancels private work and retains authority while an operation is running",
+    "Transparent fields and transparent ancestors are rejected",
+    "Earlier selection timeout cannot cancel a later operation"
+  ]
+}
