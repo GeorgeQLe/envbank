@@ -2,7 +2,10 @@
 
 This directory is an unpacked, dependency-free Manifest V3 extension. Build
 the Go binary, run `envbank keychain-store`, then run `envbank browser-install`
-before loading this directory from `chrome://extensions` in developer mode.
+before loading this directory from `brave://extensions` in developer mode.
+Brave is the installer default; use `--browser brave` explicitly when desired.
+Explicit Chrome/Chromium targets remain supported for existing installations.
+The installer refuses to overwrite existing native-host manifests.
 
 The development public key in `manifest.json` fixes the ID to
 `pgbpmecaapiknpejgdkpaifpjcnckcnk`, which is the only extension origin accepted
@@ -26,3 +29,15 @@ node --test test/*.test.js
 `test/fixture.html` is a local acceptance page containing text, password,
 textarea, hidden, file, and iframe targets. Serve this directory over loopback
 HTTP; do not open it as a `file:` URL, which is intentionally ineligible.
+
+## Protected computer use
+
+`Protected fill` requires a connected observation-controlling host. The default
+standalone native host reports it unavailable; it never turns an agent's pause
+claim into permission to release a value. In a qualified controller embedding,
+choose a record, the empty password field and its POST submit button. The trusted
+host owns validation, private submission and context destruction, returning only
+fixed status. Ordinary `Choose` remains human fill and is not agent-safe.
+
+See [the host contract and verification limits](../docs/protected-computer-use.md).
+No real credentials should be used until the integrated path is qualified.

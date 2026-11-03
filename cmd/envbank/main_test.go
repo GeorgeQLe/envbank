@@ -81,6 +81,7 @@ func TestWritePrivateFileExclusiveRefusesExistingFile(t *testing.T) {
 
 func TestBrowserManifestPathTargets(t *testing.T) {
 	for browser, suffix := range map[string]string{
+		"brave":              filepath.Join("BraveSoftware", "Brave-Browser", "NativeMessagingHosts", "com.envbank.native.json"),
 		"google-chrome":      filepath.Join("Google", "Chrome", "NativeMessagingHosts", "com.envbank.native.json"),
 		"chrome-for-testing": filepath.Join("Google", "Chrome for Testing", "NativeMessagingHosts", "com.envbank.native.json"),
 		"chromium":           filepath.Join("Chromium", "NativeMessagingHosts", "com.envbank.native.json"),

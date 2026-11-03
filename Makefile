@@ -1,4 +1,4 @@
-.PHONY: build test test-go test-extension format-check race vet security secret-scan-test build-cross recovery-drill e2e e2e-release-local e2e-browser e2e-keychain e2e-live
+.PHONY: build test test-go test-extension format-check race vet security secret-scan-test build-cross recovery-drill e2e e2e-release-local e2e-browser e2e-keychain e2e-live e2e-protected-selection
 
 build:
 	go build -o envbank ./cmd/envbank
@@ -50,3 +50,6 @@ e2e-keychain:
 
 e2e-live:
 	./scripts/e2e-live.sh "$(PROVIDER)"
+
+e2e-protected-selection:
+	node e2e/browser/protected-selection.mjs

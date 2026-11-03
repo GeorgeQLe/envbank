@@ -1,5 +1,6 @@
 "use strict";
 let tab, origin, records = [], pendingAllow = null, pendingGenerate = null;
+let protection = { available: false, computer_use: false };
 const statusNode = document.querySelector("#status");
 const recordsNode = document.querySelector("#records");
 
@@ -14,15 +15,23 @@ function render() {
   for (const record of records.filter((item) => item.name.toLowerCase().includes(query))) {
     const row = document.createElement("div"); row.className = `record ${record.allowed ? "" : "blocked"}`;
     const name = document.createElement("span"); name.textContent = record.name;
-    const button = document.createElement("button"); button.textContent = record.allowed ? "Choose" : "Allow…";
+    const button = document.createElement("button"); button.textContent = record.allowed ? (protection.computer_use ? "Protected fill" : "Choose") : "Allow…";
+    button.disabled = protection.computer_use && (!record.allowed || !protection.available);
     const meta = document.createElement("span"); meta.className = `meta ${record.due ? "due" : ""}`;
     meta.textContent = record.due ? "Rotation due" : record.rotate_every_days > 0 ? `Rotates every ${record.rotate_every_days} days` : "No rotation schedule";
-    button.addEventListener("click", () => record.allowed ? choose(record.name) : confirmAllow(record.name));
-    row.append(name, button, meta); recordsNode.append(row);
+    button.addEventListener("click", () => record.allowed ? choose(record.name, protection.computer_use) : confirmAllow(record.name));
+    row.append(name, button, meta);
+    if (record.allowed && !protection.computer_use) {
+      const protectedButton = document.createElement("button"); protectedButton.textContent = "Protected fill";
+      protectedButton.disabled = !protection.available;
+      protectedButton.title = protection.available ? "Choose the password field and submit button" : "Requires an observation-controlling host";
+      protectedButton.addEventListener("click", () => choose(record.name, true)); row.append(protectedButton);
+    }
+    recordsNode.append(row);
   }
 }
-async function choose(name) {
-  try { await request({ type: "arm", tabId: tab.id, name, origin }); window.close(); }
+async function choose(name, protectedMode = false) {
+  try { await request({ type: protectedMode ? "protected-arm" : "arm", tabId: tab.id, name, origin }); window.close(); }
   catch (error) { statusNode.textContent = error.message; }
 }
 function confirmAllow(name) {
@@ -79,6 +88,10 @@ document.querySelector("#lock").addEventListener("click", async () => { try { aw
     origin = EnvBankCore.originFromURL(tab && tab.url || "");
     if (!origin) throw new Error("This page is not an eligible HTTPS or loopback HTTP origin");
     document.querySelector("#origin").textContent = origin;
+    try { protection = await request({ type: "protected-status" }); }
+    catch (_) { protection = { available: false, computer_use: false }; } // Older human-fill hosts cannot provide protected mode.
+    document.querySelector("#generator").hidden = protection.computer_use;
+    if (protection.computer_use && !protection.available) { statusNode.textContent = "Protected filling requires a connected observation-controlling host"; return; }
     records = await request({ type: "list", origin });
     statusNode.textContent = records.length ? "" : "No variables found"; render();
   } catch (error) { statusNode.textContent = error.message; }

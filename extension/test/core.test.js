@@ -26,7 +26,7 @@ test("native bridge correlates replies and rejects pending calls on disconnect",
 });
 
 test("extension never invokes persistence or clipboard APIs", () => {
-  for (const file of ["background.js", "content.js", "popup.js", "core.js"]) {
+  for (const file of ["background.js", "content.js", "protected-content.js", "popup.js", "core.js"]) {
     const source = fs.readFileSync(path.join(__dirname, "..", file), "utf8");
     assert.doesNotMatch(source, /chrome\.storage|clipboard|console\./);
   }
@@ -157,4 +157,52 @@ test("generator confirmation describes native storage, exact origin, and replace
   assert.match(source, /This replaces revision \$\{existing\.revision\}/);
   assert.match(source, /dialog\.returnValue = ""/);
   assert.match(source, /expectedRevision: existing \? existing\.revision : 0/);
+});
+
+test("protected fill refuses a missing controller before arming or value release", async () => {
+  const harness = backgroundHarness("https://example.com/form", () => ({ available: false }));
+  const result = await harness.message({ type: "protected-arm", tabId: 5, name: "PASSWORD", origin: "https://example.com" });
+  assert.match(result.__error, /observation-controlling host/);
+  assert.deepEqual(harness.nativeRequests.map(r => r.action), ["protected_status"]);
+  assert.equal(harness.sent.length, 0);
+});
+
+test("protected selection binds document and strips arbitrary native response fields", async () => {
+  const marker = "DISPOSABLE_NATIVE_REPLY_MARKER";
+  const harness = backgroundHarness("https://example.com/form", action => action === "protected_status"
+    ? { available: true } : { status: "SUBMISSION_ATTEMPTED_CONTEXT_CLOSED", value: marker, diagnostics: marker });
+  await harness.message({ type: "protected-arm", tabId: 5, name: "PASSWORD", origin: "https://example.com" });
+  const token = harness.sent.at(-1).message.token;
+  const result = await harness.message({ type: "protected-target-selected", token, field: "field_1", submit: "submit_1" },
+    { tab: { id: 5 }, frameId: 0, documentId: "doc_1", url: "https://example.com/form" });
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { status: "SUBMISSION_ATTEMPTED_CONTEXT_CLOSED" });
+  assert.equal(JSON.stringify(result).includes(marker), false);
+  const execution = harness.nativeRequests.find(r => r.action === "protected_execute");
+  assert.deepEqual(JSON.parse(JSON.stringify(execution.target)), { record: "PASSWORD", context: "tab_5", document: "doc_1", field: "field_1", submit: "submit_1", origin: "https://example.com" });
+  assert.equal(harness.nativeRequests.some(r => r.action === "get_for_fill"), false);
+  const replay = await harness.message({ type: "protected-target-selected", token, field: "field_1", submit: "submit_1" },
+    { tab: { id: 5 }, frameId: 0, documentId: "doc_1", url: "https://example.com/form" });
+  assert.match(replay.__error, /expired/);
+});
+
+test("protected sessions cannot downgrade to legacy value responses", async () => {
+  const harness = backgroundHarness("https://example.com/form", () => ({ available: true }));
+  await harness.message({ type: "protected-arm", tabId: 5, name: "PASSWORD", origin: "https://example.com" });
+  const result = await harness.message({ type: "field-selected", token: harness.sent.at(-1).message.token }, { tab: { id: 5 }, frameId: 0 });
+  assert.match(result.__error, /expired/);
+  assert.equal(harness.nativeRequests.some(r => r.action === "get_for_fill"), false);
+});
+
+test("protected selection rejects frames and missing or changed document origins", async () => {
+  for (const sender of [
+    { tab: { id: 5 }, frameId: 1, documentId: "doc_1", url: "https://example.com/form" },
+    { tab: { id: 5 }, frameId: 0, url: "https://example.com/form" },
+    { tab: { id: 5 }, frameId: 0, documentId: "doc_1", url: "https://other.example/form" },
+  ]) {
+    const harness = backgroundHarness("https://example.com/form", () => ({ available: true }));
+    await harness.message({ type: "protected-arm", tabId: 5, name: "PASSWORD", origin: "https://example.com" });
+    const result = await harness.message({ type: "protected-target-selected", token: harness.sent.at(-1).message.token, field: "field_1", submit: "submit_1" }, sender);
+    assert.ok(result.__error);
+    assert.equal(harness.nativeRequests.some(r => r.action === "protected_execute"), false);
+  }
 });

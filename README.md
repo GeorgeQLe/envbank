@@ -78,8 +78,13 @@ automation layer. See [private provider intake](docs/provider-intake.md).
   verification without provider value reads or deployment mutations
 - Direct child-process environment injection without writing a `.env` file
 - Exact-origin browser authorization stored inside each encrypted record
-- A macOS Keychain-gated Chrome native host and dependency-free MV3 extension
+- A macOS Keychain-gated native host (Brave by default) and dependency-free MV3 extension
+- A fail-closed protected-fill SDK and computer-use selection UI; real controller
+  integration remains required before protected operation is available
 - A transactional SQLite sync service that supports multiple service processes
+
+Protected computer-use implementation and remaining host-integration gates are
+documented in [the protected-fill handoff](docs/protected-computer-use.md).
 
 ## Install v0.2.0
 
