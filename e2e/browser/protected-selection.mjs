@@ -87,11 +87,16 @@ try {
   });
   // Exercise the actual popup controls with public metadata fixtures. This is
   // not an installed-extension or native-controller acceptance test.
-  const popupHTML=fs.readFileSync(path.join(repo,"extension/popup.html"),"utf8").replace(/<script[^>]*><\/script>/g,"").replace(/<link[^>]*>/g,"");
+  const popupHTML=fs.readFileSync(path.join(repo,"extension/popup.html"),"utf8");
   for(const mode of ["missing-host","protected-ready","older-human-host"]) {
     const context=await browser.newContext();
     try {
-      const page=await context.newPage(); await page.goto(origin); await page.setContent(popupHTML);
+      const page=await context.newPage(); await page.goto(origin);
+      await page.evaluate(source=>{
+        const fixture = new DOMParser().parseFromString(source, "text/html");
+        fixture.querySelectorAll("script, link").forEach(node=>node.remove());
+        document.replaceChild(document.importNode(fixture.documentElement, true), document.documentElement);
+      }, popupHTML);
       await page.evaluate(mode=>{
         globalThis.fixtureRequests=[];
         globalThis.chrome={tabs:{async query(){return [{id:5,url:location.href}]}},runtime:{async sendMessage(value){

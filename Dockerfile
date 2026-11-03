@@ -1,4 +1,4 @@
-FROM golang:1.25.13-alpine@sha256:844b27705f54e73773e0f9bc3c780633b9d7f4b4831bf35cdad02a81a4c80bd0 AS build
+FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
 WORKDIR /src
 ARG VERSION=dev
 ARG COMMIT=unknown
@@ -6,6 +6,7 @@ ARG BUILD_DATE=unknown
 COPY go.mod go.sum ./
 COPY cmd ./cmd
 COPY internal ./internal
+COPY pkg ./pkg
 RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
     -o /out/envbank ./cmd/envbank
