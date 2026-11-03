@@ -35,6 +35,7 @@ test("extension never invokes persistence or clipboard APIs", () => {
 function backgroundHarness(tabURL, onNativeRequest) {
   let listener;
   let currentTabURL = tabURL;
+  let entropy = 0;
   const nativeRequests = [], sent = [], timers = [];
   class FakeBridge {
     request(action, fields) {
@@ -45,7 +46,7 @@ function backgroundHarness(tabURL, onNativeRequest) {
   const context = {
     EnvBankCore: { NativeBridge: FakeBridge, originFromURL },
     importScripts() {},
-    crypto: { getRandomValues(value) { value.fill(7); } },
+    crypto: { getRandomValues(value) { value.fill(++entropy); } },
     setTimeout(fn) { timers.push(fn); },
     chrome: {
       runtime: { onMessage: { addListener(fn) { listener = fn; } } },
@@ -205,4 +206,16 @@ test("protected selection rejects frames and missing or changed document origins
     assert.ok(result.__error);
     assert.equal(harness.nativeRequests.some(r => r.action === "protected_execute"), false);
   }
+});
+
+
+test("old selection expiry cannot cancel a newly armed operation", async () => {
+  const harness = backgroundHarness("https://example.com/form");
+  await harness.message({ type: "arm", tabId: 5, name: "FIRST", origin: "https://example.com" });
+  await harness.message({ type: "arm", tabId: 5, name: "SECOND", origin: "https://example.com" });
+  const count=harness.sent.length;
+  harness.timers[0]();
+  assert.equal(harness.sent.length,count);
+  harness.timers[1]();
+  assert.equal(harness.sent.at(-1).message.reason,"timeout");
 });

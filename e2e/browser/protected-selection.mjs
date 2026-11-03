@@ -60,6 +60,13 @@ try {
     assert.equal(await page.evaluate(()=>fixtureBridge.requests.at(-1)?.type),"cancel-selection");
   });
 
+  for (const opacity of ["input", "ancestor"]) await fixture(async page=>{
+    await page.evaluate(which=>{document.querySelector(which === "input" ? "#password" : "#login").style.opacity="0"},opacity);
+    await page.click("#password");
+    assert.equal(await page.evaluate(()=>fixtureBridge.requests.some(r=>r.type==="protected-target-selected")),false);
+    assert.equal(await page.evaluate(()=>fixtureBridge.requests.at(-1)?.type),"cancel-selection");
+  });
+
   for(const mutation of ["get","cross-origin","other-form","rerender","override","filled","script-click"]) await fixture(async page=>{
     if(mutation==="get") await page.evaluate(()=>document.querySelector("#login").method="get");
     if(mutation==="script-click") await page.evaluate(()=>document.querySelector("#password").click());

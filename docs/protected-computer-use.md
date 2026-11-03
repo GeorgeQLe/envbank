@@ -81,7 +81,10 @@ state into an observable context.
 An invalid target is rejected before value retrieval and must not destroy an
 unowned tab. A crash or failed cleanup leaves observations blocked. Only trusted
 recovery after context destruction can reopen them. The operation and recovery
-share a lock so recovery cannot resume observation during an active fill.
+share a lock so recovery cannot resume observation during an active fill. Closing
+the gate cancels private work and keeps the authority lock until that operation
+has exited; the host retries Close after completion. Restart cannot race a
+previous live operation.
 
 `SUBMISSION_ATTEMPTED_CONTEXT_CLOSED` reports an attempt and verified context
 destruction, not authentication success or remote persistence. The other results

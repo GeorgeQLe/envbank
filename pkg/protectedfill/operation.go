@@ -83,6 +83,10 @@ func (c *Coordinator) Run(ctx context.Context, t Target, read func() ([]byte, er
 		return
 	}
 	defer c.Gate.operation.Unlock()
+	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	c.Gate.bindOperation(cancel)
+	defer c.Gate.unbindOperation()
 	if c.Gate.begin() != nil {
 		receipt.Status = "RECOVERY_REQUIRED"
 		return
@@ -109,8 +113,6 @@ func (c *Coordinator) Run(ctx context.Context, t Target, read func() ([]byte, er
 			receipt.Status = "RECOVERY_REQUIRED"
 		}
 	}()
-	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	if err := c.Driver.Validate(bounded, t); err != nil {
 		receipt.Status = "TARGET_REJECTED"
 		return

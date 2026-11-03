@@ -295,3 +295,45 @@ func TestGateKilledProcess(t *testing.T) {
 		t.Fatal("SIGKILL lost blocked state")
 	}
 }
+
+func TestCloseRetainsAuthorityAndCancelsPrivateRead(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "gate")
+	g, err := OpenGate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	d := &testDriver{}
+	filled := false
+	d.fill = func(context.Context, Target, []byte) (bool, error) { filled = true; return true, nil }
+	c := &Coordinator{Gate: g, Driver: d}
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan Receipt, 1)
+	go func() {
+		done <- c.Run(context.Background(), target(), func() ([]byte, error) { close(entered); <-release; return []byte("disposable-close-test"), nil })
+	}()
+	<-entered
+	closeErr := g.Close()
+	next, openErr := OpenGate(dir)
+	if next != nil {
+		next.Close()
+	}
+	close(release)
+	result := <-done
+	if closeErr == nil || openErr == nil {
+		t.Fatal("authority released while private work was active")
+	}
+	if filled || !d.destroyed || result.Status != "RECOVERY_REQUIRED" {
+		t.Fatal("closed controller released value or failed cleanup")
+	}
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := OpenGate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if !restarted.Blocked() {
+		t.Fatal("replacement authority resumed without trusted recovery")
+	}
+}

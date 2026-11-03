@@ -28,5 +28,5 @@ rotation, provider permission changes or everyday browser-profile changes are
 part of this implementation.
 
 Verification: [non-secret evidence](../docs/protected-computer-use-verification-2026-11-03.json).
-Full hermetic end-to-end gate, scoped race, vet, 19 JavaScript tests and 15
+Full hermetic end-to-end gate, scoped race, vet, 20 JavaScript tests and 17
 browser DOM cases passed. Actual OS/Brave confidentiality remains unqualified.

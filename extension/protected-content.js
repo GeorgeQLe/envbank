@@ -22,6 +22,15 @@
   }
   function key(event) { if (event.key === "Escape") cancel(); }
   function leave() { delete globalThis.__envbankProtectedTarget; cancel(); }
+  function visible(node) {
+    const rect = node.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0 || rect.bottom <= 0 || rect.right <= 0 || rect.top >= innerHeight || rect.left >= innerWidth) return false;
+    for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
+      const style = getComputedStyle(ancestor);
+      if (style.display === "none" || style.visibility !== "visible" || Number(style.opacity) === 0) return false;
+    }
+    return true;
+  }
   function eligible(form, submit) {
     if (!(form instanceof HTMLFormElement) || form.method.toLowerCase() !== "post" || (form.target && form.target !== "_self")) return false;
     const action = new URL(form.action, location.href);
@@ -37,13 +46,13 @@
     if (!input) {
       const node = event.target;
       if (!(node instanceof HTMLInputElement) || node.type !== "password" || node.disabled || node.readOnly ||
-          node.value !== "" || !node.getClientRects().length || !eligible(node.form)) { cancel(); return; }
+          node.value !== "" || !visible(node) || node.matches(":disabled") || !eligible(node.form)) { cancel(); return; }
       input = node; selectedForm = node.form; fieldHandle = opaque();
       indicator.textContent = "EnvBank: choose the submit button · Esc to cancel";
       return;
     }
     const button = event.target.closest && event.target.closest("button, input[type=submit]");
-    if (!button || button.type !== "submit" || !input.isConnected || input.form !== selectedForm || input.type !== "password" || input.disabled || input.readOnly || input.value !== "" || !button.getClientRects().length || !eligible(selectedForm,button)) { cancel(); return; }
+    if (!button || button.type !== "submit" || !input.isConnected || input.form !== selectedForm || input.type !== "password" || input.disabled || input.readOnly || input.value !== "" || !visible(button) || button.matches(":disabled") || !eligible(selectedForm,button)) { cancel(); return; }
     const selected = token, submitHandle = opaque();
     // This registry lives in the extension's ISOLATED world. It never contains
     // a value and is not an authorization proof. A trusted Driver resolves the

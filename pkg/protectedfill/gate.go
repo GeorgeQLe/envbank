@@ -18,15 +18,16 @@ var ErrBlocked = errors.New("OBSERVATION_BLOCKED")
 // authority cannot observe until trusted recovery has destroyed orphan contexts.
 // It does not sandbox tools that bypass it or malicious same-user processes.
 type Gate struct {
-	mu        sync.Mutex
-	operation sync.Mutex
-	blocked   bool
-	closed    bool
-	epoch     uint64
-	next      uint64
-	pending   map[uint64]context.CancelFunc
-	lock      *os.File
-	latch     string
+	mu           sync.Mutex
+	operation    sync.Mutex
+	blocked      bool
+	closed       bool
+	epoch        uint64
+	next         uint64
+	pending      map[uint64]context.CancelFunc
+	activeCancel context.CancelFunc
+	lock         *os.File
+	latch        string
 }
 
 func OpenGate(directory string) (*Gate, error) {
@@ -156,11 +157,13 @@ func syncDirectory(path string) error {
 	return f.Sync()
 }
 
-// Close never clears a blocked latch. Existing observations become stale.
+// Close cancels active private work and invalidates observations. It retains
+// authority while an operation is running; callers must retry after that work
+// exits. A replacement authority must never race an old private operation.
 func (g *Gate) Close() error {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.closed {
+	if g.lock == nil {
+		g.mu.Unlock()
 		return nil
 	}
 	g.closed = true
@@ -168,8 +171,33 @@ func (g *Gate) Close() error {
 	for _, cancel := range g.pending {
 		cancel()
 	}
-	return g.lock.Close()
+	if g.activeCancel != nil {
+		g.activeCancel()
+	}
+	g.mu.Unlock()
+	if !g.operation.TryLock() {
+		return errors.New("OPERATION_STILL_RUNNING")
+	}
+	defer g.operation.Unlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.lock == nil {
+		return nil
+	}
+	err := g.lock.Close()
+	g.lock = nil
+	return err
 }
+
+func (g *Gate) bindOperation(cancel context.CancelFunc) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.activeCancel = cancel
+	if g.closed {
+		cancel()
+	}
+}
+func (g *Gate) unbindOperation() { g.mu.Lock(); defer g.mu.Unlock(); g.activeCancel = nil }
 
 func wipe(value []byte) {
 	for i := range value {
