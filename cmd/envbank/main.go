@@ -29,7 +29,6 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/contract"
 	"github.com/GeorgeQLe/envbank/internal/intake"
 	"github.com/GeorgeQLe/envbank/internal/keychain"
-	"github.com/GeorgeQLe/envbank/internal/mcpserver"
 	"github.com/GeorgeQLe/envbank/internal/nativehost"
 	"github.com/GeorgeQLe/envbank/internal/password"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
@@ -144,6 +143,10 @@ func run(args []string) error {
 		return cloudflareCommand(args[1:])
 	case "mcp":
 		return mcpCommand(args[1:])
+	case "agent-broker":
+		return agentBrokerCommand(args[1:])
+	case "agent":
+		return agentCommand(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -174,6 +177,10 @@ Usage:
   envbank get NAME [auth flags]
   envbank due [--notify] [auth flags]
   envbank run [auth flags] -- COMMAND [ARGS...]
+  envbank agent-broker [--socket PATH] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]  # owner terminal
+  envbank agent names [--socket PATH]
+  envbank agent request --reason TEXT [--socket PATH] NAME
+  envbank agent run --secret NAME [--secret NAME] [--dir DIR] [--timeout S] [--socket PATH] -- COMMAND [ARGS...]
   envbank browser-allow [auth flags] NAME ORIGIN
   envbank browser-deny [auth flags] NAME ORIGIN
   envbank browser-origins [auth flags] NAME
@@ -207,7 +214,7 @@ Usage:
   envbank railway apply --plan PLAN_ID [auth flags]
   envbank railway resume --operation OPERATION_ID [auth flags]
   envbank railway verify --bundle BUNDLE [auth flags]
-  envbank mcp serve  # local stdio; workflow tools only
+  envbank mcp serve [--agent-broker-socket PATH] [--no-agent-broker]  # local stdio; workflow tools + value-free envbank_secret_* tools
 
 Auth flags:
   --config PATH           encrypted device config
@@ -308,10 +315,10 @@ func readAccessCredentials(reader io.Reader) (client.AccessCredentials, error) {
 }
 
 func mcpCommand(args []string) error {
-	if len(args) != 1 || args[0] != "serve" {
+	if len(args) == 0 || args[0] != "serve" {
 		return errors.New("mcp subcommand is required (supported: serve)")
 	}
-	return (mcpserver.Server{}).Serve(context.Background(), os.Stdin, os.Stdout)
+	return mcpServe(args[1:])
 }
 
 var railwayCredentialStore keychain.Store = keychain.SystemStore{}
@@ -1430,18 +1437,31 @@ func setSecret(args []string, rotate bool) error {
 	if err != nil {
 		return err
 	}
-	encrypted, err := api.ListRecords()
+	record, err := putSecretValue(api, vaultKey, fs.Arg(0), value, *rotateDays)
 	if err != nil {
 		return err
+	}
+	action := "stored"
+	if rotate {
+		action = "rotated with a generated value"
+	}
+	fmt.Printf("%s %s (revision %d)\n", record.Name, action, record.Revision)
+	return nil
+}
+
+// putSecretValue stores one value as a new revision of NAME, preserving the
+// existing record's metadata. rotateDays < 0 keeps the current interval.
+func putSecretValue(api *client.API, vaultKey []byte, name, value string, rotateDays int) (protocol.SecretRecord, error) {
+	encrypted, err := api.ListRecords()
+	if err != nil {
+		return protocol.SecretRecord{}, err
 	}
 	records, err := client.DecryptRecords(api.Config.VaultID, vaultKey, encrypted)
 	if err != nil {
-		return err
+		return protocol.SecretRecord{}, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	record := protocol.SecretRecord{
-		Name: fs.Arg(0), Value: value, CreatedAt: now, RotatedAt: now, Revision: 1,
-	}
+	record := protocol.SecretRecord{Name: name, Value: value, CreatedAt: now, RotatedAt: now, Revision: 1}
 	var expected int64
 	for _, existing := range records {
 		if existing.Name == record.Name {
@@ -1453,22 +1473,17 @@ func setSecret(args []string, rotate bool) error {
 			break
 		}
 	}
-	if *rotateDays >= 0 {
-		record.RotateEveryDays = *rotateDays
+	if rotateDays >= 0 {
+		record.RotateEveryDays = rotateDays
 	}
 	id, blob, err := client.EncryptRecord(api.Config.VaultID, vaultKey, record)
 	if err != nil {
-		return err
+		return protocol.SecretRecord{}, err
 	}
 	if _, err := api.PutRecord(id, protocol.PutRecordRequest{ExpectedRevision: expected, Blob: blob}); err != nil {
-		return err
+		return protocol.SecretRecord{}, err
 	}
-	action := "stored"
-	if rotate {
-		action = "rotated with a generated value"
-	}
-	fmt.Printf("%s %s (revision %d)\n", record.Name, action, record.Revision)
-	return nil
+	return record, nil
 }
 
 func generatePassword(args []string) error {
