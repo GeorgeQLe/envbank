@@ -137,6 +137,13 @@ There is no get, set, export or raw tool.
   terminal's screen (computer use), connect to the socket (it can only make
   requests), and, where developer tools allow debugging same-user processes,
   inspect broker memory. Keep developer-mode debugging restricted.
+- **Computer-use agents can drive the broker terminal.** An agent with
+  screen and keyboard control (computer use, Accessibility) can read the
+  broker terminal and **type into it**: approve a run, or answer a setup
+  prompt with a passphrase it chose. While the broker is running, do not
+  give agents computer use or Accessibility access, or keep the broker on a
+  display or Space they are not driving. Setup mode is opt-in
+  (`--setup`) for this reason.
 - **Passphrase custody.** If the agent can read a passphrase file or
   `ENVBANK_PASSPHRASE`, it can unlock the vault itself and bypass the broker.
   The broker prompts for the passphrase when neither is set; do not keep a

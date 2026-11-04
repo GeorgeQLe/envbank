@@ -19,7 +19,10 @@
 // API keys.
 package agentbroker
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ProtocolVersion is the socket protocol version (one JSON request line, one
 // JSON response line, per connection).
@@ -62,6 +65,7 @@ const (
 	OpNames   = "names"
 	OpRequest = "request"
 	OpRun     = "run"
+	OpSetup   = "setup"
 )
 
 // Request is the only message an agent can send.
@@ -74,6 +78,8 @@ type Request struct {
 	Argv           []string `json:"argv,omitempty"`
 	Dir            string   `json:"dir,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+	// Setup is a setup.Request (setup mode only). Re-planned by the broker.
+	Setup json.RawMessage `json:"setup,omitempty"`
 }
 
 // Response never carries a secret value. Code is a fixed string on refusal.
@@ -89,6 +95,7 @@ type Response struct {
 	Stderr     string   `json:"stderr,omitempty"`
 	Truncated  bool     `json:"truncated,omitempty"`
 	Redactions int      `json:"redactions,omitempty"`
+	Steps      []string `json:"steps,omitempty"`
 }
 
 // Fixed refusal codes. Nothing caller-supplied or value-derived is ever echoed.
@@ -103,10 +110,14 @@ const (
 	CodeStartFailed    = "COMMAND_START_FAILED"
 	CodeBrokerClosed   = "BROKER_CLOSED"
 	CodeBrokerDown     = "BROKER_UNAVAILABLE"
+	CodeNotSetUp       = "VAULT_NOT_SET_UP"
+	CodeAlreadySetUp   = "ALREADY_SET_UP"
+	CodeSetupFailed    = "SETUP_FAILED"
 )
 
 // States for an ingest request.
 const (
-	StateStored = "stored"
-	StateDenied = "denied"
+	StateStored  = "stored"
+	StateDenied  = "denied"
+	StateApplied = "applied"
 )
