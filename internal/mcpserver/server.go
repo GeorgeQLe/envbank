@@ -76,11 +76,12 @@ func (server Server) Call(ctx context.Context, name string, raw json.RawMessage)
 			return Result{}, errors.New("invalid tool arguments")
 		}
 	}
-	if name == "envbank_capabilities" {
-		return Result{Capability: "stripe:webhook-signing-secret=automatic,clerk:application-key=interactive,vercel:deployment=automatic,cloudflare:worker-version=automatic"}, nil
-	}
 	if server.Backend == nil {
-		return Result{BlockerCode: "WORKFLOW_BACKEND_UNAVAILABLE"}, nil
+		result := Result{BlockerCode: "WORKFLOW_BACKEND_UNAVAILABLE"}
+		if name == "envbank_capabilities" {
+			result.Capability = "workflow=unavailable"
+		}
+		return result, nil
 	}
 	result, err := server.Backend.Call(ctx, name, request)
 	if err != nil {

@@ -30,3 +30,18 @@ part of this implementation.
 Verification: [non-secret evidence](../docs/protected-computer-use-verification-2026-11-03.json).
 Full hermetic end-to-end gate, scoped race, vet, 20 JavaScript tests and 17
 browser DOM cases passed. Actual OS/Brave confidentiality remains unqualified.
+
+
+Acceptance remediation:
+- [x] Default the CLI and new browser installations to computer-use refusal;
+  ordinary human mode requires explicit local opt-in.
+- [x] Parse private mode/config locators conservatively; legacy path-only
+  locators default to refusal when used by the updated binary.
+- [x] Stop advertising production workflow capabilities without a backend;
+  label test-lab capability reports as simulations.
+- [ ] Connect a production workflow backend and Vercel adapter with exact
+  team/project/environment/branch binding, private secret writes, safe
+  reconciliation, deployment activation and health evidence. No actual provider
+  transfer is qualified by these bootstrap fixes.
+- [ ] Integrate the trusted controller and qualified Driver described above;
+  this cannot be replaced by an extension/page claim that capture is paused.

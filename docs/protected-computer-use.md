@@ -22,8 +22,16 @@ same-origin POST forms, rejects GET forms, submit overrides, iframes, detached o
 changed fields, script-generated clicks, and cancellation. The native coordinator
 requires an exact HTTPS origin. Loopback DOM fixtures test selection only.
 
-The standalone native host reports protected filling unavailable. Ordinary
-human fill remains separate and is **not agent-safe**. A trusted embedding must
+The standalone native host now defaults to computer-use mode: it reports
+protected filling unavailable and rejects ordinary release, generation and
+origin-policy mutations before opening the vault. New browser installations
+inherit that default. Ordinary human fill requires an explicit `--human-fill`
+installation (or `native-host --human-fill --config PATH`) and remains **not agent-safe**. The
+private locator records that local choice; old path-only locators
+also default to refusal when used by the updated binary. This is a safer
+bootstrap, not containment of an agent with arbitrary shell or profile access.
+Existing installed binaries are not updated or profiles changed automatically.
+A trusted embedding must
 use `pkg/computeruse.NewNativeHost`, which disables legacy value release,
 generation and origin-policy changes even when protection is unavailable.
 There is no command-line flag, native message or page acknowledgment that can
@@ -132,3 +140,21 @@ framework mirrors/echoes; driver/process crashes and concurrent tool sessions;
 real Brave extension/native-host acceptance; independent source/security review.
 All real secret creation/import/transfer/rotation stays with the owner until
 that exact integrated path is approved and qualified.
+
+
+## Acceptance remediation
+
+The November 3 independent Terra and Opus acceptance reviews passed isolated
+unit/race checks but did not qualify installed-browser or provider transfer.
+New browser installs now default to refusing ordinary value release, including
+when no controller is connected. Explicit human-only installation remains
+available. Production MCP capabilities now come from the configured backend;
+without one they report `workflow=unavailable` and
+`WORKFLOW_BACKEND_UNAVAILABLE`. The test lab explicitly labels its capabilities
+`simulated`, not `automatic`.
+
+The missing trusted controller, private Driver/handle resolver and complete
+observation-route containment are still required. A `tab_<id>` handle can be
+used in an owned isolated profile in a future integration; it does not itself
+prove ownership or isolation. Real provider/Vercel workflows remain unavailable;
+see [the Vercel integration gap](vercel-integration-gaps.md).
