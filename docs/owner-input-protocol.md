@@ -33,6 +33,17 @@ signature**.
 - **Framing.** One JSON object per line, at most 16 KiB per frame. The value
   is base64 inside the response frame.
 
+## Mutual authentication (both directions, before any value moves)
+
+**Both ends must authenticate each other.** If the provider cannot identify
+its requester, a same-user agent can dial it, request a "vault passphrase"
+prompt, and receive what the owner types. That is a direct leak. Node
+exposes no peer PID, so an Electron provider needs a small native helper
+that reads `LOCAL_PEERPID` and validates the requester's code signature: a
+pinned EnvBank Team ID with hardened runtime. Until requester authentication
+is implemented, the provider must stay disabled for real secrets. An
+on-screen request code is advisory only.
+
 ## Provider authentication (broker side, before sending anything)
 
 1. Peer uid equals the user (`LOCAL_PEERCRED`).
@@ -64,6 +75,13 @@ signature**.
 If authentication fails, the broker sends nothing and falls back to the
 terminal.
 
+## Pairing frame
+
+Broker → provider: `{"v","nonce","pairing_code":"6 digits","expires_at"}`.
+The provider shows the code in its own window and answers `displayed` with
+its self-reported fuse and hardened-runtime state. The owner confirms the code
+in the broker terminal.
+
 ## Messages
 
 Request (broker → provider):
@@ -81,6 +99,11 @@ Response (provider → broker):
 ```
 
 Rules:
+
+- `max_bytes` is at most 4096, so a base64 response always fits in a 16 KiB
+  frame.
+- `cancelled` means the owner cancelled or the connection dropped;
+  `declined` means the provider refused or failed.
 
 - **Requests.** The provider rejects any request with unknown fields, the
   wrong version, an oversized frame or an expired timestamp. It handles one
