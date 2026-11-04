@@ -1,22 +1,34 @@
 # Owner-input provider protocol v1 (`envbank.owner-input/v1`)
 
-Status (November 4, 2026):
+Status (November 4, 2026): **blocked; the provider path is disabled.**
 
-- **Broker client implemented** (`internal/ownerinput`, `envbank agent-broker --owner-input chromux`).
-  - It verifies the provider's code signature from the connection's audit
-    token: pinned Team ID and identifier, plus hardened runtime.
-  - It pairs once per session: the owner confirms the 6-digit code in the
-    terminal.
-  - It pins the paired build's cdhash for the rest of the session.
-  - It falls back to the terminal when the provider is unavailable or
-    unverified.
+A security review showed that on macOS a Unix-socket peer token
+(`LOCAL_PEERTOKEN`/`LOCAL_PEERPID`) identifies the socket's **last owner**,
+not the process actually talking. The attack:
 
-  The signature check is tested against real processes: a Developer ID signed
-  binary is accepted, while a wrong Team ID, a wrong identifier and an ad-hoc
-  signature are refused.
-- **Provider requester verification:** in progress on the provider side.
-- **Not qualified** until a signed, installed provider passes the
-  qualification below.
+1. An impostor accepts or dials the connection.
+2. It hands the file descriptor to a child.
+3. The child calls `recv(MSG_PEEK)` on it and then execs a genuine signed
+   binary (the real provider or `envbank`, then stopped).
+4. The code-signature check now validates the genuine binary, while the
+   impostor keeps the descriptor and does all the talking.
+
+A filesystem-socket identity check therefore cannot authenticate **either**
+side, even with a cdhash pin.
+
+`envbank agent-broker --owner-input chromux` refuses to start. The terminal
+is the only owner surface. The client code and its real-process signature
+tests remain as groundwork.
+
+The required transport is an **XPC Mach service** registered by the signed
+provider app. Each side sets
+`xpc_connection_set_peer_code_signing_requirement`, so the audit token is
+checked on every message. The requirement must include the Developer ID leaf
+marker (`certificate leaf[field.1.2.840.113635.100.6.1.13]`); without it,
+`anchor apple generic` also accepts Apple Development certificates. The
+requirement must also reject `get-task-allow`, verify the Electron fuses from
+the verified static code, and gate everything as unqualified until the
+installed-build qualification below passes.
 
 A desktop host app (the *provider*) collects owner secrets: the vault
 passphrase, the recovery passphrase, and later values for ingest. It hands each

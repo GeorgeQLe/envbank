@@ -131,3 +131,62 @@ func (noopPrompter) ReadSecret(context.Context, agentbroker.Ingest) ([]byte, boo
 	return nil, false, nil
 }
 func (noopPrompter) Notify(string) {}
+
+type healthyService struct{ installed int }
+
+func (s *healthyService) Healthy(string) bool        { return true }
+func (s *healthyService) Install(setup.Layout) error { s.installed++; return nil }
+
+type staticInspector map[string]setup.Volume
+
+func (f staticInspector) VolumeOf(path string) (setup.Volume, error) {
+	best := ""
+	for p := range f {
+		if strings.HasPrefix(path+"/", p+"/") && len(p) > len(best) {
+			best = p
+		}
+	}
+	return f[best], nil
+}
+
+func TestExistingServerNeedsOwnerFlagAndIdentityPathIsRecheckedBeforeWrite(t *testing.T) {
+	req, vols := setupFixture(t)
+	raw, _ := json.Marshal(req)
+	owner := &fakeSetupOwner{confirm: true}
+	svc := &healthyService{}
+	a := &setupApplier{owner: owner, inspector: staticInspector(vols), service: svc, now: time.Now}
+	_, done, err := a.Apply(context.Background(), raw)
+	var r setupRefusal
+	if !errors.As(err, &r) || r.code != "SETUP_PORT_IN_USE" || len(done) != 1 || svc.installed != 0 {
+		t.Fatalf("something already answering was reused without the owner flag: %v %v", done, err)
+	}
+
+	// With reuse allowed, swap the identity's parent for a symlink after approval:
+	// the identity must not be written.
+	req2, vols2 := setupFixture(t)
+	req2.ConfigPath = filepath.Join(filepath.Dir(req2.ConfigPath), "id", "device.json")
+	raw2, _ := json.Marshal(req2)
+	swapOwner := &swappingOwner{fakeSetupOwner: fakeSetupOwner{confirm: true}, swap: func() {
+		elsewhere := t.TempDir()
+		_ = os.Symlink(elsewhere, filepath.Dir(req2.ConfigPath))
+	}}
+	a2 := &setupApplier{allowExistingServer: true, owner: swapOwner, inspector: staticInspector(vols2), service: &healthyService{}, now: time.Now}
+	_, done2, err2 := a2.Apply(context.Background(), raw2)
+	if !errors.As(err2, &r) || r.code != "SETUP_VOLUME_CHANGED" {
+		t.Fatalf("symlinked identity dir after approval: %v %v", done2, err2)
+	}
+	if _, err := os.Lstat(req2.ConfigPath); err == nil {
+		t.Fatal("identity written through a swapped path")
+	}
+}
+
+// swappingOwner swaps a path when asked for the vault passphrase (after approval).
+type swappingOwner struct {
+	fakeSetupOwner
+	swap func()
+}
+
+func (o *swappingOwner) NewPassphrase(context.Context, string, int, []byte) ([]byte, bool, error) {
+	o.swap()
+	return []byte("a-long-enough-passphrase"), true, nil
+}

@@ -38,6 +38,7 @@ type Layout struct {
 	VaultName        string `json:"vault_name"`
 	DeviceName       string `json:"device_name"`
 	ConfigPath       string `json:"config_path"`
+	ConfigVolumeUUID string `json:"config_volume_uuid"`
 	VaultDir         string `json:"vault_dir,omitempty"`
 	VaultVolumeUUID  string `json:"vault_volume_uuid,omitempty"`
 	BackupDir        string `json:"backup_dir"`
@@ -140,7 +141,7 @@ func PlanFor(req Request, inspect Inspector) (Plan, error) {
 	if !cfgVol.Internal {
 		return Plan{}, refuse("config_path (device identity) must be on an internal volume")
 	}
-	p.Layout.ConfigPath = cfg
+	p.Layout.ConfigPath, p.Layout.ConfigVolumeUUID = cfg, cfgVol.UUID
 
 	if req.Sync == SyncLocalServer {
 		dir, vol, err := checkedPath(req.VaultDir, inspect, false)
@@ -160,8 +161,8 @@ func PlanFor(req Request, inspect Inspector) (Plan, error) {
 	if p.Layout.VaultVolumeUUID != "" && bvol.UUID == p.Layout.VaultVolumeUUID {
 		return Plan{}, refuse("backup_dir must be on a different volume than vault_dir")
 	}
-	if bvol.UUID == cfgVol.UUID && req.Sync == SyncHosted {
-		p.Warnings = append(p.Warnings, "backup_dir is on the same volume as the device identity")
+	if bvol.UUID == cfgVol.UUID {
+		p.Warnings = append(p.Warnings, "backup_dir is on the same volume as the device identity; the split layout keeps them apart")
 	}
 	p.Layout.BackupDir, p.Layout.BackupVolumeUUID = backup, bvol.UUID
 
@@ -219,6 +220,13 @@ func checkedPath(path string, inspect Inspector, fileTarget bool) (string, Volum
 	if !vol.Writable || vol.UUID == "" {
 		return "", Volume{}, refuse("volume " + vol.Name + " is not writable or has no UUID")
 	}
+	if existing != path {
+		// The nearest existing ancestor must not let anyone else swap in a path.
+		info, err := os.Lstat(existing)
+		if err != nil || !info.IsDir() || !ancestorSafe(info) {
+			return "", Volume{}, refuse("the nearest existing parent directory must not be writable by others")
+		}
+	}
 	if existing == path {
 		info, err := os.Lstat(path)
 		if err != nil {
@@ -234,6 +242,16 @@ func checkedPath(path string, inspect Inspector, fileTarget bool) (string, Volum
 	return path, vol, nil
 }
 
+// ancestorSafe: never world-writable; group-writable only for group wheel (gid
+// 0, which holds only root by default), as volume roots often are.
+func ancestorSafe(info os.FileInfo) bool {
+	perm := info.Mode().Perm()
+	if perm&0o002 != 0 {
+		return false
+	}
+	return perm&0o020 == 0 || groupID(info) == 0
+}
+
 func noSymlinks(path string) error {
 	cur := string(filepath.Separator)
 	for _, part := range strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator)) {
@@ -245,20 +263,11 @@ func noSymlinks(path string) error {
 		if err != nil {
 			return refuse("path could not be inspected")
 		}
-		if info.Mode()&os.ModeSymlink != 0 && !systemSymlink(cur) {
+		if info.Mode()&os.ModeSymlink != 0 {
 			return refuse("paths must not pass through symlinks")
 		}
 	}
 	return nil
-}
-
-// systemSymlink allows the OS-provided top-level links (/tmp, /var, /etc on macOS).
-func systemSymlink(p string) bool {
-	switch p {
-	case "/tmp", "/var", "/etc":
-		return true
-	}
-	return false
 }
 
 func loopbackListen(s string) bool {
@@ -289,6 +298,28 @@ func validLabel(s string) bool {
 		}
 	}
 	return true
+}
+
+// Recheck re-validates a planned path immediately before it is written: same
+// rules as planning, and the same volume UUID as recorded in the plan.
+func Recheck(path, wantUUID string, inspect Inspector, fileTarget bool) error {
+	_, vol, err := checkedPath(path, inspect, fileTarget)
+	if err != nil {
+		return err
+	}
+	if vol.UUID != wantUUID {
+		return refuse("the volume changed since the plan was approved")
+	}
+	return nil
+}
+
+// OnVolume verifies that an existing directory is on the expected volume.
+func OnVolume(dir, wantUUID string, inspect Inspector) error {
+	vol, err := inspect.VolumeOf(dir)
+	if err != nil || vol.UUID != wantUUID || !vol.OwnersEnabled {
+		return refuse("the created directory is not on the approved volume")
+	}
+	return nil
 }
 
 // MkdirPrivate creates dir (and missing parents) with 0700 and re-checks it.

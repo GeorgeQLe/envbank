@@ -21,7 +21,8 @@ import (
 type TerminalPrompter struct {
 	In  *os.File // must be a terminal
 	Out io.Writer
-	// readPassword is replaceable in tests; production uses term.ReadPassword.
+	// readPassword is replaceable in tests; production uses ReadHidden, which
+	// disables echo before the prompt is printed.
 	readPassword func(fd int) ([]byte, error)
 }
 
@@ -30,7 +31,7 @@ func NewTerminalPrompter(in *os.File, out io.Writer) (*TerminalPrompter, error) 
 	if in == nil || !term.IsTerminal(int(in.Fd())) {
 		return nil, errors.New("the agent broker must run in an interactive terminal (owner approvals and secret entry happen there)")
 	}
-	return &TerminalPrompter{In: in, Out: out, readPassword: term.ReadPassword}, nil
+	return &TerminalPrompter{In: in, Out: out}, nil
 }
 
 // NewTestTerminalPrompter builds a prompter over arbitrary files with an
@@ -145,16 +146,14 @@ func (p *TerminalPrompter) ReadSecret(ctx context.Context, req Ingest) ([]byte, 
 			return nil, false, err
 		}
 	}
-	fmt.Fprint(p.Out, "  Enter value (hidden; empty to deny): ")
-	first, err := p.readPassword(int(p.In.Fd()))
+	first, err := p.hidden("  Enter value (hidden; empty to deny): ")
 	fmt.Fprintln(p.Out)
 	if err != nil || len(first) == 0 || ctx.Err() != nil {
 		wipe(first)
 		fmt.Fprintln(p.Out, "  denied")
 		return nil, false, err
 	}
-	fmt.Fprint(p.Out, "  Re-enter value: ")
-	second, err := p.readPassword(int(p.In.Fd()))
+	second, err := p.hidden("  Re-enter value: ")
 	fmt.Fprintln(p.Out)
 	defer wipe(second)
 	if err != nil || !bytes.Equal(first, second) {
@@ -196,6 +195,16 @@ func (p *TerminalPrompter) ask(ctx context.Context, prompt string) (string, erro
 	return strings.TrimSpace(string(buf)), nil
 }
 
+// hidden prints prompt and reads a line without echo. Production disables echo
+// BEFORE printing the prompt; tests inject readPassword.
+func (p *TerminalPrompter) hidden(prompt string) ([]byte, error) {
+	if p.readPassword != nil {
+		fmt.Fprint(p.Out, prompt)
+		return p.readPassword(int(p.In.Fd()))
+	}
+	return ReadHidden(p.In, p.Out, prompt)
+}
+
 // ConfirmPlan shows lines (each sanitized) and asks for an explicit yes.
 func (p *TerminalPrompter) ConfirmPlan(ctx context.Context, title string, lines []string) (bool, error) {
 	p.bell()
@@ -219,8 +228,8 @@ func (p *TerminalPrompter) ConfirmPlan(ctx context.Context, title string, lines 
 // must differ from the vault passphrase).
 func (p *TerminalPrompter) NewPassphrase(ctx context.Context, title string, minBytes int, differentFrom []byte) ([]byte, bool, error) {
 	for attempt := 0; attempt < 3; attempt++ {
-		fmt.Fprintf(p.Out, "\n── %s ──\n  Choose a passphrase of at least %d characters (hidden; empty to cancel): ", Sanitize(title, 120), minBytes)
-		first, err := p.readPassword(int(p.In.Fd()))
+		fmt.Fprintf(p.Out, "\n── %s ──\n", Sanitize(title, 120))
+		first, err := p.hidden(fmt.Sprintf("  Choose a passphrase of at least %d characters (hidden; empty to cancel): ", minBytes))
 		fmt.Fprintln(p.Out)
 		if err != nil || len(first) == 0 || ctx.Err() != nil {
 			wipe(first)
@@ -237,8 +246,7 @@ func (p *TerminalPrompter) NewPassphrase(ctx context.Context, title string, minB
 			fmt.Fprintln(p.Out, "  must differ from the vault passphrase")
 			continue
 		}
-		fmt.Fprint(p.Out, "  Re-enter: ")
-		second, err := p.readPassword(int(p.In.Fd()))
+		second, err := p.hidden("  Re-enter: ")
 		fmt.Fprintln(p.Out)
 		match := err == nil && bytes.Equal(first, second)
 		wipe(second)

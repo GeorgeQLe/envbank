@@ -40,8 +40,14 @@ through, or being observable by, the agent.
                                  └─ unlock itself with the new vault ⇒ normal broker
 ```
 
-`envbank agent-broker` starts in **setup mode** when the device has no
-identity. Agents propose plans; the broker shows each plan to the owner,
+`envbank agent-broker --setup` starts in **setup mode** when the device has
+no identity. Without `--setup` it refuses, so moving the config cannot
+silently enable setup. Reusing an EnvBank server that is already running
+requires the owner's own `--use-existing-server` flag; an agent request
+cannot choose it, because anything (even a fake server) could be answering
+on the port. Immediately before writing, every path is re-validated against
+the approved plan's volume UUID. The identity directory and every directory
+created are checked too, and no symlinks are allowed anywhere. Agents propose plans; the broker shows each plan to the owner,
 performs it, and then unlocks the vault it just created without asking for the
 passphrase again. Secret entry never happens in the agent's terminal: a
 prompt there would be agent-observable.

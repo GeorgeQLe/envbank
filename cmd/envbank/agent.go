@@ -104,6 +104,8 @@ func agentBrokerCommand(args []string) error {
 	socket := fs.String("socket", agentbroker.DefaultSocketPath(), "Unix socket agents connect to")
 	idle := fs.Duration("idle-lock", 30*time.Minute, "lock (exit) after this long without requests")
 	lifetime := fs.Duration("max-lifetime", 12*time.Hour, "lock (exit) after this long regardless of activity")
+	setupMode := fs.Bool("setup", false, "allow agent-proposed setup when this device has no vault yet")
+	useExisting := fs.Bool("use-existing-server", false, "setup: allow reusing an EnvBank server you already started on the plan's address")
 	ownerInput := fs.String("owner-input", "terminal", "where the owner types secrets: terminal or chromux (verified, paired desktop provider)")
 	oiTeam := fs.String("owner-input-team", "NC56VXK48K", "Apple Team ID the desktop provider must be signed by")
 	oiIdent := fs.String("owner-input-identifier", "party.gblock.chromux.v2.desktop", "code-signing identifier of the desktop provider")
@@ -123,16 +125,12 @@ func agentBrokerCommand(args []string) error {
 	switch *ownerInput {
 	case "terminal":
 	case "chromux":
-		p := &ownerinput.Provider{Socket: *oiSocket, TeamID: *oiTeam, Identifier: *oiIdent}
-		pctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		err := pairProvider(pctx, p, terminal)
-		cancel()
-		if err != nil {
-			fmt.Fprintf(os.Stdout, "Chromux secure input not paired (%v); secrets will be typed in this terminal.\n", err)
-		} else {
-			prompter.provider = p
-			fmt.Println("Chromux secure input paired for this session.")
-		}
+		// Not qualified: a Unix-socket peer token reports the socket's last
+		// owner, so an impostor can pass the check by handing its fd to an exec'd
+		// genuine binary. The provider needs an XPC transport with per-message
+		// code-signing checks before it may receive real secrets.
+		_, _, _ = oiSocket, oiTeam, oiIdent
+		return errors.New("--owner-input chromux is not available yet: socket peer identity can be spoofed; it requires the planned XPC transport (use the terminal)")
 	default:
 		return errors.New("--owner-input must be terminal or chromux")
 	}
@@ -150,6 +148,8 @@ func agentBrokerCommand(args []string) error {
 	}()
 	cfg, err := client.LoadConfig(auth.configPath)
 	switch {
+	case errors.Is(err, os.ErrNotExist) && !*setupMode:
+		return fmt.Errorf("no EnvBank device config at %s: run `envbank init` or `envbank enroll-request`, or start `envbank agent-broker --setup` to let an agent propose a setup", auth.configPath)
 	case errors.Is(err, os.ErrNotExist):
 		// Setup mode: no vault on this device yet. Agents may propose a setup;
 		// every secret and persistent change is collected/confirmed here.
@@ -164,10 +164,15 @@ func agentBrokerCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		applier := &setupApplier{owner: prompter, inspector: setup.SystemInspector{}, service: launchdService{executable: exe, home: home, uid: os.Getuid()}, now: time.Now}
+		applier := &setupApplier{allowExistingServer: *useExisting, owner: prompter, inspector: setup.SystemInspector{}, service: launchdService{executable: exe, home: home, uid: os.Getuid()}, now: time.Now}
 		if broker, err = agentbroker.New(agentbroker.Options{Setup: applier, Prompter: prompter, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()}); err != nil {
 			return err
 		}
+		defer func() {
+			if applier.created != nil {
+				applier.created.wipe()
+			}
+		}()
 		fmt.Printf("No EnvBank vault on this device (%s): starting in SETUP MODE.\n", auth.configPath)
 		fmt.Println("An agent can propose a setup (`envbank setup apply`); you will confirm it and type passphrases here.")
 	case err != nil:
@@ -241,8 +246,7 @@ func brokerPassphrase(auth *authFlags) ([]byte, error) {
 		fmt.Fprintln(os.Stderr, "warning: a passphrase file or ENVBANK_PASSPHRASE that agents can read lets them bypass the broker")
 		return readPassphrase(auth.passphraseFile)
 	}
-	fmt.Print("EnvBank passphrase (hidden): ")
-	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	raw, err := agentbroker.ReadHidden(os.Stdin, os.Stdout, "EnvBank passphrase (hidden): ")
 	fmt.Println()
 	if err != nil {
 		return nil, err

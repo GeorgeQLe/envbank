@@ -90,7 +90,9 @@ func (p *Provider) Requirement() (string, error) {
 	if !teamRe.MatchString(p.TeamID) || !identRe.MatchString(p.Identifier) {
 		return "", errors.New("owner-input: pinned team id and identifier are required")
 	}
-	return fmt.Sprintf(`anchor apple generic and certificate leaf[subject.OU] = "%s" and identifier "%s"`, p.TeamID, p.Identifier), nil
+	// Developer ID only: Apple Development certificates also satisfy
+	// `anchor apple generic`, and can be minted for debuggable builds.
+	return fmt.Sprintf(`anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = "%s" and identifier "%s"`, p.TeamID, p.Identifier), nil
 }
 
 // dial connects and verifies the peer before anything is sent. When paired,

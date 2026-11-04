@@ -42,10 +42,14 @@ const minPassphrase = 12
 
 // setupApplier implements agentbroker.Setup.
 type setupApplier struct {
-	owner     setupOwner
-	inspector setup.Inspector
-	service   serviceManager
-	now       func() time.Time
+	// allowExistingServer is the owner's own broker flag (--use-existing-server);
+	// an agent request cannot choose to reuse whatever answers on the port.
+	allowExistingServer bool
+	created             *brokerVault
+	owner               setupOwner
+	inspector           setup.Inspector
+	service             serviceManager
+	now                 func() time.Time
 }
 
 func (a *setupApplier) Apply(ctx context.Context, raw json.RawMessage) (agentbroker.Vault, []string, error) {
@@ -96,15 +100,25 @@ func (a *setupApplier) Apply(ctx context.Context, raw json.RawMessage) (agentbro
 		if dir == "" {
 			return nil
 		}
-		existing := dir
-		for {
-			if _, err := os.Lstat(existing); err == nil {
-				break
+		if _, err := os.Lstat(dir); err == nil {
+			if setup.OnVolume(dir, uuid, a.inspector) != nil {
+				return setupRefusal{"SETUP_VOLUME_CHANGED"}
 			}
-			existing = filepath.Dir(existing)
+			return nil
 		}
-		v, err := a.inspector.VolumeOf(existing)
-		if err != nil || v.UUID != uuid || !v.OwnersEnabled {
+		if setup.Recheck(dir, uuid, a.inspector, false) != nil {
+			return setupRefusal{"SETUP_VOLUME_CHANGED"}
+		}
+		return nil
+	}
+	mkdir := func(dir, uuid string) error {
+		if err := recheck(dir, uuid); err != nil {
+			return err
+		}
+		if setup.MkdirPrivate(dir) != nil {
+			return setupRefusal{"SETUP_DIR_FAILED"}
+		}
+		if setup.OnVolume(dir, uuid, a.inspector) != nil {
 			return setupRefusal{"SETUP_VOLUME_CHANGED"}
 		}
 		return nil
@@ -119,17 +133,19 @@ func (a *setupApplier) Apply(ctx context.Context, raw json.RawMessage) (agentbro
 		return nil
 	}
 	if l.Sync == setup.SyncLocalServer {
-		if err := step("prepare_vault_dir", func() error {
-			if err := recheck(l.VaultDir, l.VaultVolumeUUID); err != nil {
-				return err
-			}
-			return setup.MkdirPrivate(l.VaultDir)
-		}); err != nil {
+		if err := step("prepare_vault_dir", func() error { return mkdir(l.VaultDir, l.VaultVolumeUUID) }); err != nil {
 			return nil, done, err
 		}
 		if err := step("install_service", func() error {
 			if a.service.Healthy(l.ServerURL) {
-				ok, err := a.owner.ConfirmPlan(ctx, "EnvBank server already running", []string{"An EnvBank server already answers at " + l.ServerURL + ".", "Use it (no service will be installed)?"})
+				// Something already answers: it could be anything (an agent can run a
+				// fake server). Reuse only when the owner started the broker with
+				// --use-existing-server, and confirm again.
+				if !a.allowExistingServer {
+					a.owner.Notify("refused: something already answers at " + l.ServerURL + " (restart the broker with --use-existing-server to reuse a server you started)")
+					return setupRefusal{"SETUP_PORT_IN_USE"}
+				}
+				ok, err := a.owner.ConfirmPlan(ctx, "Reuse running EnvBank server", []string{"A server already answers at " + l.ServerURL + ".", "Reuse it only if YOU started it. The vault will be stored wherever that server keeps its database, not necessarily in the vault directory above."})
 				if err != nil || !ok {
 					return setupRefusal{CodeDeniedSetup}
 				}
@@ -150,12 +166,7 @@ func (a *setupApplier) Apply(ctx context.Context, raw json.RawMessage) (agentbro
 			return nil, done, err
 		}
 	}
-	if err := step("prepare_backup_dir", func() error {
-		if err := recheck(l.BackupDir, l.BackupVolumeUUID); err != nil {
-			return err
-		}
-		return setup.MkdirPrivate(l.BackupDir)
-	}); err != nil {
+	if err := step("prepare_backup_dir", func() error { return mkdir(l.BackupDir, l.BackupVolumeUUID) }); err != nil {
 		return nil, done, err
 	}
 	var vault *brokerVault
@@ -167,14 +178,22 @@ func (a *setupApplier) Apply(ctx context.Context, raw json.RawMessage) (agentbro
 			return setupRefusal{CodeDeniedSetup}
 		}
 		passphrase = p
-		if err := os.MkdirAll(filepath.Dir(l.ConfigPath), 0o700); err != nil {
-			return setupRefusal{"SETUP_CONFIG_DIR_FAILED"}
+		// Re-validate the identity path right before writing it.
+		if setup.Recheck(l.ConfigPath, l.ConfigVolumeUUID, a.inspector, true) != nil {
+			return setupRefusal{"SETUP_VOLUME_CHANGED"}
+		}
+		cfgDir := filepath.Dir(l.ConfigPath)
+		if _, err := os.Lstat(cfgDir); err != nil {
+			if mkdir(cfgDir, l.ConfigVolumeUUID) != nil {
+				return setupRefusal{"SETUP_CONFIG_DIR_FAILED"}
+			}
 		}
 		api, vaultKey, _, fingerprint, err := createVaultDevice(l.ServerURL, l.VaultName, l.DeviceName, passphrase, nil, l.ConfigPath)
 		if err != nil {
 			return setupRefusal{"SETUP_CREATE_VAULT_FAILED"}
 		}
 		vault = &brokerVault{api: api, vaultKey: vaultKey}
+		a.created = vault
 		a.owner.Notify("device fingerprint " + fingerprint)
 		return nil
 	}); err != nil {
