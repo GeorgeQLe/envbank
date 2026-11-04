@@ -72,9 +72,17 @@ A trusted controller supplies a `Driver` through bootstrap code:
 - `DestroyOrphans`: establish the same postcondition after a crashed controller.
   `Coordinator.Recover` is host-only and refuses to interrupt an active operation.
 
-The current computer-use API exposes no documented way to install this global
-barrier or a qualified driver. Thus actual controller integration remains a
-concrete external blocker. Do not add an extension checkbox or agent-provided
+Codex documents `PreToolUse`/`PostToolUse` lifecycle hooks, and EnvBank ships
+an owner-installable adapter (`envbank codex-hook`, `pkg/codexhook`) that denies
+every hooked tool while the shared `Gate` latch is set or unknown. Those hooks
+can fail open on hook errors/timeouts/malformed output, do not run when missing
+or untrusted, miss `write_stdin` continuations, hosted tools and opted-out
+tool paths, run `PostToolUse` only after the tool (a block rejects a code-mode
+nested promise but cannot undo side effects), and cannot drain in-flight
+work, so they are
+additional admission enforcement, not this global barrier, and they supply no
+driver. Credential release through a hook-observed host stays refused. Actual
+controller integration remains a concrete external blocker. Do not add an extension checkbox or agent-provided
 "paused" acknowledgment as a substitute. The exact route-ownership and
 acceptance checklist for a future host is in
 [computer-use host acceptance](computer-use-host-acceptance.md).

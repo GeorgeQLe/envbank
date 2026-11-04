@@ -5,6 +5,16 @@ versioning after the `v` prefix, while `0.x` releases remain unstable.
 
 ## Unreleased
 
+- added `envbank codex-hook` and `pkg/codexhook`: an owner-installable adapter
+  for the documented Codex `PreToolUse`/`PostToolUse` lifecycle hooks that
+  denies every hooked tool call (and withholds results) while the shared
+  `protectedfill.Gate` latch is set or its state is unknown, with bounded
+  input, strict fixed JSON output and no tool input/response logging. It is
+  additional admission enforcement only: hooks can fail open and do not cover
+  every route, so credential release through a hook-observed host remains
+  refused. Nothing is installed, enabled or trusted automatically;
+- added `protectedfill.ProbeGate`, a read-only view of the same durable latch.
+
 ## 0.2.0 - 2026-08-10
 
 Feature alpha release for trusted bundle preparation and controlled Railway

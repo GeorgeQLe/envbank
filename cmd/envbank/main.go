@@ -148,6 +148,8 @@ func run(args []string) error {
 		return cloudflareCommand(args[1:])
 	case "mcp":
 		return mcpCommand(args[1:])
+	case "codex-hook":
+		return codexHookCommand(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -222,6 +224,8 @@ Usage:
   envbank owner-approval enroll [auth flags]  # owner-only, interactive; Secure Enclave key
   envbank owner-approval status [auth flags]
   envbank mcp serve  # local stdio; workflow tools only
+  envbank codex-hook pre-tool-use|post-tool-use --gate-dir PATH  # owner-installed Codex lifecycle hook; stdin payload
+  envbank codex-hook capabilities | init-gate --gate-dir PATH   # coverage statement; gate setup (installs nothing)
 
 Auth flags:
   --config PATH           encrypted device config

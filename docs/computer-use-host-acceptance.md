@@ -1,20 +1,41 @@
 # External computer-use host: integration and acceptance checklist
 
-Status (November 4, 2026): **not integrated, fail-closed.** The installed
-computer-use (CUA) tool API documents no global observation barrier and no
-Driver registration hook. EnvBank does not invent one, and no browser
-extension can hide native screenshots, accessibility trees or OS capture. No
-new in-repo component was added: a controller-side "barrier" built here would
-be another simulation, because EnvBank does not own the routes listed below.
+Status (November 4, 2026): **release fail-closed; lifecycle-hook admission
+implemented but not installed or qualified.**
 
-What exists in this repository is only the embedding contract:
-`pkg/protectedfill` (`Gate`, `Driver`, `Coordinator`) and
-`pkg/computeruse.NewNativeHost`. Without a host-supplied `Gate` **and**
-`Driver`, every value-releasing or credential-mutating action is refused before
-the config or Keychain is opened (`HOST_PROTECTION_UNAVAILABLE`). This is
-proven by `pkg/computeruse/host_test.go`,
-`internal/nativehost/protected_test.go` and `pkg/protectedfill/operation_test.go`.
-Those are isolated tests, not external acceptance.
+Correction of earlier wording: Codex **does** document `PreToolUse` and
+`PostToolUse` lifecycle hooks, and `PreToolUse` can deny a tool call. They are
+not a global observation barrier or a Driver registration hook: a hook command
+error, timeout or malformed output can fail open at the runtime, missing or
+untrusted hooks do not run, continued `write_stdin` input has no new
+`PreToolUse`, hosted tools are not covered and specialized tool paths can opt
+out, `PostToolUse` runs after the tool (its `decision: "block"` replaces the
+result and rejects a code-mode nested promise, but cannot undo side effects),
+and a hook process cannot drain or invalidate work begun before a protected
+phase. No browser extension
+can hide native screenshots, accessibility trees or OS capture.
+
+Three separate states, kept distinct:
+
+| Layer | State |
+| --- | --- |
+| (a) Code implemented | `pkg/codexhook` + `envbank codex-hook pre-tool-use/post-tool-use` deny/withhold every hooked tool while the shared `Gate` latch is set or unknown ([integration notes](../integrations/codex/README.md)); `protectedfill.ProbeGate` reads that one latch. |
+| (b) Registered in a controlled host | **Not done.** EnvBank installs, enables and trusts nothing; `integrations/codex/hooks.example.json` is an owner-review artifact; its shape, matcher, timeout and outputs were source-checked against the official Codex hooks documentation (November 4, 2026), not against an installed runtime. |
+| (c) Installed vendor/runtime qualification | **Not done, not claimed.** The closed-source Codex/CUA service was not patched or qualified. |
+
+Credential release stays refused for any hook-observed host: there is no
+Driver in the hook integration, and `pkg/computeruse.NewNativeHost` with only a
+shared `Gate` still returns `HOST_PROTECTION_UNAVAILABLE` before the config or
+Keychain is opened (`pkg/codexhook/hook_test.go`). Without a host-supplied `Gate`
+**and** qualified `Driver`, every value-releasing or credential-mutating action
+is refused (`pkg/computeruse/host_test.go`, `internal/nativehost/protected_test.go`,
+`pkg/protectedfill/operation_test.go`). Those are isolated tests, not external
+acceptance.
+
+Safe to merge with runtime activation disabled: the hook package, CLI
+entrypoint, probe and example artifacts (no install path, no Driver, no new
+release route). Not safe to claim: any route coverage of the installed runtime,
+or any credential transfer through it.
 
 ## Ownership the host must prove
 

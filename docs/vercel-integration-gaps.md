@@ -41,8 +41,10 @@ feature branch. See [the operator contract](vercel.md).
    enrollment and an owner-observed Touch ID/password prompt. The pin is
    passphrase-protected, not hardware-attested.
 4. Browser capture of show-once provider keys remains blocked on a trusted host
-   controlling every observation/input route. The current CUA interface has no
-   documented global barrier/Driver registration hook. See the
+   controlling every observation/input route. Documented Codex lifecycle hooks
+   exist and EnvBank's `codex-hook` adapter uses them for extra admission
+   denial, but they can fail open and do not cover every route, so they are not
+   a global barrier or Driver registration. See the
    [host checklist](computer-use-host-acceptance.md). Reference-controller and
    fake-site tests do not qualify the installed external computer-use host.
 
