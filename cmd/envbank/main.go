@@ -147,6 +147,8 @@ func run(args []string) error {
 		return agentBrokerCommand(args[1:])
 	case "agent":
 		return agentCommand(args[1:])
+	case "setup":
+		return setupCommand(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -178,6 +180,8 @@ Usage:
   envbank due [--notify] [auth flags]
   envbank run [auth flags] -- COMMAND [ARGS...]
   envbank agent-broker [--socket PATH] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]  # owner terminal
+  envbank setup plan --sync local_server|hosted --device-name NAME --backup-dir DIR [--vault-dir DIR] [--server URL]  # read-only
+  envbank setup status [--config PATH] [--socket PATH]                                                              # read-only
   envbank agent names [--socket PATH]
   envbank agent request --reason TEXT [--socket PATH] NAME
   envbank agent run --secret NAME [--secret NAME] [--dir DIR] [--timeout S] [--socket PATH] -- COMMAND [ARGS...]
