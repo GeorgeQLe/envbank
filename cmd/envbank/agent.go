@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/client"
 	"github.com/GeorgeQLe/envbank/internal/mcpserver"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
+	"github.com/GeorgeQLe/envbank/internal/setup"
 	"golang.org/x/term"
 )
 
@@ -117,40 +119,62 @@ func agentBrokerCommand(args []string) error {
 		return err
 	}
 	defer term.Restore(int(os.Stdin.Fd()), state) // never leave echo off
-	// Check the device config BEFORE asking for a passphrase: with no vault on
-	// this device there is nothing to unlock.
-	cfg, err := client.LoadConfig(auth.configPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("no EnvBank device config at %s: run `envbank init` (new vault) or `envbank enroll-request` (existing vault) first, or pass --config", auth.configPath)
+	var broker *agentbroker.Broker
+	var vault *brokerVault
+	defer func() {
+		if vault != nil {
+			vault.wipe()
 		}
+	}()
+	cfg, err := client.LoadConfig(auth.configPath)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// Setup mode: no vault on this device yet. Agents may propose a setup;
+		// every secret and persistent change is collected/confirmed here.
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if exe, err = filepath.EvalSymlinks(exe); err != nil {
+			return err
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		applier := &setupApplier{owner: prompter, inspector: setup.SystemInspector{}, service: launchdService{executable: exe, home: home, uid: os.Getuid()}, now: time.Now}
+		if broker, err = agentbroker.New(agentbroker.Options{Setup: applier, Prompter: prompter, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()}); err != nil {
+			return err
+		}
+		fmt.Printf("No EnvBank vault on this device (%s): starting in SETUP MODE.\n", auth.configPath)
+		fmt.Println("An agent can propose a setup (`envbank setup apply`); you will confirm it and type passphrases here.")
+	case err != nil:
 		return err
-	}
-	passphrase, err := brokerPassphrase(auth)
-	if err != nil {
-		return err
-	}
-	secrets, err := cfg.Unlock(passphrase)
-	for i := range passphrase {
-		passphrase[i] = 0
-	}
-	if err != nil {
-		return err
-	}
-	api := client.NewAPI(cfg.Server)
-	api.Config, api.Secrets, api.Access = cfg, secrets, cfg.AccessCredentials()
-	vaultKey, err := requireVaultKey(secrets)
-	if err != nil {
-		return err
-	}
-	vault := &brokerVault{api: api, vaultKey: vaultKey}
-	defer vault.wipe()
-	if _, err := vault.Names(context.Background()); err != nil {
-		return fmt.Errorf("vault check failed: %w", err)
-	}
-	broker, err := agentbroker.New(agentbroker.Options{Vault: vault, Prompter: prompter, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()})
-	if err != nil {
-		return err
+	default:
+		passphrase, err := brokerPassphrase(auth)
+		if err != nil {
+			return err
+		}
+		secrets, err := cfg.Unlock(passphrase)
+		for i := range passphrase {
+			passphrase[i] = 0
+		}
+		if err != nil {
+			return err
+		}
+		api := client.NewAPI(cfg.Server)
+		api.Config, api.Secrets, api.Access = cfg, secrets, cfg.AccessCredentials()
+		vaultKey, err := requireVaultKey(secrets)
+		if err != nil {
+			return err
+		}
+		vault = &brokerVault{api: api, vaultKey: vaultKey}
+		if _, err := vault.Names(context.Background()); err != nil {
+			return fmt.Errorf("vault check failed: %w", err)
+		}
+		if broker, err = agentbroker.New(agentbroker.Options{Vault: vault, Prompter: prompter, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()}); err != nil {
+			return err
+		}
 	}
 	defer broker.Close()
 	listener, err := agentbroker.Listen(*socket)

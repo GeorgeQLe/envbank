@@ -2,6 +2,7 @@ package agentbroker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"unicode/utf8"
@@ -63,7 +64,8 @@ type RunResult struct {
 
 // Broker serves agent requests. Zero values are not usable; use New.
 type Broker struct {
-	vault    Vault
+	vault    Vault // nil in setup mode (no vault on this device yet)
+	setup    Setup
 	prompter Prompter
 	runner   Runner
 	path     string   // broker's own PATH for resolution
@@ -78,9 +80,18 @@ type Broker struct {
 	closed bool
 }
 
+// Setup applies an agent-proposed setup request with the owner (setup mode).
+// It re-plans from the request itself, confirms with the owner, collects
+// owner secrets on the owner surface, and returns the new, unlocked vault.
+type Setup interface {
+	Apply(ctx context.Context, req json.RawMessage) (Vault, []string, error)
+}
+
 // Options configure a broker.
 type Options struct {
+	// Vault is nil to start in setup mode (then Setup is required).
 	Vault    Vault
+	Setup    Setup
 	Prompter Prompter
 	Runner   Runner
 	Path     string
@@ -89,11 +100,11 @@ type Options struct {
 
 // New returns a broker. Every dependency is required.
 func New(o Options) (*Broker, error) {
-	if o.Vault == nil || o.Prompter == nil || o.Runner == nil {
-		return nil, errors.New("agentbroker: vault, prompter and runner are required")
+	if (o.Vault == nil && o.Setup == nil) || o.Prompter == nil || o.Runner == nil {
+		return nil, errors.New("agentbroker: a vault (or setup), prompter and runner are required")
 	}
 	return &Broker{
-		vault: o.Vault, prompter: o.Prompter, runner: o.Runner, path: o.Path, baseEnv: append([]string(nil), o.BaseEnv...),
+		vault: o.Vault, setup: o.Setup, prompter: o.Prompter, runner: o.Runner, path: o.Path, baseEnv: append([]string(nil), o.BaseEnv...),
 		queued: make(chan struct{}, Limits.QueuedPrompts), runs: make(chan struct{}, Limits.ConcurrentRuns), always: map[string]bool{},
 	}, nil
 }
@@ -119,12 +130,18 @@ func (b *Broker) Handle(ctx context.Context, req Request) Response {
 	if req.V != ProtocolVersion {
 		return refuse(CodeInvalidRequest)
 	}
+	if req.Op == OpSetup {
+		return b.applySetup(ctx, req)
+	}
+	if b.currentVault() == nil {
+		return refuse(CodeNotSetUp)
+	}
 	switch req.Op {
 	case OpNames:
 		if req.Name != "" || req.Reason != "" || len(req.Secrets) != 0 || len(req.Argv) != 0 || req.Dir != "" || req.TimeoutSeconds != 0 {
 			return refuse(CodeInvalidRequest)
 		}
-		names, err := b.vault.Names(ctx)
+		names, err := b.currentVault().Names(ctx)
 		if err != nil {
 			return refuse(CodeVaultFailed)
 		}
@@ -159,7 +176,7 @@ func (b *Broker) ingest(ctx context.Context, req Request) Response {
 		len(req.Reason) > Limits.ReasonBytes || !utf8.ValidString(req.Reason) {
 		return refuse(CodeInvalidRequest)
 	}
-	exists, err := b.vault.Exists(ctx, req.Name)
+	exists, err := b.currentVault().Exists(ctx, req.Name)
 	if err != nil {
 		return refuse(CodeVaultFailed)
 	}
@@ -173,7 +190,7 @@ func (b *Broker) ingest(ctx context.Context, req Request) Response {
 			b.prompter.Notify("value rejected: length must be 8 bytes to 64 KiB; nothing stored")
 			return Response{V: ProtocolVersion, OK: true, State: StateDenied}
 		}
-		if err := b.vault.Store(context.WithoutCancel(ctx), req.Name, string(value)); err != nil {
+		if err := b.currentVault().Store(context.WithoutCancel(ctx), req.Name, string(value)); err != nil {
 			b.prompter.Notify("store failed; nothing was returned to the agent")
 			return refuse(CodeVaultFailed)
 		}
@@ -195,7 +212,7 @@ func (b *Broker) run(ctx context.Context, req Request) Response {
 		timeout = min(Limits.MaxTimeout, secondsDuration(req.TimeoutSeconds))
 	}
 	// Existence and redactability are checked before bothering the owner.
-	values, err := b.vault.Values(ctx, cmd.Secrets)
+	values, err := b.currentVault().Values(ctx, cmd.Secrets)
 	if errors.Is(err, ErrMissing) {
 		return refuse(CodeUnknownSecret)
 	}
@@ -246,7 +263,7 @@ func (b *Broker) run(ctx context.Context, req Request) Response {
 		return refuse(CodeCommandRefused)
 	}
 	// Fresh values at execution time, in case of a rotation since approval.
-	values, err = b.vault.Values(ctx, cmd.Secrets)
+	values, err = b.currentVault().Values(ctx, cmd.Secrets)
 	if err != nil {
 		return refuse(CodeVaultFailed)
 	}
@@ -277,6 +294,45 @@ func (b *Broker) run(ctx context.Context, req Request) Response {
 		V: ProtocolVersion, OK: true, ExitCode: &exit, TimedOut: result.TimedOut,
 		Stdout: string(stdout), Stderr: string(stderr), Truncated: truncated || t1 || t2, Redactions: n1 + n2,
 	}
+}
+
+func (b *Broker) currentVault() Vault {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.vault
+}
+
+// applySetup runs only in setup mode, one at a time, through the owner channel.
+func (b *Broker) applySetup(ctx context.Context, req Request) Response {
+	if req.Name != "" || req.Reason != "" || len(req.Secrets) != 0 || len(req.Argv) != 0 || req.Dir != "" || req.TimeoutSeconds != 0 || len(req.Setup) == 0 {
+		return refuse(CodeInvalidRequest)
+	}
+	if b.currentVault() != nil || b.setup == nil {
+		return refuse(CodeAlreadySetUp)
+	}
+	return b.withPrompt(ctx, func() Response {
+		if b.currentVault() != nil {
+			return refuse(CodeAlreadySetUp)
+		}
+		vault, done, err := b.setup.Apply(ctx, req.Setup)
+		if vault != nil {
+			b.mu.Lock()
+			if !b.closed {
+				b.vault = vault
+			}
+			b.mu.Unlock()
+		}
+		if err != nil {
+			var r interface{ SetupRefusal() string }
+			code := CodeSetupFailed
+			if errors.As(err, &r) {
+				code = r.SetupRefusal()
+			}
+			return Response{V: ProtocolVersion, Code: code, Steps: done}
+		}
+		b.prompter.Notify("setup complete; vault unlocked for agent use")
+		return Response{V: ProtocolVersion, OK: true, State: StateApplied, Steps: done}
+	})
 }
 
 func clip(b []byte) ([]byte, bool) {

@@ -34,6 +34,7 @@ type Layout struct {
 	V                string `json:"v"`
 	Sync             string `json:"sync"`
 	ServerURL        string `json:"server_url"`
+	Listen           string `json:"listen,omitempty"`
 	VaultName        string `json:"vault_name"`
 	DeviceName       string `json:"device_name"`
 	ConfigPath       string `json:"config_path"`
@@ -85,6 +86,7 @@ func refuse(reason string) error { return Refusal{reason} }
 type Request struct {
 	Sync       string `json:"sync"`
 	ServerURL  string `json:"server_url,omitempty"`
+	Listen     string `json:"listen,omitempty"`
 	VaultName  string `json:"vault_name"`
 	DeviceName string `json:"device_name"`
 	ConfigPath string `json:"config_path"`
@@ -104,10 +106,18 @@ func PlanFor(req Request, inspect Inspector) (Plan, error) {
 	p := Plan{Layout: Layout{V: LayoutVersion, Sync: req.Sync, VaultName: req.VaultName, DeviceName: req.DeviceName}}
 	switch req.Sync {
 	case SyncLocalServer:
-		if req.ServerURL != "" && req.ServerURL != "http://"+DefaultListen {
-			return Plan{}, refuse("local_server mode always serves on http://" + DefaultListen)
+		listen := req.Listen
+		if listen == "" {
+			listen = DefaultListen
 		}
-		p.Layout.ServerURL = "http://" + DefaultListen
+		if !loopbackListen(listen) {
+			return Plan{}, refuse("local_server mode listens on loopback only (127.0.0.1:PORT)")
+		}
+		if req.ServerURL != "" && req.ServerURL != "http://"+listen {
+			return Plan{}, refuse("local_server mode serves on its listen address; omit server_url")
+		}
+		p.Layout.Listen = listen
+		p.Layout.ServerURL = "http://" + listen
 	case SyncHosted:
 		if !strings.HasPrefix(req.ServerURL, "https://") || strings.ContainsAny(req.ServerURL, " \t\n") {
 			return Plan{}, refuse("hosted mode requires the https:// URL of your EnvBank service")
@@ -164,7 +174,7 @@ func stepsFor(l Layout) []Step {
 	if l.Sync == SyncLocalServer {
 		steps = append(steps,
 			Step{ID: "prepare_vault_dir", Description: "create the private (0700) vault directory " + l.VaultDir},
-			Step{ID: "install_service", Description: "install and start a launchd user agent running `envbank serve` on " + DefaultListen + " with its database in the vault directory", Persistent: true},
+			Step{ID: "install_service", Description: "install and start a launchd user agent running `envbank serve` on " + l.Listen + " with its database in the vault directory (skipped if an EnvBank server already answers there)", Persistent: true},
 		)
 	}
 	steps = append(steps,
@@ -249,6 +259,24 @@ func systemSymlink(p string) bool {
 		return true
 	}
 	return false
+}
+
+func loopbackListen(s string) bool {
+	if !strings.HasPrefix(s, "127.0.0.1:") {
+		return false
+	}
+	port := strings.TrimPrefix(s, "127.0.0.1:")
+	if port == "" || len(port) > 5 {
+		return false
+	}
+	n := 0
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n >= 1024 && n <= 65535
 }
 
 func validLabel(s string) bool {

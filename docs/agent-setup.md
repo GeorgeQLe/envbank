@@ -1,8 +1,16 @@
 # Agent-operated setup, owner input and cross-device secret relay
 
-Status (November 4, 2026): **design accepted. Read-only planning and status are
-implemented (`envbank setup plan|status`); apply, the desktop-host input
-provider, hosted and local-only modes, and the relay are not built yet.**
+Status (November 4, 2026):
+
+- **Implemented and tested end to end:** `local_server` setup with
+  disposable volumes, through `envbank setup plan|status|apply` and the
+  `envbank_device_setup_plan|apply` MCP tools.
+- **Hosted mode:** applies against an https service, but Cloudflare Access
+  credentials are not yet collected, so an Access-protected deployment is
+  not supported yet.
+- **Not built yet:** the desktop-host input provider (in progress; see the
+  [owner-input protocol](owner-input-protocol.md)), `local_only` mode, and
+  the relay.
 
 Goal: an agent can install, set up, store and sync EnvBank end to end, while
 every secret (vault passphrase, recovery passphrase, values) is typed by the
@@ -105,10 +113,13 @@ unsupported until a separately qualified input boundary exists.
 
 ## Remaining units
 
-1. `setup apply` through the broker in setup mode (`local_server` end to end),
-   including launchd install, vault creation without a passphrase file,
-   recovery export and the self-unlock.
-2. Hosted mode via the existing Cloudflare commands, with owner confirmations.
+1. Done: `setup apply` through the broker in setup mode. The launchd
+   install path is unit-tested for plist rendering and was not run against
+   the real launchd. The disposable end-to-end run used an existing server
+   instead. Vault creation needs no passphrase file. Recovery export and the
+   self-unlock are included. 18/18 end-to-end checks passed.
+2. Hosted mode: Cloudflare Access credentials through the owner surface, and
+   deployment via the existing Cloudflare commands with owner confirmations.
 3. Desktop-host provider protocol, authentication and no-leak qualification.
 4. Cross-device relay.
 5. `local_only` through the desktop host's local-vault adapter.

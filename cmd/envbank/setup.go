@@ -21,15 +21,17 @@ import (
 // broker, never from the agent's own terminal.
 func setupCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("setup subcommand is required (supported: plan, status)")
+		return errors.New("setup subcommand is required (supported: plan, status, apply)")
 	}
 	switch args[0] {
 	case "plan":
 		return setupPlan(args[1:])
+	case "apply":
+		return setupApply(args[1:])
 	case "status":
 		return setupStatus(args[1:])
 	default:
-		return fmt.Errorf("unknown setup subcommand %q (supported: plan, status)", args[0])
+		return fmt.Errorf("unknown setup subcommand %q (supported: plan, status, apply)", args[0])
 	}
 }
 
@@ -37,6 +39,7 @@ func setupRequestFlags(fs *flag.FlagSet) *setup.Request {
 	r := &setup.Request{}
 	fs.StringVar(&r.Sync, "sync", setup.SyncLocalServer, "local_server, hosted or local_only")
 	fs.StringVar(&r.ServerURL, "server", "", "hosted: https URL of the EnvBank service")
+	fs.StringVar(&r.Listen, "listen", "", "local_server: loopback listen address (default 127.0.0.1:7337)")
 	fs.StringVar(&r.VaultName, "vault-name", "personal", "vault name")
 	fs.StringVar(&r.DeviceName, "device-name", "", "this device's name")
 	fs.StringVar(&r.ConfigPath, "config", defaultConfigPath(), "device identity path (internal volume)")
@@ -149,4 +152,31 @@ func printJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+// setupApply sends the request to the owner-held broker (setup mode). The
+// broker re-plans it, asks the owner, and collects passphrases in its own
+// terminal; this command never sees them.
+func setupApply(args []string) error {
+	fs := flag.NewFlagSet("setup apply", flag.ContinueOnError)
+	req := setupRequestFlags(fs)
+	socket := fs.String("socket", agentbroker.DefaultSocketPath(), "agent broker socket")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		return errors.New("usage: envbank setup apply [setup plan flags] [--socket PATH]")
+	}
+	if _, err := setup.PlanFor(*req, setup.SystemInspector{}); err != nil {
+		return err // fail fast with the reason before bothering the owner
+	}
+	raw, _ := json.Marshal(req)
+	resp, err := agentbroker.Call(context.Background(), *socket, agentbroker.Request{Op: agentbroker.OpSetup, Setup: raw})
+	if err != nil {
+		return fmt.Errorf("%v: ask the owner to start `envbank agent-broker` in their own terminal", err)
+	}
+	if err := printJSON(resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return exitCodeError{code: 3}
+	}
+	return nil
 }

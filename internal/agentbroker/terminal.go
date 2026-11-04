@@ -188,3 +188,59 @@ func (p *TerminalPrompter) ask(ctx context.Context, prompt string) (string, erro
 	}
 	return strings.TrimSpace(string(buf)), nil
 }
+
+// ConfirmPlan shows lines (each sanitized) and asks for an explicit yes.
+func (p *TerminalPrompter) ConfirmPlan(ctx context.Context, title string, lines []string) (bool, error) {
+	p.bell()
+	fmt.Fprintf(p.Out, "\n── %s ──\n", Sanitize(title, 120))
+	for _, l := range lines {
+		fmt.Fprintf(p.Out, "  %s\n", Sanitize(l, 1<<12))
+	}
+	answer, err := p.ask(ctx, "Apply? [y/N]: ")
+	if err != nil {
+		return false, err
+	}
+	ok := strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes")
+	if !ok {
+		fmt.Fprintln(p.Out, "  declined")
+	}
+	return ok, nil
+}
+
+// NewPassphrase collects a new passphrase twice, never echoed. differentFrom,
+// when non-nil, must not equal the result (for example the recovery passphrase
+// must differ from the vault passphrase).
+func (p *TerminalPrompter) NewPassphrase(ctx context.Context, title string, minBytes int, differentFrom []byte) ([]byte, bool, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		fmt.Fprintf(p.Out, "\n── %s ──\n  Choose a passphrase of at least %d characters (hidden; empty to cancel): ", Sanitize(title, 120), minBytes)
+		first, err := p.readPassword(int(p.In.Fd()))
+		fmt.Fprintln(p.Out)
+		if err != nil || len(first) == 0 || ctx.Err() != nil {
+			wipe(first)
+			fmt.Fprintln(p.Out, "  cancelled")
+			return nil, false, err
+		}
+		if len(first) < minBytes || len(first) > 1024 {
+			wipe(first)
+			fmt.Fprintf(p.Out, "  must be %d to 1024 characters\n", minBytes)
+			continue
+		}
+		if differentFrom != nil && bytes.Equal(first, differentFrom) {
+			wipe(first)
+			fmt.Fprintln(p.Out, "  must differ from the vault passphrase")
+			continue
+		}
+		fmt.Fprint(p.Out, "  Re-enter: ")
+		second, err := p.readPassword(int(p.In.Fd()))
+		fmt.Fprintln(p.Out)
+		match := err == nil && bytes.Equal(first, second)
+		wipe(second)
+		if !match {
+			wipe(first)
+			fmt.Fprintln(p.Out, "  did not match")
+			continue
+		}
+		return first, true, nil
+	}
+	return nil, false, nil
+}
