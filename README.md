@@ -77,6 +77,9 @@ automation layer. See [private provider intake](docs/provider-intake.md).
   separately confirmed variable upserts, durable resume, and limited
   verification without provider value reads or deployment mutations
 - Direct child-process environment injection without writing a `.env` file
+- An owner-held [agent broker](docs/agent-broker.md) that lets coding agents
+  request secrets (the owner types them) and run owner-approved commands with
+  named secrets injected and output redacted, without ever receiving a value
 - Exact-origin browser authorization stored inside each encrypted record
 - A macOS Keychain-gated native host (Brave by default) and dependency-free MV3 extension
 - A fail-closed protected-fill SDK and computer-use selection UI; real controller
