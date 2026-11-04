@@ -107,9 +107,10 @@ func agentBrokerCommand(args []string) error {
 	setupMode := fs.Bool("setup", false, "allow agent-proposed setup when this device has no vault yet")
 	useExisting := fs.Bool("use-existing-server", false, "setup: allow reusing an EnvBank server you already started on the plan's address")
 	ownerInput := fs.String("owner-input", "terminal", "where the owner types secrets: terminal or chromux (verified, paired desktop provider)")
-	oiTeam := fs.String("owner-input-team", "NC56VXK48K", "Apple Team ID the desktop provider must be signed by")
-	oiIdent := fs.String("owner-input-identifier", "party.gblock.chromux.v2.desktop", "code-signing identifier of the desktop provider")
-	oiSocket := fs.String("owner-input-socket", ownerinput.DefaultSocketPath(), "desktop provider socket")
+	oiTeam := fs.String("owner-input-team", "NC56VXK48K", "Apple Team ID the desktop owner-input service must be signed by (Developer ID)")
+	oiIdent := fs.String("owner-input-identifier", ownerinput.ServiceIdentifier, "code-signing identifier of the owner-input XPC service")
+	oiService := fs.String("owner-input-service", ownerinput.BrokerServiceName, "Mach service name of the owner-input XPC service")
+	oiUnqualified := fs.Bool("owner-input-unqualified", false, "use the Chromux XPC owner input before its installed-build no-leak qualification has passed")
 	auth := addAuthFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -125,12 +126,22 @@ func agentBrokerCommand(args []string) error {
 	switch *ownerInput {
 	case "terminal":
 	case "chromux":
-		// Not qualified: a Unix-socket peer token reports the socket's last
-		// owner, so an impostor can pass the check by handing its fd to an exec'd
-		// genuine binary. The provider needs an XPC transport with per-message
-		// code-signing checks before it may receive real secrets.
-		_, _, _ = oiSocket, oiTeam, oiIdent
-		return errors.New("--owner-input chromux is not available yet: socket peer identity can be spoofed; it requires the planned XPC transport (use the terminal)")
+		// XPC transport: macOS checks the service's code signature on every
+		// message (Developer ID, pinned team and identifier, not debuggable);
+		// after pairing, the exact service build is pinned by cdhash.
+		if !*oiUnqualified {
+			return errors.New("--owner-input chromux has not passed its installed-build no-leak qualification yet; add --owner-input-unqualified to use it anyway (or use the terminal)")
+		}
+		p := &ownerinput.XPCProvider{Service: *oiService, TeamID: *oiTeam, Identifier: *oiIdent}
+		pctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		err := pairProvider(pctx, p, terminal)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "Chromux secure input not paired (%v); secrets will be typed in this terminal.\n", err)
+		} else {
+			prompter.provider = p
+			fmt.Println("Chromux secure input paired for this session (UNQUALIFIED: installed-build no-leak qualification pending).")
+		}
 	default:
 		return errors.New("--owner-input must be terminal or chromux")
 	}

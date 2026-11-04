@@ -1,6 +1,9 @@
 # Owner-input provider protocol v1 (`envbank.owner-input/v1`)
 
-Status (November 4, 2026): **blocked; the provider path is disabled.**
+Status (November 4, 2026): **the socket transport is retired.** It is
+replaced by the [XPC transport](owner-input-xpc.md), where macOS checks
+the peer's code signature on every message. The message semantics below
+still apply.
 
 A security review showed that on macOS a Unix-socket peer token
 (`LOCAL_PEERTOKEN`/`LOCAL_PEERPID`) identifies the socket's **last owner**,

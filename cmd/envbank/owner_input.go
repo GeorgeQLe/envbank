@@ -82,12 +82,16 @@ func (o *ownerSurface) ReadSecret(ctx context.Context, req agentbroker.Ingest) (
 	return v, ok, nil
 }
 
+type pairer interface {
+	Pair(ctx context.Context, confirm func(id ownerinput.Identity, code string) bool) error
+}
+
 // pairProvider pairs a desktop provider for this broker session in the terminal.
-func pairProvider(ctx context.Context, p *ownerinput.Provider, t *agentbroker.TerminalPrompter) error {
+func pairProvider(ctx context.Context, p pairer, t *agentbroker.TerminalPrompter) error {
 	return p.Pair(ctx, func(id ownerinput.Identity, code string) bool {
 		ok, err := t.ConfirmPlan(ctx, "Pair Chromux secure input", []string{
-			fmt.Sprintf("signed by team %s, identifier %s, hardened runtime", id.TeamID, id.Identifier),
-			"build cdhash " + id.CDHash,
+			fmt.Sprintf("service signed by team %s (Developer ID), identifier %s; verified by macOS on every message", id.TeamID, id.Identifier),
+			"service build cdhash " + id.CDHash + " (pinned for this session)",
 			"Chromux should now show pairing code " + code + ".",
 			"Answer yes only if the Chromux window shows exactly this code.",
 		})
