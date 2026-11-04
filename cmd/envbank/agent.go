@@ -117,11 +117,16 @@ func agentBrokerCommand(args []string) error {
 		return err
 	}
 	defer term.Restore(int(os.Stdin.Fd()), state) // never leave echo off
-	passphrase, err := brokerPassphrase(auth)
+	// Check the device config BEFORE asking for a passphrase: with no vault on
+	// this device there is nothing to unlock.
+	cfg, err := client.LoadConfig(auth.configPath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("no EnvBank device config at %s: run `envbank init` (new vault) or `envbank enroll-request` (existing vault) first, or pass --config", auth.configPath)
+		}
 		return err
 	}
-	cfg, err := client.LoadConfig(auth.configPath)
+	passphrase, err := brokerPassphrase(auth)
 	if err != nil {
 		return err
 	}

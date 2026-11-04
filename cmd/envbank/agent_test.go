@@ -26,7 +26,7 @@ func TestAgentClientNeedsNoVaultAndFailsClosedWithoutBroker(t *testing.T) {
 	}
 }
 
-func TestAgentBrokerRefusesWithoutTerminal(t *testing.T) {
+func TestAgentBrokerRefusesWithoutTerminalOrConfig(t *testing.T) {
 	// `go test` stdin is not a terminal: the broker must refuse before touching any config.
 	err := agentBrokerCommand([]string{"--config", filepath.Join(t.TempDir(), "absent.json")})
 	if err == nil || !strings.Contains(err.Error(), "interactive terminal") {
