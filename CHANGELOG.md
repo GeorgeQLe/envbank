@@ -5,6 +5,11 @@ versioning after the `v` prefix, while `0.x` releases remain unstable.
 
 ## Unreleased
 
+- added `envbank agent-broker`, `envbank agent` and value-free
+  `envbank_secret_*` MCP tools: owner-terminal secret ingest and
+  owner-approved, redacted command injection for coding agents
+  ([agent broker](docs/agent-broker.md)).
+
 ## 0.2.0 - 2026-08-10
 
 Feature alpha release for trusted bundle preparation and controlled Railway
