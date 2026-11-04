@@ -51,7 +51,10 @@ func TestSocketIsPrivateAndSingleInstance(t *testing.T) {
 		t.Fatal("a second broker replaced a live socket")
 	}
 	open := filepath.Join(shortDir(t), "open")
-	if err := os.Mkdir(open, 0o755); err != nil {
+	if err := os.Mkdir(open, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o755); err != nil { // explicit: independent of the caller's umask
 		t.Fatal(err)
 	}
 	if _, err := Listen(filepath.Join(open, "b.sock")); err == nil {
