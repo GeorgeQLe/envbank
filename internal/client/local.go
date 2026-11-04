@@ -24,6 +24,10 @@ type AccessCredentials struct {
 type localSecretsV2 struct {
 	Device secure.DeviceSecrets `json:"device"`
 	Access *AccessCredentials   `json:"access,omitempty"`
+	// OwnerApprovalKey pins the owner's hardware approval public key inside the
+	// passphrase-encrypted, AAD-bound payload, so editing the plain config file
+	// cannot substitute it. Only the owner enrollment command sets it.
+	OwnerApprovalKey []byte `json:"owner_approval_key,omitempty"`
 }
 
 type Config struct {
@@ -39,8 +43,9 @@ type Config struct {
 	Iterations       int         `json:"iterations"`
 	EncryptedSecret  secure.Blob `json:"encrypted_secret"`
 
-	access   *AccessCredentials
-	migrated bool
+	access           *AccessCredentials
+	ownerApprovalKey []byte
+	migrated         bool
 }
 
 func NewConfig(server, vaultID, deviceID, deviceName string, keys secure.DeviceKeys, passphrase []byte) (*Config, error) {
@@ -127,6 +132,13 @@ func (c *Config) Unlock(passphrase []byte) (secure.DeviceSecrets, error) {
 	} else {
 		c.access = nil
 	}
+	c.ownerApprovalKey = nil
+	if len(secrets.OwnerApprovalKey) != 0 {
+		if len(secrets.OwnerApprovalKey) != ownerApprovalKeySize || secrets.OwnerApprovalKey[0] != 4 {
+			return secure.DeviceSecrets{}, errors.New("encrypted owner approval key pin is invalid")
+		}
+		c.ownerApprovalKey = append([]byte(nil), secrets.OwnerApprovalKey...)
+	}
 	return secrets.Device, nil
 }
 
@@ -145,6 +157,9 @@ func (c *Config) Lock(secrets secure.DeviceSecrets, passphrase []byte) error {
 	if c.access != nil {
 		copy := *c.access
 		payload.Access = &copy
+	}
+	if len(c.ownerApprovalKey) != 0 {
+		payload.OwnerApprovalKey = append([]byte(nil), c.ownerApprovalKey...)
 	}
 	c.EncryptedSecret, err = secure.EncryptJSON(key, payload, c.localAAD(ConfigVersion))
 	return err
@@ -202,3 +217,33 @@ func (c *Config) AccessCredentials() *AccessCredentials {
 }
 
 func (c *Config) Migrated() bool { return c.migrated }
+
+// ownerApprovalKeySize is an uncompressed SEC1 P-256 point. Full curve
+// validation happens in internal/ownerapproval before any use.
+const ownerApprovalKeySize = 65
+
+// SetOwnerApprovalKey pins the hardware owner approval key in the encrypted
+// payload. It refuses to replace an existing pin: rotation is an explicit
+// manual owner procedure, never a side effect of an agent-reachable command.
+// The caller must have unlocked the config and must Lock and Save afterwards.
+func (c *Config) SetOwnerApprovalKey(public []byte) error {
+	if c.Version != ConfigVersion {
+		return errors.New("config must be unlocked before pinning an owner approval key")
+	}
+	if len(public) != ownerApprovalKeySize || public[0] != 4 {
+		return errors.New("owner approval key is invalid")
+	}
+	if len(c.ownerApprovalKey) != 0 {
+		return errors.New("an owner approval key is already pinned; refusing to replace it")
+	}
+	c.ownerApprovalKey = append([]byte(nil), public...)
+	return nil
+}
+
+// OwnerApprovalKey returns a copy of the pinned key, or nil when not enrolled.
+func (c *Config) OwnerApprovalKey() []byte {
+	if len(c.ownerApprovalKey) == 0 {
+		return nil
+	}
+	return append([]byte(nil), c.ownerApprovalKey...)
+}

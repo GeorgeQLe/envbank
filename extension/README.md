@@ -1,11 +1,18 @@
 # EnvBank Fill extension
 
 This directory is an unpacked, dependency-free Manifest V3 extension. Build
-the Go binary, run `envbank keychain-store`, then run `envbank browser-install`
+the Go binary, then run `envbank browser-install`
 before loading this directory from `brave://extensions` in developer mode.
 Brave is the installer default; use `--browser brave` explicitly when desired.
 Explicit Chrome/Chromium targets remain supported for existing installations.
-The installer refuses to overwrite existing native-host manifests.
+The installer refuses to overwrite existing native-host manifests. New installs
+use computer-use mode and block ordinary fill, generation and origin-policy
+changes; without a qualified controller, all value release is unavailable.
+For a deliberately human-only installation, use `envbank keychain-store` and
+`envbank browser-install --human-fill`. This opt-in is stored in a private local
+locator; native messages cannot change it. Human-only mode does not protect
+against an agent operating the same profile. Existing installed binaries are
+not changed automatically; upgrading a path-only locator defaults to refusal.
 
 The development public key in `manifest.json` fixes the ID to
 `pgbpmecaapiknpejgdkpaifpjcnckcnk`, which is the only extension origin accepted

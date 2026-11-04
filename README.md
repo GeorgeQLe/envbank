@@ -444,16 +444,18 @@ Prepare the native host after building the binary:
   --config .envbank/laptop.json \
   --passphrase-file /secure/path/envbank-passphrase
 
-./envbank browser-install --config .envbank/laptop.json
+./envbank browser-install --human-fill --config .envbank/laptop.json
 ```
 
-Google Chrome is the default target. For Chrome for Testing 146 or newer, use
-`--browser chrome-for-testing`; Chromium uses `--browser chromium`. Pass the
-same browser target and any `--profile-dir` to `browser-uninstall` during
+Brave is the default target. The example explicitly opts into human filling,
+which is not safe for an observing agent. Without `--human-fill`, new installs
+refuse legacy filling and report protected operation unavailable until a
+qualified controller is connected. Pass the same browser target and any
+`--profile-dir` to `browser-uninstall` during
 cleanup. Each browser/profile manifest receives an isolated native-host binary
 and configuration locator.
 
-Then open `chrome://extensions`, enable developer mode, choose **Load
+Then open `brave://extensions`, enable developer mode, choose **Load
 unpacked**, and select the repository's `extension` directory. The checked-in
 development public key fixes the extension ID to
 `pgbpmecaapiknpejgdkpaifpjcnckcnk`, matching the installed native manifest.
@@ -491,3 +493,8 @@ expectations. Report vulnerabilities only through the private process in
 
 EnvBank is licensed under the [Apache License 2.0](LICENSE). Changes are listed
 in [CHANGELOG.md](CHANGELOG.md).
+
+The [Vercel operator guide](docs/vercel.md) describes the configured vault-to-Secret
+API workflow, deployment health gates and rollback limits.
+[Remaining qualification gaps](docs/vercel-integration-gaps.md) distinguish
+synthetic tests from real-account acceptance and browser-controller support.

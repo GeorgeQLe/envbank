@@ -27,5 +27,24 @@
     "Gate Close cancels private work and retains authority while an operation is running",
     "Transparent fields and transparent ancestors are rejected",
     "Earlier selection timeout cannot cancel a later operation"
-  ]
+  ],
+  "acceptanceRemediation": {
+    "defaultBrowserHostMode": "computer-use; no controller means no value release",
+    "humanMode": "explicit local --human-fill opt-in; direct CLI requires --config",
+    "legacyLocator": "updated binary treats path-only locators as computer-use mode",
+    "productionWorkflowCapabilities": "backend-derived; unavailable without configured backend",
+    "testlabCapabilities": "explicitly simulated",
+    "verification": [
+      "make e2e passed",
+      "go test -race ./cmd/envbank ./internal/mcpserver ./internal/testlab passed",
+      "go vet for changed packages passed",
+      "actual compiled-host framing/mode/refusal: 14 assertions over safe JSON, human JSON and legacy locators",
+      "compiled production MCP capabilities report workflow unavailable",
+      "Terra revised-diff review: no further concrete safety issues; limited scope"
+    ],
+    "installedBraveMessagingQualified": false,
+    "productionVercelTransferAvailable": false,
+    "globalObservationHostIntegrated": false,
+    "realCredentialsUsed": false
+  }
 }
