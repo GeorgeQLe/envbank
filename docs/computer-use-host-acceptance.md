@@ -74,3 +74,33 @@ and route it through ONE shared `Gate.Observe` for all sessions:
 
 Until all steps pass, protected filling and browser capture of provider keys
 stay unavailable, and the Vercel REST path remains the only supported route.
+
+## Native computer-use counterexample — November 4, 2026
+
+Observed through native computer use in Brave, with one new loopback fake-site
+tab and a random synthetic marker. The fixture used the real `OpenGate` and
+`Coordinator` with a synthetic hold/release Driver (no vault or real credential).
+While the actual shared gate was blocked, `Gate.Observe` refused and direct
+PreToolUse/PostToolUse evaluations returned deny/block. Nevertheless, native
+accessibility received the fake marker, native screenshot returned nonempty
+bytes, and native input could operate the fixture's finish button. The raw
+marker and screenshot were not emitted or saved. Screenshot pixels/OCR were not
+asserted; the accessibility observation alone fails global qualification.
+
+This proves the installed native computer-use path is outside EnvBank's gate.
+It does not show a production credential leak: production release stayed
+disabled. No hooks were installed or trusted in the active runtime, and no real
+Vercel calls, tokens, hardware enrollment or owner prompts were used. The owner
+selected local testing only. A synthetic cleanup receipt is not an actual
+browser-context destruction attestation.
+
+Fresh uncached race tests for protectedfill, codexhook and computeruse passed;
+the local Vercel acceptance/fixture tests against fake APIs passed. All 15
+preexisting tabs remained, the test tab was closed, the local process was stopped
+and its listener closure verified. Status-only evidence and explicit limits:
+[native capture verification](native-capture-verification-2026-11-04.json).
+
+Real browser capture remains disabled. A qualified host must own the native
+observation/input call sites as well as the broker; lifecycle hooks alone do not
+supply that boundary. Real provider API acceptance remains a separate pending
+owner-imported credential/hardware-approval run on a disposable project.
