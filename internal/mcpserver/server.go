@@ -10,7 +10,7 @@ import (
 	"io"
 )
 
-var toolNames = []string{"envbank_capabilities", "envbank_setup_plan", "envbank_workflow_start", "envbank_workflow_resume", "envbank_workflow_status", "envbank_rotation_due", "envbank_rotation_run", "envbank_operation_evidence", "envbank_policy_status"}
+var toolNames = []string{"envbank_capabilities", "envbank_setup_plan", "envbank_workflow_start", "envbank_workflow_resume", "envbank_workflow_status", "envbank_deployment_rollback", "envbank_rotation_due", "envbank_rotation_run", "envbank_operation_evidence", "envbank_policy_status"}
 
 // ToolDefinition permits an isolated executable to extend the protocol without
 // adding test controls to the production binary.
@@ -26,14 +26,16 @@ type Extension interface {
 }
 
 type Result struct {
-	PlanID      string           `json:"plan_id,omitempty"`
-	OperationID string           `json:"operation_id,omitempty"`
-	Stage       string           `json:"stage,omitempty"`
-	Provider    string           `json:"provider,omitempty"`
-	ResourceIDs []string         `json:"resource_ids,omitempty"`
-	Capability  string           `json:"capability,omitempty"`
-	Health      []HealthEvidence `json:"health,omitempty"`
-	BlockerCode string           `json:"blocker_code,omitempty"`
+	RolloutID     string           `json:"rollout_id,omitempty"`
+	VariableState string           `json:"variable_state,omitempty"`
+	PlanID        string           `json:"plan_id,omitempty"`
+	OperationID   string           `json:"operation_id,omitempty"`
+	Stage         string           `json:"stage,omitempty"`
+	Provider      string           `json:"provider,omitempty"`
+	ResourceIDs   []string         `json:"resource_ids,omitempty"`
+	Capability    string           `json:"capability,omitempty"`
+	Health        []HealthEvidence `json:"health,omitempty"`
+	BlockerCode   string           `json:"blocker_code,omitempty"`
 }
 type HealthEvidence struct {
 	CheckID          string `json:"check_id"`
@@ -93,15 +95,16 @@ func (server Server) Call(ctx context.Context, name string, raw json.RawMessage)
 func productionTool(name string) ToolDefinition {
 	stringField := func() map[string]any { return map[string]any{"type": "string"} }
 	fields := map[string]map[string]any{
-		"envbank_capabilities":       {},
-		"envbank_setup_plan":         {"vault_id": stringField(), "bundle": stringField(), "manifest_digest": stringField(), "environment": stringField()},
-		"envbank_workflow_start":     {"vault_id": stringField(), "bundle": stringField(), "manifest_digest": stringField(), "environment": stringField(), "provider": stringField(), "plan_id": stringField(), "policy_id": stringField()},
-		"envbank_workflow_resume":    {"operation_id": stringField()},
-		"envbank_workflow_status":    {"operation_id": stringField()},
-		"envbank_rotation_due":       {"vault_id": stringField(), "bundle": stringField()},
-		"envbank_rotation_run":       {"operation_id": stringField(), "provider": stringField()},
-		"envbank_operation_evidence": {"operation_id": stringField()},
-		"envbank_policy_status":      {"policy_id": stringField()},
+		"envbank_capabilities":        {},
+		"envbank_setup_plan":          {"vault_id": stringField(), "bundle": stringField(), "manifest_digest": stringField(), "environment": stringField()},
+		"envbank_workflow_start":      {"vault_id": stringField(), "bundle": stringField(), "manifest_digest": stringField(), "environment": stringField(), "provider": stringField(), "plan_id": stringField(), "policy_id": stringField()},
+		"envbank_workflow_resume":     {"operation_id": stringField()},
+		"envbank_workflow_status":     {"operation_id": stringField()},
+		"envbank_deployment_rollback": {"operation_id": stringField()},
+		"envbank_rotation_due":        {"vault_id": stringField(), "bundle": stringField()},
+		"envbank_rotation_run":        {"operation_id": stringField(), "provider": stringField()},
+		"envbank_operation_evidence":  {"operation_id": stringField()},
+		"envbank_policy_status":       {"policy_id": stringField(), "plan_id": stringField()},
 	}
 	properties := map[string]any{}
 	for key, schema := range fields[name] {

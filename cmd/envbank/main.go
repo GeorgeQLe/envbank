@@ -138,6 +138,8 @@ func run(args []string) error {
 		return bundleCommand(args[1:])
 	case "railway":
 		return railwayCommand(args[1:])
+	case "vercel":
+		return vercelCommand(args[1:])
 	case "access":
 		return accessCommand(args[1:])
 	case "cloudflare":
@@ -207,6 +209,13 @@ Usage:
   envbank railway apply --plan PLAN_ID [auth flags]
   envbank railway resume --operation OPERATION_ID [auth flags]
   envbank railway verify --bundle BUNDLE [auth flags]
+  envbank vercel bind --manifest PATH [auth flags]  # token from owner-controlled stdin
+  envbank vercel plan --manifest PATH [auth flags]
+  envbank vercel approve --manifest PATH --plan PLAN_ID --source-deployment ID --health-path /api/health [auth flags]
+  envbank vercel apply --manifest PATH --plan PLAN_ID [auth flags]
+  envbank vercel resume --manifest PATH --operation ID [auth flags]
+  envbank vercel status --manifest PATH --operation ID [auth flags]
+  envbank vercel rollback --manifest PATH --operation ID [auth flags]
   envbank mcp serve  # local stdio; workflow tools only
 
 Auth flags:
@@ -308,9 +317,10 @@ func readAccessCredentials(reader io.Reader) (client.AccessCredentials, error) {
 }
 
 func mcpCommand(args []string) error {
-	if len(args) != 1 || args[0] != "serve" {
+	if len(args) == 0 || args[0] != "serve" {
 		return errors.New("mcp subcommand is required (supported: serve)")
 	}
+	if len(args)>1{return vercelMCP(args[1:])}
 	return (mcpserver.Server{}).Serve(context.Background(), os.Stdin, os.Stdout)
 }
 

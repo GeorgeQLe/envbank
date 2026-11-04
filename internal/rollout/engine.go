@@ -111,6 +111,16 @@ func (engine *Engine) Plan(ctx context.Context, input PlanInput) (ProviderPlan, 
 // Apply validates every binding, obtains interactive confirmations, durably
 // records the operation, and advances it through write and verification.
 func (engine *Engine) Apply(ctx context.Context, planID string, confirm ConfirmFunc) (Operation, error) {
+	operation, err := engine.Prepare(ctx, planID, confirm)
+	if err != nil {
+		return operation, err
+	}
+	return engine.Resume(ctx, operation.ID)
+}
+
+// Prepare persists the confirmed operation without reading or writing values.
+// An orchestrator can journal its ID before Resume starts any provider write.
+func (engine *Engine) Prepare(ctx context.Context, planID string, confirm ConfirmFunc) (Operation, error) {
 	if err := engine.ready(); err != nil {
 		return Operation{}, err
 	}
@@ -142,11 +152,11 @@ func (engine *Engine) Apply(ctx context.Context, planID string, confirm ConfirmF
 	if err != nil {
 		return Operation{}, err
 	}
-	revision, err := engine.Store.SaveOperation(ctx, operation, 0)
+	_, err = engine.Store.SaveOperation(ctx, operation, 0)
 	if err != nil {
 		return Operation{}, fmt.Errorf("save confirmed rollout operation: %w", err)
 	}
-	return engine.advance(ctx, plan, operation, revision)
+	return operation, nil
 }
 
 // Resume continues a confirmed operation without repeating confirmation or
@@ -199,6 +209,9 @@ func (engine *Engine) advance(ctx context.Context, plan ProviderPlan, operation 
 		}
 	}
 	for index := range operation.Actions {
+		if err := ctx.Err(); err != nil {
+			return operation, err
+		}
 		item := &operation.Actions[index]
 		if item.Status == ActionVerified || item.Status == ActionLimited || item.Status == ActionCommitted {
 			continue

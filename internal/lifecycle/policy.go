@@ -25,25 +25,29 @@ type TargetPolicy struct {
 // AutomationPolicy is encrypted as a vault object. Signature covers every
 // field except Signature and binds the approval to one device and manifest.
 type AutomationPolicy struct {
-	Version            int               `json:"version"`
-	ID                 string            `json:"id"`
-	VaultID            string            `json:"vault_id"`
-	Bundle             string            `json:"bundle"`
-	ManifestDigest     string            `json:"manifest_digest"`
-	Environment        string            `json:"environment"`
-	ProviderIdentities map[string]string `json:"provider_identities"`
-	CredentialClasses  []string          `json:"credential_classes"`
-	Operations         []string          `json:"operations"`
-	Targets            []TargetPolicy    `json:"targets"`
-	Schedule           string            `json:"schedule"`
-	HealthChecks       []string          `json:"health_checks"`
-	GracePeriod        string            `json:"grace_period"`
-	Rollback           string            `json:"rollback"`
-	RetryBudget        int               `json:"retry_budget"`
-	ExpiresAt          string            `json:"expires_at"`
-	ApprovingDevice    string            `json:"approving_device"`
-	PublicKey          []byte            `json:"public_key"`
-	Signature          []byte            `json:"signature"`
+	DeploymentPlanID           string            `json:"deployment_plan_id,omitempty"`
+	DeploymentSourceID         string            `json:"deployment_source_id,omitempty"`
+	DeploymentScopeFingerprint string            `json:"deployment_scope_fingerprint,omitempty"`
+	DeploymentHealthPath       string            `json:"deployment_health_path,omitempty"`
+	Version                    int               `json:"version"`
+	ID                         string            `json:"id"`
+	VaultID                    string            `json:"vault_id"`
+	Bundle                     string            `json:"bundle"`
+	ManifestDigest             string            `json:"manifest_digest"`
+	Environment                string            `json:"environment"`
+	ProviderIdentities         map[string]string `json:"provider_identities"`
+	CredentialClasses          []string          `json:"credential_classes"`
+	Operations                 []string          `json:"operations"`
+	Targets                    []TargetPolicy    `json:"targets"`
+	Schedule                   string            `json:"schedule"`
+	HealthChecks               []string          `json:"health_checks"`
+	GracePeriod                string            `json:"grace_period"`
+	Rollback                   string            `json:"rollback"`
+	RetryBudget                int               `json:"retry_budget"`
+	ExpiresAt                  string            `json:"expires_at"`
+	ApprovingDevice            string            `json:"approving_device"`
+	PublicKey                  []byte            `json:"public_key"`
+	Signature                  []byte            `json:"signature"`
 }
 
 func (policy AutomationPolicy) signingBytes() ([]byte, error) {

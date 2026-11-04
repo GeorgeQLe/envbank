@@ -1,0 +1,85 @@
+{
+  "date": "2026-11-03",
+  "branch": "feat/vercel-integration",
+  "base_commit": "12feeb3",
+  "evidence_type": "isolated_synthetic_and_source_review",
+  "checks": [
+    {
+      "command": "make e2e",
+      "result": "PASS",
+      "scope": "Go, testlab, recovery, extension, website lint/typecheck/build/smoke, synthetic leakage scan"
+    },
+    {
+      "command": "go test ./...",
+      "result": "PASS",
+      "scope": "final implementation"
+    },
+    {
+      "command": "go test -race (changed provider/workflow and shared packages)",
+      "result": "PASS"
+    },
+    {
+      "command": "go test -race ./cmd/envbank -run TestVercelCLIBindPlanApprovalAndScopePin",
+      "result": "PASS",
+      "scope": "fake vault, loopback provider, in-memory Keychain"
+    },
+    {
+      "command": "go test -race ./internal/vercelworkflow -run TestMidBatchApprovalExpiryCanRenewWithoutDuplicateWrite",
+      "result": "PASS"
+    },
+    {
+      "command": "go vet (changed packages and providers)",
+      "result": "PASS"
+    },
+    {
+      "command": "git diff --cached --check",
+      "result": "PASS"
+    },
+    {
+      "command": "gitleaks git --staged --redact=100 --no-banner --verbose=false",
+      "result": "PASS",
+      "findings": 0
+    }
+  ],
+  "integration_cases": [
+    "Preview API write/redeploy/health",
+    "Production API staged health/promotion/rollback",
+    "scope pinning",
+    "forged policy refusal",
+    "expiry-only renewal",
+    "mid-batch approval expiry",
+    "stale health",
+    "ambiguous create no retry",
+    "lost write checkpoint no retry",
+    "metadata drift",
+    "unexpected promotion emergency rollback",
+    "wrong-commit promoted build",
+    "missing mutation authority refusal",
+    "private-response canary exclusion"
+  ],
+  "review": {
+    "model": "claude-opus-5-5",
+    "role": "adapter implementation and integrated source reviews",
+    "final_result": "all four follow-up findings closed in source; no new concrete blocker found",
+    "reviewer_executed_tests": false
+  },
+  "not_performed": [
+    "real credential import",
+    "real Vercel writes/deployments",
+    "real production app/database access",
+    "OS Keychain changes",
+    "browser profile changes",
+    "GitHub Actions changes"
+  ],
+  "remaining": [
+    "owner-controlled disposable live Vercel acceptance",
+    "external observation-controller integration for browser key capture",
+    "hardware-backed human-presence approval qualification"
+  ],
+  "limits": [
+    "write-only values have metadata-only verification",
+    "deployment rollback does not restore project variables",
+    "external writers and separate vaults are not serialized",
+    "unknown-send outcomes may require manual reconciliation"
+  ]
+}

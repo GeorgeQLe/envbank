@@ -490,3 +490,8 @@ expectations. Report vulnerabilities only through the private process in
 
 EnvBank is licensed under the [Apache License 2.0](LICENSE). Changes are listed
 in [CHANGELOG.md](CHANGELOG.md).
+
+The [Vercel operator guide](docs/vercel.md) describes the configured vault-to-Secret
+API workflow, deployment health gates and rollback limits.
+[Remaining qualification gaps](docs/vercel-integration-gaps.md) distinguish
+synthetic tests from real-account acceptance and browser-controller support.
