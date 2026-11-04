@@ -130,7 +130,7 @@ func TestWorkflowAcrossActualVercelHTTPAdapter(t *testing.T) {
 			}
 			s.policy.ID = PolicyID(r.PlanID)
 			s.policy.DeploymentPlanID = r.PlanID
-			if e = s.policy.Sign(private); e != nil {
+			if e = ownerSign(&s.policy, private); e != nil {
 				t.Fatal(e)
 			}
 			r = runTo(t, b, r.PlanID, "complete")

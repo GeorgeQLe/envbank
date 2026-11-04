@@ -29,6 +29,19 @@ func NewHealthProbe(scope vercel.Scope, token []byte) (func(context.Context, ver
 	return newHealthProbe(scope, token, &http.Client{})
 }
 func newHealthProbe(scope vercel.Scope, token []byte, client *http.Client) (func(context.Context, vercel.Deployment, string) (bool, error), func(), error) {
+	probe, closeProbe, e := newScopedProbe(scope, token, client)
+	if e != nil {
+		return nil, nil, e
+	}
+	return func(ctx context.Context, d vercel.Deployment, path string) (bool, error) {
+		status, err := probe(ctx, d, path, nil)
+		return err == nil && status == http.StatusOK, err
+	}, closeProbe, nil
+}
+
+type scopedProbe func(context.Context, vercel.Deployment, string, map[string]string) (int, error)
+
+func newScopedProbe(scope vercel.Scope, token []byte, client *http.Client) (scopedProbe, func(), error) {
 	if scope.Validate() != nil || len(token) > 4096 {
 		return nil, nil, errors.New("health credential binding invalid")
 	}
@@ -49,14 +62,14 @@ func newHealthProbe(scope vercel.Scope, token []byte, client *http.Client) (func
 		credential = nil
 		closed = true
 	}
-	probe := func(ctx context.Context, d vercel.Deployment, path string) (bool, error) {
+	probe := func(ctx context.Context, d vercel.Deployment, path string, headers map[string]string) (int, error) {
 		if d.ProjectID != scope.ProjectID || d.TeamID != scope.TeamID || d.Environment != scope.Environment || scope.GitBranch != "" && d.GitBranch != scope.GitBranch {
-			return false, errors.New("health deployment scope changed")
+			return 0, errors.New("health deployment scope changed")
 		}
 		mu.RLock()
 		if closed {
 			mu.RUnlock()
-			return false, errors.New("health probe closed")
+			return 0, errors.New("health probe closed")
 		}
 		value := append([]byte(nil), credential...)
 		mu.RUnlock()
@@ -65,35 +78,49 @@ func newHealthProbe(scope vercel.Scope, token []byte, client *http.Client) (func
 				value[i] = 0
 			}
 		}()
-		return probeHealth(ctx, d, path, value, client)
+		return probeStatus(ctx, d, path, headers, value, client)
 	}
 	return probe, closeProbe, nil
 }
 
 func probeHealth(ctx context.Context, deployment vercel.Deployment, path string, token []byte, supplied *http.Client) (bool, error) {
+	status, e := probeStatus(ctx, deployment, path, nil, token, supplied)
+	return e == nil && status == http.StatusOK, e
+}
+
+// probeStatus is the shared status-only GET: owned *.vercel.app host only, no
+// redirects, cookies or response-body reads. Extra headers are fixed names.
+func probeStatus(ctx context.Context, deployment vercel.Deployment, path string, headers map[string]string, token []byte, supplied *http.Client) (int, error) {
 	if !ValidHealthPath(path) {
-		return false, errors.New("health path invalid")
+		return 0, errors.New("health path invalid")
 	}
 	host := strings.TrimPrefix(deployment.URL, "https://")
 	if !healthHost.MatchString(host) {
-		return false, errors.New("health deployment URL invalid")
+		return 0, errors.New("health deployment URL invalid")
 	}
 	u := url.URL{Scheme: "https", Host: host, Path: path}
 	request, e := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if e != nil {
-		return false, errors.New("health request invalid")
+		return 0, errors.New("health request invalid")
 	}
 	if len(token) > 0 {
 		request.Header.Set("x-vercel-protection-bypass", string(token))
 	}
+	for name, value := range headers {
+		if name != AcceptanceChallengeHeader && name != AcceptanceProofHeader {
+			return 0, errors.New("acceptance header not permitted")
+		}
+		request.Header.Set(name, value)
+	}
+	request.Header.Set("Cache-Control", "no-store")
 	client := *supplied
 	client.Timeout = 10 * time.Second
 	client.Jar = nil
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, e := client.Do(request)
 	if e != nil {
-		return false, errors.New("health request failed")
+		return 0, errors.New("health request failed")
 	}
 	defer response.Body.Close()
-	return response.StatusCode == http.StatusOK, nil
+	return response.StatusCode, nil
 }

@@ -1,0 +1,92 @@
+{
+  "date": "2026-11-04",
+  "source_base_commit": "ce7420c",
+  "delivery_branch": "feat/vercel-integration",
+  "classification": "synthetic-only; live and physical acceptance not performed",
+  "implementation": {
+    "model": "claude-opus-5-5",
+    "first_pass_turns": 157,
+    "production_pass_turns": 51,
+    "final_source_review_turns": 21,
+    "model_executed_tests": false,
+    "parent_executed_tests": true,
+    "final_review": "No high/medium blocker found; low suggestions addressed and tested"
+  },
+  "checks": [
+    {
+      "command": "go test ./...",
+      "result": "PASS"
+    },
+    {
+      "command": "go vet ./...",
+      "result": "PASS"
+    },
+    {
+      "command": "go test -race (ownerapproval, client, lifecycle, provider/vercel, vercelworkflow, pkg/computeruse)",
+      "result": "PASS"
+    },
+    {
+      "command": "go test -race ./cmd/envbank -run 'TestVercel|TestOwner'",
+      "result": "PASS"
+    },
+    {
+      "command": "CGO_ENABLED=0 go test ./internal/ownerapproval ./internal/client ./internal/lifecycle ./internal/vercelworkflow",
+      "result": "PASS"
+    },
+    {
+      "command": "go test (actual Node fixture and synthetic PTY trusted-helper wrapper)",
+      "result": "PASS",
+      "note": "generated fixture value passed over private stdin; output/diagnostics sanitized"
+    },
+    {
+      "command": "./scripts/testlab-matrix.sh",
+      "result": "PASS"
+    },
+    {
+      "command": "gofmt check; bash -n scripts/e2e-live.sh; git diff --check",
+      "result": "PASS"
+    },
+    {
+      "command": "gitleaks git --staged --redact=100 --no-banner --verbose=false",
+      "result": "PASS",
+      "findings": 0
+    }
+  ],
+  "coverage": [
+    "owner proof canonicalization/tampering/key substitution",
+    "cancelled or expired approval refuses",
+    "encrypted public-key pin",
+    "device-only approval refusal",
+    "private read authorization and generated fixture provenance",
+    "Preview fresh-run refusal",
+    "Production default-domain-only guard at mutation time",
+    "policy recheck after slow guard",
+    "fresh consumer HMAC and negative control",
+    "healthy prior deployment restored after signed rollback",
+    "lost mutation response read-only reconciliation",
+    "uncertain variable-state honesty",
+    "unavailable journal distinct from existing run",
+    "actual Node status-only fixture",
+    "same selected trusted helper identity; no automatic unsigned rebuild",
+    "missing external host refuses before vault or Keychain read"
+  ],
+  "not_performed": [
+    "real Vercel credential import",
+    "real Vercel acceptance run",
+    "real hardware key enrollment or signing",
+    "physical user-presence prompt observation",
+    "browser capture/driver integration",
+    "production app or shared database access",
+    "GitHub Actions/workflow changes"
+  ],
+  "remaining": [
+    "owner Vercel team and two disposable targets",
+    "private owner credential setup",
+    "trusted signed helper with required access entitlements",
+    "owner enrollment and approve/cancel/repeated prompt acceptance",
+    "live Preview and Production API acceptance",
+    "host-vendor global observation barrier and qualified Driver"
+  ],
+  "boundary_note": "API acceptance does not qualify browser capture. Deployment rollback does not revert project variables. External writer races remain possible without provider CAS.",
+  "implementation_session_note": "Opus reported one read-only wc on three public source files beyond its requested shell command list; Go tools were denied there. Parent used a separate controlled test execution path. No real credential operations were authorized to Opus."
+}

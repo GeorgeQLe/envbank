@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/json"
 	"errors"
 	"net/url"
 	"regexp"
@@ -13,6 +12,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/contract"
 	"github.com/GeorgeQLe/envbank/internal/lifecycle"
 	"github.com/GeorgeQLe/envbank/internal/mcpserver"
+	"github.com/GeorgeQLe/envbank/internal/ownerapproval"
 	"github.com/GeorgeQLe/envbank/internal/provider"
 	"github.com/GeorgeQLe/envbank/internal/provider/vercel"
 	"github.com/GeorgeQLe/envbank/internal/rollout"
@@ -87,6 +87,11 @@ type Backend struct {
 	Store             Store
 	VaultID, DeviceID string
 	TrustedPolicyKey  ed25519.PublicKey
+	// OwnerApprovalKey is the owner-pinned hardware approval public key from
+	// the encrypted local config. It is never taken from a request. Every
+	// mutating verb requires a policy carrying a valid owner signature from
+	// exactly this key; there is no device-only/TTY fallback.
+	OwnerApprovalKey []byte
 	// Probe must return only status, never response bodies. The default is a
 	// credential-free, no-redirect GET to the owned deployment's HTTPS URL.
 	Probe func(context.Context, vercel.Deployment, string) (bool, error)
@@ -135,6 +140,12 @@ func (backend *Backend) policy(ctx context.Context, plan rollout.ProviderPlan, o
 	if p.ID != PolicyID(plan.ID()) || p.DeploymentPlanID != plan.ID() || p.DeploymentScopeFingerprint != scope.Fingerprint() || !deploymentID.MatchString(p.DeploymentSourceID) || !ValidHealthPath(p.DeploymentHealthPath) || p.ApprovingDevice != backend.DeviceID || !bytes.Equal(p.PublicKey, backend.TrustedPolicyKey) {
 		return p, errors.New("Vercel approval binding invalid")
 	}
+	// Device (vault transport) signature alone is never sufficient: the
+	// configured backend retains that key, so it must not be able to mint
+	// approval. Require the separate owner hardware signature.
+	if ownerapproval.Verify(p, backend.OwnerApprovalKey, backend.now()) != nil {
+		return p, errors.New("Vercel hardware owner approval invalid")
+	}
 	environment := "staging"
 	if scope.Environment == "production" {
 		environment = "production"
@@ -154,7 +165,13 @@ func (backend *Backend) Call(ctx context.Context, name string, request mcpserver
 		return mcpserver.Result{BlockerCode: "POLICY_BINDING_MISMATCH"}, nil
 	}
 	if name == "envbank_capabilities" {
-		return mcpserver.Result{Stage: "configured", Capability: "vercel:vault-to-secret=implemented,vercel:redeploy=implemented,vercel:production-promote=policy-gated,vercel:live-acceptance=pending"}, nil
+		return mcpserver.Result{Stage: "configured", Capability: "vercel:vault-to-secret=implemented,vercel:redeploy=implemented,vercel:production-promote=policy-gated,vercel:owner-approval=secure-enclave-required,vercel:live-acceptance=pending"}, nil
+	}
+	switch name {
+	case "envbank_workflow_start", "envbank_workflow_resume", "envbank_policy_status", "envbank_deployment_rollback":
+		if !ownerapproval.ValidPublicKey(backend.OwnerApprovalKey) {
+			return mcpserver.Result{BlockerCode: "OWNER_APPROVAL_KEY_NOT_PINNED"}, nil
+		}
 	}
 	if name == "envbank_setup_plan" {
 		snapshot, revision, e := backend.Store.Snapshot(ctx, backend.Document.Manifest.Bundle)
@@ -319,11 +336,8 @@ func result(state State) mcpserver.Result {
 }
 
 // Renewal can extend expiry only. Preserve every other signed binding from
-// the initial approval, including operations, key and recovery policy.
+// the initial approval, including operations, device and owner keys and
+// recovery policy. A renewal carries a fresh owner signature and signing time.
 func sameApproval(a, b lifecycle.AutomationPolicy) bool {
-	a.ExpiresAt, b.ExpiresAt = "", ""
-	a.Signature, b.Signature = nil, nil
-	x, ex := json.Marshal(a)
-	y, ey := json.Marshal(b)
-	return ex == nil && ey == nil && bytes.Equal(x, y)
+	return ownerapproval.SameAuthority(a, b)
 }

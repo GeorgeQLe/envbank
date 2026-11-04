@@ -42,8 +42,37 @@ No GitHub Actions workflows were created/modified or Actions enabled.
 These are synthetic results. They do not measure live Vercel behavior, prove
 application consumption of a real secret, or qualify the installed external
 computer-use confidentiality boundary. Opus reviews are source review, not
-independent test execution. The earlier TTY/software-key approval boundary
-remains explicitly documented; hardware-backed human presence is not implemented.
+independent test execution. At the November 3 verification, owner approval used a TTY/software-key
+boundary. The November 4 follow-up below supersedes that implementation;
+physical hardware acceptance is still pending.
+
+## November 4 follow-up (Claude Opus 5.5 implementation, worktree on ce7420c)
+
+- [x] Disposable Preview acceptance runner `envbank vercel accept` +
+  `scripts/e2e-live.sh vercel`; status-only fixture
+  `e2e/fixtures/vercel-acceptance`; freshness + negative-control proof; precise
+  BLOCKED codes; no automatic deletion. Provider Preview level only.
+- [x] Secure Enclave owner approval (`internal/ownerapproval`,
+  `envbank owner-approval enroll|status`), encrypted pin, required by the
+  Vercel backend for all mutations; no device-only/TTY/software fallback.
+- [x] External observation controller: no new component (no host hook exists);
+  [host checklist](../docs/computer-use-host-acceptance.md) and refusal test.
+- [x] Parent verification: full `go test ./...`, `go vet ./...`, scoped race
+  checks, non-cgo refusal checks, actual Node fixture execution, synthetic PTY
+  wrapper test, existing testlab matrix, formatting and shell syntax PASS.
+  Opus's implementation sandbox could not run Go tools; these checks were
+  executed separately by the parent agent. No live credentials were used.
+- [x] Separate Production acceptance runner `vercel accept-production`, requiring
+  the provider-verified default domain only, healthy prior fixture, fresh
+  consumption, signed promotion/rollback, honest value state and recovery.
+- [x] Opus final source review: no high/medium blocker found. Low-severity
+  suggestions were addressed: reject prior Preview runs, distinguish unavailable
+  journals, narrow rollback guidance and report the correct wrapper mode.
+- [ ] Owner: signed build with data-protection Keychain entitlement, enroll,
+  observe a real Touch ID prompt, then follow
+  [the acceptance checklist](../docs/vercel-acceptance.md).
+- [ ] Owner selects a separate disposable Production project and completes the
+  real promotion/rollback acceptance run. The runner itself is implemented.
 
 ## Remaining owner-controlled acceptance
 
@@ -71,3 +100,8 @@ expose the required global barrier/Driver registration hook. The Vercel REST
 path avoids dashboard selectors but does not solve this external integration.
 See [remaining gaps](../docs/vercel-integration-gaps.md) and
 [operator contract](../docs/vercel.md).
+
+Verification follow-up: [November 4 evidence](../docs/vercel-acceptance-verification-2026-11-04.json).
+Real Vercel API acceptance, physical owner presence and the external observation
+controller remain unqualified. Browser capture is not required for the
+owner-imported API path. The implementation is kept on the feature branch.

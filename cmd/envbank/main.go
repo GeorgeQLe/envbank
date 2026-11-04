@@ -140,6 +140,8 @@ func run(args []string) error {
 		return railwayCommand(args[1:])
 	case "vercel":
 		return vercelCommand(args[1:])
+	case "owner-approval":
+		return ownerApprovalCommand(args[1:])
 	case "access":
 		return accessCommand(args[1:])
 	case "cloudflare":
@@ -216,6 +218,9 @@ Usage:
   envbank vercel resume --manifest PATH --operation ID [auth flags]
   envbank vercel status --manifest PATH --operation ID [auth flags]
   envbank vercel rollback --manifest PATH --operation ID [auth flags]
+  envbank vercel accept --manifest PATH --plan PLAN_ID [auth flags]  # disposable Preview acceptance; see docs/vercel-acceptance.md
+  envbank owner-approval enroll [auth flags]  # owner-only, interactive; Secure Enclave key
+  envbank owner-approval status [auth flags]
   envbank mcp serve  # local stdio; workflow tools only
 
 Auth flags:

@@ -69,9 +69,15 @@ Commands below omit the normal `--config` and owner-controlled auth flags:
    record revisions and scope. Planning makes no provider writes.
 3. Owner reviews the plan and runs
    `envbank vercel approve --manifest PATH --plan PLAN_ID --source-deployment dpl_ID --health-path /api/health`.
-   Approval requires an interactive local confirmation and signs the exact plan,
-   source deployment, scope, health path and expiry with the enrolled device.
-   The default approval duration is one hour; the maximum is 24 hours.
+   Approval requires an interactive local confirmation **and** a fresh Secure
+   Enclave owner signature (Touch ID/password) over the exact plan, source
+   deployment, scope, health path, device key and expiry; the enrolled device
+   then signs the stored policy. The owner key is enrolled once with the
+   owner-only `envbank owner-approval enroll` command. There is no TTY-only or
+   software fallback: without a pinned key or on non-macOS builds, approval
+   and all Vercel mutations refuse. The default approval duration is one
+   hour; the maximum is 24 hours after the owner signature. See
+   [acceptance and hardware approval](vercel-acceptance.md).
 4. `envbank vercel apply --manifest PATH --plan PLAN_ID` starts the durable
    workflow. Continue it with
    `envbank vercel resume --manifest PATH --operation OPERATION_ID`.
@@ -82,16 +88,20 @@ owner-controlled auth configuration. This pins the backend to that manifest and
 credential scope. `envbank_setup_plan`, `envbank_workflow_start`,
 `envbank_workflow_resume`, `envbank_workflow_status`,
 `envbank_operation_evidence`, `envbank_policy_status` and
-`envbank_deployment_rollback` accept identifiers only. Without a signed,
-trusted-device approval, mutations refuse. Starting MCP without a manifest
+`envbank_deployment_rollback` accept identifiers only. Without an approval
+carrying a valid owner signature from the pinned Secure Enclave key, mutations
+refuse; a device-only signature is not enough. Starting MCP without a manifest
 retains the unconfigured backend and advertises workflows unavailable.
 
-The local approval command is an operator boundary, not proof against malicious
-same-user code or an agent granted arbitrary access to signing credentials and
-terminal controls. Keep signing/auth material outside agent-visible tools. Hardware-backed,
-non-forgeable owner approval is not implemented. The configured backend must
-retain the device signing credential for vault authentication while running;
-unused unlock-key references are dropped and close releases retained references.
+The configured backend retains the device signing credential for vault
+authentication while running, but hardware owner approval is a separate key
+it cannot use: re-signing a changed policy with the device key breaks the
+owner signature. Physical user presence has not been exercised (no key was
+enrolled during implementation). The owner pin lives in the
+passphrase-encrypted config; same-user code that also holds the passphrase can
+still substitute it, and macOS offers no remote attestation of the key.
+Keep signing/auth material outside agent-visible tools. Unused unlock-key
+references are dropped and close releases retained references.
 Go string copies are not guaranteed to be physically wiped. Do not give
 untrusted same-user code process inspection or arbitrary signing-key access.
 
@@ -159,6 +169,8 @@ responses and Vercel itself remain trusted for authoritative resource IDs and
 accepted-write semantics. Synthetic tests establish isolated behavior only;
 real-account acceptance must use a disposable project/Preview branch and an
 owner-imported token. No existing production project is an acceptance fixture.
+The owner-run `envbank vercel accept` harness implements that Preview
+acceptance (see [acceptance](vercel-acceptance.md)); it has not been run.
 
 Official API sources:
 [environment writes](https://vercel.com/docs/rest-api/projects/create-one-or-more-environment-variables),

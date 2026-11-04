@@ -39,6 +39,17 @@ func (adapter *Adapter) Identity(ctx context.Context) (provider.Identity, error)
 	return provider.Identity{Provider: ProviderName, ID: adapter.scope.TeamID + ":" + adapter.scope.ProjectID}, nil
 }
 
+// ProjectName returns the provider-reported project name after the same
+// ownership proof as Identity. Acceptance uses it to require a provider-side
+// disposable marker rather than trusting the public manifest alone.
+func (adapter *Adapter) ProjectName(ctx context.Context) (string, error) {
+	project, err := adapter.verifiedProject(ctx, "identity")
+	if err != nil {
+		return "", err
+	}
+	return project.Name, nil
+}
+
 // Bind proves ownership (and the custom environment, if any) and returns the
 // immutable target binding for this scope.
 func (adapter *Adapter) Bind(ctx context.Context) (provider.Target, error) {

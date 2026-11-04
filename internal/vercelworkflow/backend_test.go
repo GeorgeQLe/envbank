@@ -20,7 +20,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/rollout"
 )
 
-const privateFixture = "fake-private-value-no-output"
+const privateFixture = "fake-private-value-no-output-acceptance-fixture"
 
 type memoryStore struct {
 	plans     map[string]rollout.ProviderPlan
@@ -244,13 +244,13 @@ func fixture(t *testing.T, environment string) (*Backend, *memoryStore, *fakeAda
 		scope.GitBranch = "acceptance"
 	}
 	doc := &contract.Document{Digest: strings.Repeat("a", 64), Manifest: contract.Manifest{Version: 1, Bundle: "fixture", Targets: map[string]contract.Target{"vercel": {TeamID: scope.TeamID, Project: "fixture", ProjectID: scope.ProjectID, Environment: scope.Environment, GitBranch: scope.GitBranch, Services: map[string]contract.Service{"environment": {Variables: map[string]contract.Variable{"API_SECRET": {Source: "record", Record: "api"}}}}}}}}
-	s := &memoryStore{plans: map[string]rollout.ProviderPlan{}, ops: map[string]rollout.Operation{}, states: map[string]State{}, revisions: map[string]int64{}, snapshot: bundle.Snapshot{Version: 1, Bundle: "fixture", ManifestDigest: doc.Digest, PhysicalToLogical: map[string]string{"fixture/api": "api"}, Sources: map[string]bundle.SourceStatus{"api": {Source: "generated", Status: "ready"}}, RecordRevisions: map[string]int64{"api": 1}, CreatedAt: now.Format(time.RFC3339)}}
+	s := &memoryStore{plans: map[string]rollout.ProviderPlan{}, ops: map[string]rollout.Operation{}, states: map[string]State{}, revisions: map[string]int64{}, snapshot: bundle.Snapshot{Version: 1, Bundle: "fixture", ManifestDigest: doc.Digest, PhysicalToLogical: map[string]string{"fixture/api": "api"}, Sources: map[string]bundle.SourceStatus{"api": {Source: "generate", Status: "ready"}}, RecordRevisions: map[string]int64{"api": 1}, CreatedAt: now.Format(time.RFC3339)}}
 	a := &fakeAdapter{scope: scope, store: s, now: func() time.Time { return now }, current: "dpl_source"}
 	public, private, e := ed25519.GenerateKey(rand.Reader)
 	if e != nil {
 		t.Fatal(e)
 	}
-	b := &Backend{Document: doc, Adapter: a, Store: s, VaultID: "vault", DeviceID: "device", TrustedPolicyKey: public, Now: func() time.Time { return now }, Wait: func(_ context.Context, d time.Duration) error { now = now.Add(d); return nil }, Probe: func(context.Context, vercel.Deployment, string) (bool, error) { return true, nil }}
+	b := &Backend{Document: doc, Adapter: a, Store: s, VaultID: "vault", DeviceID: "device", TrustedPolicyKey: public, OwnerApprovalKey: testOwner.PublicKey(), Now: func() time.Time { return now }, Wait: func(_ context.Context, d time.Duration) error { now = now.Add(d); return nil }, Probe: func(context.Context, vercel.Deployment, string) (bool, error) { return true, nil }}
 	r, e := b.Call(context.Background(), "envbank_setup_plan", mcpserver.Request{})
 	if e != nil {
 		t.Fatal(e)
@@ -260,7 +260,7 @@ func fixture(t *testing.T, environment string) (*Backend, *memoryStore, *fakeAda
 		stage, grace = "production", "24h"
 	}
 	s.policy = lifecycle.AutomationPolicy{Version: 1, ID: PolicyID(r.PlanID), VaultID: "vault", Bundle: "fixture", ManifestDigest: doc.Digest, Environment: stage, ProviderIdentities: map[string]string{"vercel": scope.TeamID + ":" + scope.ProjectID}, CredentialClasses: []string{"vercel-environment-secret"}, Operations: []string{"stage", "activate", "verify", "rollback"}, Targets: []lifecycle.TargetPolicy{{Provider: "vercel", ProjectID: scope.ProjectID, EnvironmentID: scope.Target().EnvironmentID}}, Schedule: "manual", HealthChecks: []string{"/health"}, GracePeriod: grace, Rollback: "previous-deployment", RetryBudget: 1, ExpiresAt: now.Add(time.Hour).Format(time.RFC3339), ApprovingDevice: "device", DeploymentPlanID: r.PlanID, DeploymentSourceID: "dpl_source", DeploymentScopeFingerprint: scope.Fingerprint(), DeploymentHealthPath: "/health"}
-	if e = s.policy.Sign(private); e != nil {
+	if e = ownerSign(&s.policy, private); e != nil {
 		t.Fatal(e)
 	}
 	return b, s, a, r.PlanID, private
@@ -321,7 +321,7 @@ func TestSignedVaultToDeploymentAndRollback(t *testing.T) {
 func TestRejectsForgedPolicyAndBindingDriftBeforeSecretRead(t *testing.T) {
 	b, s, a, p, _ := fixture(t, "preview")
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
-	_ = s.policy.Sign(other)
+	_ = ownerSign(&s.policy, other)
 	r, e := b.Call(context.Background(), "envbank_workflow_start", mcpserver.Request{PlanID: p})
 	if e != nil || r.BlockerCode != "VERCEL_APPROVAL_REQUIRED" || s.reads != 0 || a.writes != 0 {
 		t.Fatal("self-signed approval accepted")
@@ -391,7 +391,7 @@ func TestPartialWriteResumeUsesOwnMetadataCheckpoint(t *testing.T) {
 	}
 	s.policy.ID = PolicyID(r.PlanID)
 	s.policy.DeploymentPlanID = r.PlanID
-	_ = s.policy.Sign(private)
+	_ = ownerSign(&s.policy, private)
 	a.failSecondOnce = true
 	r, e = b.Call(context.Background(), "envbank_workflow_start", mcpserver.Request{PlanID: r.PlanID})
 	if e != nil {
@@ -474,7 +474,7 @@ func TestApprovalRenewalCanOnlyChangeExpiry(t *testing.T) {
 				s.policy.Signature[0] ^= 1
 			}
 			if change != "signature" {
-				_ = s.policy.Sign(key)
+				_ = ownerSign(&s.policy, key)
 			}
 			r, e := b.Call(context.Background(), "envbank_workflow_resume", mcpserver.Request{OperationID: r.OperationID})
 			if e != nil {
@@ -531,10 +531,10 @@ func TestMidBatchApprovalExpiryCanRenewWithoutDuplicateWrite(t *testing.T) {
 	}
 	s.policy.ID = PolicyID(r.PlanID)
 	s.policy.DeploymentPlanID = r.PlanID
-	_ = s.policy.Sign(key)
+	_ = ownerSign(&s.policy, key)
 	a.afterWrite = func() {
 		s.policy.ExpiresAt = b.now().Add(-time.Second).Format(time.RFC3339)
-		_ = s.policy.Sign(key)
+		_ = ownerSign(&s.policy, key)
 		a.afterWrite = nil
 	}
 	r, e = b.Call(context.Background(), "envbank_workflow_start", mcpserver.Request{PlanID: r.PlanID})
@@ -546,7 +546,7 @@ func TestMidBatchApprovalExpiryCanRenewWithoutDuplicateWrite(t *testing.T) {
 		t.Fatal("expiry read the next record or made partial work terminal")
 	}
 	s.policy.ExpiresAt = b.now().Add(2 * time.Hour).Format(time.RFC3339)
-	_ = s.policy.Sign(key)
+	_ = ownerSign(&s.policy, key)
 	r, e = b.Call(context.Background(), "envbank_workflow_resume", mcpserver.Request{OperationID: r.OperationID})
 	if e != nil || r.Stage != "deployment-pending" || a.writes != 2 || s.reads != 2 {
 		t.Fatal("renewal repeated a confirmed write or could not resume")

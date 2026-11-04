@@ -17,23 +17,33 @@ feature branch. See [the operator contract](vercel.md).
 - Synthetic HTTP and workflow tests, including private-response canaries and
   recovery regressions. These do not qualify Vercel's real account behavior.
 
+- Opt-in disposable Preview acceptance runner (`envbank vercel accept`,
+  `scripts/e2e-live.sh vercel`) with a status-only fixture and freshness
+  proof; refuses without owner setup. Synthetic/loopback tests only.
+- Secure Enclave P-256 owner approval with fresh user presence, owner-only
+  enrollment, encrypted pin, canonical low-S signatures and no fallback.
+  Cryptographic and cgo compile checks use synthetic software-signers only; no
+  real key enrolled or physical prompt observed.
+
 ## Still unqualified
 
 1. Real API acceptance on an owner-selected disposable project and exact Preview
-   branch: metadata shapes, scoped Secret writes, fresh-variable consumption,
-   operation lookup and protected deployment health. Staged Production promotion
-   and rollback need a separate disposable production target. No existing app or
-   shared database is an acceptance fixture.
+   branch. The runner exists ([acceptance](vercel-acceptance.md)) but has not
+   been run. A separate `vercel accept-production` runner checks staged
+   promotion, consumption and rollback, with a provider-side default-domain
+   guard. It likewise needs a separate disposable target and has not run live. No
+   existing app or shared database is an acceptance fixture.
 2. Real credential import remains owner-controlled. Agents must not read real
    credentials, `.env.local`, `.release-config`, or pull environment variables.
    Owner uses private stdin/Keychain setup; no real import was performed here.
-3. The local approval prompt and enrolled-device signature are not hardware
-   proof of a human against arbitrary same-user code. Keep signing credentials
-   outside agent tools. A non-exportable hardware approval path needs separate
-   implementation/physical acceptance before claiming that stronger boundary.
+3. Hardware owner approval is implemented but physically unaccepted: it needs a
+   code-signed build with a data-protection Keychain entitlement, owner
+   enrollment and an owner-observed Touch ID/password prompt. The pin is
+   passphrase-protected, not hardware-attested.
 4. Browser capture of show-once provider keys remains blocked on a trusted host
    controlling every observation/input route. The current CUA interface has no
-   documented global barrier/Driver registration hook. Reference-controller and
+   documented global barrier/Driver registration hook. See the
+   [host checklist](computer-use-host-acceptance.md). Reference-controller and
    fake-site tests do not qualify the installed external computer-use host.
 
 ## Provider limits that implementation cannot remove

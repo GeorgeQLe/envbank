@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
@@ -47,7 +48,60 @@ type AutomationPolicy struct {
 	ExpiresAt                  string            `json:"expires_at"`
 	ApprovingDevice            string            `json:"approving_device"`
 	PublicKey                  []byte            `json:"public_key"`
-	Signature                  []byte            `json:"signature"`
+	// OwnerApproval is an optional, separately verified owner signature. It is
+	// covered by the device Signature but is never verified by Validate: callers
+	// that require hardware owner approval must verify it against an
+	// owner-pinned key (see internal/ownerapproval). Omitted when absent so
+	// existing device-only policies keep byte-identical signing input.
+	OwnerApproval *OwnerApproval `json:"owner_approval,omitempty"`
+	Signature     []byte         `json:"signature"`
+}
+
+const (
+	OwnerApprovalVersion   = 1
+	OwnerApprovalAlgorithm = "ecdsa-p256-sha256"
+	// OwnerApprovalPresence names the key attributes the owner-only enrollment
+	// command requested and the signer re-checks: a non-exportable Secure
+	// Enclave P-256 key whose every use requires fresh user presence. A remote
+	// verifier cannot attest this; it trusts the owner-pinned public key.
+	OwnerApprovalPresence = "secure-enclave-user-presence"
+	ownerStatementDomain  = "envbank.owner-approval.v1"
+)
+
+// OwnerApproval is a P-256 signature over OwnerStatement. Signature is strict
+// DER with low-S so the stored evidence has exactly one valid encoding.
+type OwnerApproval struct {
+	Version   int    `json:"version"`
+	Algorithm string `json:"algorithm"`
+	Presence  string `json:"presence"`
+	KeyID     string `json:"key_id"`
+	PublicKey []byte `json:"public_key"`
+	SignedAt  string `json:"signed_at"`
+	Signature []byte `json:"signature"`
+}
+
+// OwnerStatement is the exact canonical message the owner key signs. It binds
+// every policy field, including the approving device public key, plus the
+// owner key identity/attributes and signing time. It excludes only the device
+// signature (computed afterwards over the owner approval) and the owner
+// signature itself. encoding/json output for these types is deterministic:
+// struct fields keep declaration order and map keys are sorted.
+func (policy AutomationPolicy) OwnerStatement(owner OwnerApproval) ([]byte, error) {
+	if len(policy.PublicKey) != ed25519.PublicKeySize {
+		return nil, errors.New("owner statement requires the approving device public key")
+	}
+	policy.Signature = nil
+	policy.OwnerApproval = nil
+	owner.Signature = nil
+	body, err := json.Marshal(struct {
+		Domain string           `json:"domain"`
+		Policy AutomationPolicy `json:"policy"`
+		Owner  OwnerApproval    `json:"owner"`
+	}{ownerStatementDomain, policy, owner})
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
 }
 
 func (policy AutomationPolicy) signingBytes() ([]byte, error) {
@@ -68,7 +122,13 @@ func (policy *AutomationPolicy) Sign(private ed25519.PrivateKey) error {
 	if len(private) != ed25519.PrivateKeySize {
 		return errors.New("policy signing key is invalid")
 	}
-	policy.PublicKey = append([]byte(nil), private.Public().(ed25519.PublicKey)...)
+	public := private.Public().(ed25519.PublicKey)
+	// An owner approval binds the device public key. Re-signing with another
+	// device key would silently detach it, so refuse instead.
+	if policy.OwnerApproval != nil && len(policy.PublicKey) != 0 && !bytes.Equal(policy.PublicKey, public) {
+		return errors.New("policy owner approval is bound to a different device key")
+	}
+	policy.PublicKey = append([]byte(nil), public...)
 	raw, err := policy.signingBytes()
 	if err != nil {
 		return err

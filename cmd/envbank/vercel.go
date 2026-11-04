@@ -19,6 +19,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/keychain"
 	"github.com/GeorgeQLe/envbank/internal/lifecycle"
 	"github.com/GeorgeQLe/envbank/internal/mcpserver"
+	"github.com/GeorgeQLe/envbank/internal/ownerapproval"
 	"github.com/GeorgeQLe/envbank/internal/provider/vercel"
 	"github.com/GeorgeQLe/envbank/internal/rollout"
 	"github.com/GeorgeQLe/envbank/internal/secure"
@@ -32,6 +33,10 @@ const vercelCredentialService = "com.envbank.provider.vercel.v1"
 var vercelCredentialStore keychain.Store = keychain.SystemStore{}
 var vercelAdapterOptions = func() vercel.Options { return vercel.Options{} }
 var vercelOwnerConfirmation = confirmVercelOwner
+
+// vercelOwnerSigner is the Secure Enclave signer in production. Tests replace
+// it with a software signer; production code never imports that signer.
+var vercelOwnerSigner = ownerapproval.OpenSecureEnclave
 
 type vercelBinding struct {
 	Scope        vercel.Scope `json:"scope"`
@@ -50,10 +55,10 @@ func vercelCredentialAccount(vaultID, bundleID string) string {
 
 func vercelCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("Vercel subcommand required: bind, plan, approve, apply, resume, status, rollback")
+		return errors.New("Vercel subcommand required: bind, plan, approve, apply, resume, status, rollback, accept, accept-production")
 	}
 	switch args[0] {
-	case "bind", "plan", "approve", "apply", "resume", "status", "rollback":
+	case "bind", "plan", "approve", "apply", "resume", "status", "rollback", "accept", "accept-production":
 	default:
 		return errors.New("unknown Vercel subcommand")
 	}
@@ -130,6 +135,12 @@ func vercelCommand(args []string) error {
 		fmt.Printf("bundle: %s\nprovider: vercel\nproject id: %s\nenvironment: %s\nbranch: %s\nstatus: bound\n", document.Manifest.Bundle, scope.ProjectID, scope.Environment, scope.GitBranch)
 		return nil
 	}
+	if args[0] == "accept" {
+		return vercelAccept(auth, *manifest, *planID)
+	}
+	if args[0] == "accept-production" {
+		return vercelAcceptProduction(auth, *manifest, *planID)
+	}
 	backend, api, secrets, closeBackend, e := openVercelBackend(auth, *manifest)
 	if e != nil {
 		return e
@@ -178,7 +189,21 @@ func vercelCommand(args []string) error {
 				return errors.New("Vercel approval source is not current production")
 			}
 		}
-		prompt := fmt.Sprintf("Approve Vercel project %s, %s branch %q, %d secret writes, source %s, health %s and production promotion/rollback where applicable for %s? Type approve: ", scope.ProjectID, scope.Environment, scope.GitBranch, len(plan.Actions), *source, *health, *expiry)
+		// The owner pin comes only from the passphrase-encrypted config written
+		// by the owner-only enrollment command, never from flags or requests.
+		pin := backend.OwnerApprovalKey
+		if !ownerapproval.ValidPublicKey(pin) {
+			return errors.New("hardware owner approval key is not enrolled; the owner must run envbank owner-approval enroll")
+		}
+		signer, e := vercelOwnerSigner(pin)
+		if e != nil {
+			return errors.New("hardware owner approval unavailable on this host; Vercel approval refused (no TTY or software fallback)")
+		}
+		review := fmt.Sprintf("Plan: %s\nManifest: %s\nTeam: %s\n", plan.ID(), plan.ManifestDigest, scope.TeamID)
+		for _, action := range plan.Actions {
+			review += fmt.Sprintf("  %s <- %s (revision %d)\n", action.Name, action.Record, action.ExpectedRecordRevision)
+		}
+		prompt := review + fmt.Sprintf("Approve Vercel project %s, %s branch %q, %d secret writes, source %s, health %s and production promotion/rollback where applicable for %s? Type approve: ", scope.ProjectID, scope.Environment, scope.GitBranch, len(plan.Actions), *source, *health, *expiry)
 		if e = vercelOwnerConfirmation(prompt); e != nil {
 			return e
 		}
@@ -186,14 +211,16 @@ func vercelCommand(args []string) error {
 		if scope.Environment == "production" {
 			environment, grace = "production", "24h"
 		}
-		policy := lifecycle.AutomationPolicy{Version: lifecycle.PolicyVersion, ID: vercelworkflow.PolicyID(plan.ID()), VaultID: api.Config.VaultID, Bundle: plan.Bundle, ManifestDigest: plan.ManifestDigest, Environment: environment, ProviderIdentities: map[string]string{"vercel": scope.TeamID + ":" + scope.ProjectID}, CredentialClasses: []string{"vercel-environment-secret"}, Operations: []string{"stage", "activate", "verify", "rollback"}, Targets: []lifecycle.TargetPolicy{{Provider: "vercel", ProjectID: scope.ProjectID, EnvironmentID: scope.Target().EnvironmentID}}, Schedule: "manual", HealthChecks: []string{*health}, GracePeriod: grace, Rollback: "previous-deployment", RetryBudget: 1, ExpiresAt: time.Now().UTC().Add(*expiry).Format(time.RFC3339), ApprovingDevice: api.Config.DeviceID, DeploymentPlanID: plan.ID(), DeploymentSourceID: *source, DeploymentScopeFingerprint: scope.Fingerprint(), DeploymentHealthPath: *health}
+		signedAt := time.Now().UTC().Truncate(time.Second)
+		policy := lifecycle.AutomationPolicy{Version: lifecycle.PolicyVersion, ID: vercelworkflow.PolicyID(plan.ID()), VaultID: api.Config.VaultID, Bundle: plan.Bundle, ManifestDigest: plan.ManifestDigest, Environment: environment, ProviderIdentities: map[string]string{"vercel": scope.TeamID + ":" + scope.ProjectID}, CredentialClasses: []string{"vercel-environment-secret"}, Operations: []string{"stage", "activate", "verify", "rollback"}, Targets: []lifecycle.TargetPolicy{{Provider: "vercel", ProjectID: scope.ProjectID, EnvironmentID: scope.Target().EnvironmentID}}, Schedule: "manual", HealthChecks: []string{*health}, GracePeriod: grace, Rollback: "previous-deployment", RetryBudget: 1, ExpiresAt: signedAt.Add(*expiry).Format(time.RFC3339), ApprovingDevice: api.Config.DeviceID, DeploymentPlanID: plan.ID(), DeploymentSourceID: *source, DeploymentScopeFingerprint: scope.Fingerprint(), DeploymentHealthPath: *health}
 		private, e := secure.Decode(secrets.SigningPrivate)
 		if e != nil || len(private) != ed25519.PrivateKeySize {
 			return errors.New("approval signing key unavailable")
 		}
 		defer clearBytes(private)
-		if e = policy.Sign(ed25519.PrivateKey(private)); e != nil {
-			return errors.New("approval signature failed")
+		reason := fmt.Sprintf("approve EnvBank Vercel plan %s for %s %s", plan.ID(), scope.ProjectID, scope.Environment)
+		if e = ownerapproval.Approve(ctx, &policy, ed25519.PrivateKey(private), signer, pin, signedAt, reason); e != nil {
+			return errors.New("hardware owner approval was not completed; nothing was stored")
 		}
 		store := backend.Store.(*vercelworkflow.VaultStore)
 		expected := int64(0)
@@ -212,6 +239,15 @@ func vercelCommand(args []string) error {
 			}
 			if previous.DeploymentPlanID != policy.DeploymentPlanID || previous.DeploymentSourceID != policy.DeploymentSourceID || previous.DeploymentHealthPath != policy.DeploymentHealthPath || previous.DeploymentScopeFingerprint != policy.DeploymentScopeFingerprint {
 				return errors.New("existing Vercel approval has different bindings")
+			}
+			// Renewal keeps the same owner key. A legacy device-only approval may
+			// be replaced only before an operation journal pins it; an in-flight
+			// legacy operation needs a new plan, never a silent upgrade.
+			if previous.OwnerApproval == nil && continuing {
+				return errors.New("existing Vercel operation was approved without hardware owner proof; create and approve a new plan")
+			}
+			if previous.OwnerApproval != nil && !bytes.Equal(previous.OwnerApproval.PublicKey, pin) {
+				return errors.New("existing Vercel approval was signed by a different owner key")
 			}
 			expected = object.Revision
 		} else {
@@ -270,23 +306,30 @@ func confirmVercelOwner(prompt string) error {
 }
 
 func openVercelBackend(auth *authFlags, manifestPath string) (*vercelworkflow.Backend, *client.API, secure.DeviceSecrets, func(), error) {
+	backend, api, secrets, closeBackend, _, e := openVercelBackendWith(auth, manifestPath, false)
+	return backend, api, secrets, closeBackend, e
+}
+
+// openVercelBackendWith optionally builds the acceptance fixture probe from
+// the same owner-bound protection-bypass credential as the health probe.
+func openVercelBackendWith(auth *authFlags, manifestPath string, acceptance bool) (*vercelworkflow.Backend, *client.API, secure.DeviceSecrets, func(), vercelworkflow.AcceptanceProbe, error) {
 	var empty secure.DeviceSecrets
 	noop := func() {}
 	document, e := loadBundleManifest(manifestPath)
 	if e != nil {
-		return nil, nil, empty, noop, e
+		return nil, nil, empty, noop, nil, e
 	}
 	scope, e := vercelworkflow.ScopeForManifest(document)
 	if e != nil {
-		return nil, nil, empty, noop, e
+		return nil, nil, empty, noop, nil, e
 	}
 	api, secrets, e := unlockedAPI(auth)
 	if e != nil {
-		return nil, nil, empty, noop, e
+		return nil, nil, empty, noop, nil, e
 	}
 	vaultKey, e := requireVaultKey(secrets)
 	if e != nil {
-		return nil, nil, empty, noop, e
+		return nil, nil, empty, noop, nil, e
 	}
 	// Only the signing key is needed after unlocking. Go strings cannot be
 	// physically wiped; drop unused references and release all on close.
@@ -295,7 +338,7 @@ func openVercelBackend(auth *authFlags, manifestPath string) (*vercelworkflow.Ba
 	raw, e := vercelCredentialStore.Get(vercelCredentialService, vercelCredentialAccount(api.Config.VaultID, document.Manifest.Bundle), "Use the exact bound Vercel project credential")
 	if e != nil {
 		clearBytes(vaultKey)
-		return nil, nil, empty, noop, errors.New("Vercel credential unavailable; owner must run vercel bind")
+		return nil, nil, empty, noop, nil, errors.New("Vercel credential unavailable; owner must run vercel bind")
 	}
 	defer clearBytes(raw)
 	var binding vercelBinding
@@ -303,7 +346,7 @@ func openVercelBackend(auth *authFlags, manifestPath string) (*vercelworkflow.Ba
 	decoder.DisallowUnknownFields()
 	if len(raw) > 32<<10 || decoder.Decode(&binding) != nil || decoder.Decode(&struct{}{}) != io.EOF || binding.Scope != scope {
 		clearBytes(vaultKey)
-		return nil, nil, empty, noop, errors.New("Vercel credential scope changed; owner must rebind")
+		return nil, nil, empty, noop, nil, errors.New("Vercel credential scope changed; owner must rebind")
 	}
 	token := []byte(binding.Token)
 	adapter, e := vercel.New(token, scope, vercelAdapterOptions())
@@ -311,30 +354,144 @@ func openVercelBackend(auth *authFlags, manifestPath string) (*vercelworkflow.Ba
 	binding.Token = ""
 	if e != nil {
 		clearBytes(vaultKey)
-		return nil, nil, empty, noop, errors.New("Vercel credential binding invalid")
+		return nil, nil, empty, noop, nil, errors.New("Vercel credential binding invalid")
 	}
 	public, e := secure.Decode(api.Config.SigningPublic)
 	if e != nil || len(public) != ed25519.PublicKeySize {
 		adapter.Close()
 		clearBytes(vaultKey)
-		return nil, nil, empty, noop, errors.New("Vercel approval identity invalid")
+		return nil, nil, empty, noop, nil, errors.New("Vercel approval identity invalid")
 	}
 	store := &vercelworkflow.VaultStore{EncryptedStore: &rollout.EncryptedStore{API: api, VaultKey: vaultKey}, Lifecycle: &lifecycle.VaultStore{API: api, VaultKey: vaultKey}}
 	probe, closeProbe, e := vercelworkflow.NewHealthProbe(scope, []byte(binding.HealthBypass))
-	binding.HealthBypass = ""
 	if e != nil {
+		binding.HealthBypass = ""
 		adapter.Close()
 		clearBytes(vaultKey)
-		return nil, nil, empty, noop, errors.New("Vercel health credential binding invalid")
+		return nil, nil, empty, noop, nil, errors.New("Vercel health credential binding invalid")
 	}
-	backend := &vercelworkflow.Backend{Document: document, Adapter: adapter, Store: store, VaultID: api.Config.VaultID, DeviceID: api.Config.DeviceID, TrustedPolicyKey: ed25519.PublicKey(public), Probe: probe}
+	var acceptanceProbe vercelworkflow.AcceptanceProbe
+	closeAcceptance := func() {}
+	if acceptance {
+		acceptanceProbe, closeAcceptance, e = vercelAcceptanceProbe(scope, []byte(binding.HealthBypass))
+		if e != nil {
+			binding.HealthBypass = ""
+			closeProbe()
+			adapter.Close()
+			clearBytes(vaultKey)
+			return nil, nil, empty, noop, nil, errors.New("Vercel health credential binding invalid")
+		}
+	}
+	binding.HealthBypass = ""
+	backend := &vercelworkflow.Backend{Document: document, Adapter: adapter, Store: store, VaultID: api.Config.VaultID, DeviceID: api.Config.DeviceID, TrustedPolicyKey: ed25519.PublicKey(public), OwnerApprovalKey: api.Config.OwnerApprovalKey(), Probe: probe}
 	return backend, api, secrets, func() {
+		closeAcceptance()
 		closeProbe()
 		adapter.Close()
 		clearBytes(vaultKey)
 		api.Secrets = secure.DeviceSecrets{}
 		secrets = secure.DeviceSecrets{}
-	}, nil
+	}, acceptanceProbe, nil
+}
+
+// vercelAcceptanceProbe is replaced by tests with a loopback fixture.
+var vercelAcceptanceProbe = vercelworkflow.NewAcceptanceProbe
+
+// vercelAcceptanceForbiddenEnvironment lists provider credential variables
+// that must never carry acceptance credentials; the token stays in Keychain.
+var vercelAcceptanceForbiddenEnvironment = []string{"VERCEL_TOKEN", "VERCEL_API_TOKEN", "VERCEL_ACCESS_TOKEN", "VERCEL_AUTOMATION_BYPASS_SECRET", "VERCEL_OIDC_TOKEN", "ENVBANK_VERCEL_TOKEN"}
+
+// vercelAccept runs the disposable Preview acceptance through the configured
+// workflow. Authorization and target checks happen before unlocking anything.
+// It never approves, binds, imports or deletes; the owner does those steps.
+func vercelAccept(auth *authFlags, manifestPath, planID string) error {
+	if os.Getenv("ENVBANK_LIVE_ACCEPTANCE") != "1" {
+		return errors.New("Vercel acceptance BLOCKED: EXPLICIT_AUTHORIZATION_REQUIRED (set ENVBANK_LIVE_ACCEPTANCE=1)")
+	}
+	for _, name := range vercelAcceptanceForbiddenEnvironment {
+		if os.Getenv(name) != "" {
+			return errors.New("Vercel acceptance BLOCKED: CREDENTIAL_ENVIRONMENT_FORBIDDEN")
+		}
+	}
+	target, e := vercelworkflow.ParseAcceptanceTarget(os.Getenv("ENVBANK_VERCEL_ACCEPTANCE_TARGET"))
+	if e != nil {
+		return errors.New("Vercel acceptance BLOCKED: DISPOSABLE_TARGET_REQUIRED (ENVBANK_VERCEL_ACCEPTANCE_TARGET=disposable:team_ID/prj_ID/envbank-acceptance-NAME@envbank-acceptance-BRANCH)")
+	}
+	if planID == "" {
+		return errors.New("Vercel acceptance BLOCKED: OWNER_APPROVED_PLAN_REQUIRED (--plan)")
+	}
+	document, e := loadBundleManifest(manifestPath)
+	if e != nil {
+		return e
+	}
+	if vercelworkflow.CheckAcceptanceManifest(document, target) != nil {
+		return errors.New("Vercel acceptance BLOCKED: ACCEPTANCE_MANIFEST_NOT_DISPOSABLE")
+	}
+	backend, _, _, closeBackend, probe, e := openVercelBackendWith(auth, manifestPath, true)
+	if e != nil {
+		return e
+	}
+	defer closeBackend()
+	ctx, stop := shutdownSignalContext()
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+	defer cancel()
+	receipt := (vercelworkflow.AcceptanceRunner{Backend: backend, Target: target, Probe: probe}).Run(ctx, planID)
+	if e = json.NewEncoder(os.Stdout).Encode(receipt); e != nil {
+		return errors.New("Vercel acceptance receipt could not be written")
+	}
+	if receipt.Result != "PASS" {
+		return fmt.Errorf("Vercel acceptance BLOCKED: %s", receipt.Blocker)
+	}
+	return nil
+}
+
+// vercelAcceptProduction runs disposable Production promotion/rollback
+// acceptance through the configured workflow and signed rollback path. Every
+// authorization, credential-environment, target-string and manifest check
+// happens before anything is unlocked. It never approves, binds, imports,
+// creates, deletes or changes project settings.
+func vercelAcceptProduction(auth *authFlags, manifestPath, planID string) error {
+	if os.Getenv("ENVBANK_LIVE_ACCEPTANCE") != "1" {
+		return errors.New("Vercel production acceptance BLOCKED: EXPLICIT_AUTHORIZATION_REQUIRED (set ENVBANK_LIVE_ACCEPTANCE=1)")
+	}
+	for _, name := range vercelAcceptanceForbiddenEnvironment {
+		if os.Getenv(name) != "" {
+			return errors.New("Vercel production acceptance BLOCKED: CREDENTIAL_ENVIRONMENT_FORBIDDEN")
+		}
+	}
+	target, e := vercelworkflow.ParseProductionAcceptanceTarget(os.Getenv("ENVBANK_VERCEL_ACCEPTANCE_TARGET"))
+	if e != nil {
+		return errors.New("Vercel production acceptance BLOCKED: DISPOSABLE_PRODUCTION_TARGET_REQUIRED (ENVBANK_VERCEL_ACCEPTANCE_TARGET=disposable-production:team_ID/prj_ID/envbank-acceptance-NAME)")
+	}
+	if planID == "" {
+		return errors.New("Vercel production acceptance BLOCKED: OWNER_APPROVED_PLAN_REQUIRED (--plan)")
+	}
+	document, e := loadBundleManifest(manifestPath)
+	if e != nil {
+		return e
+	}
+	if vercelworkflow.CheckProductionAcceptanceManifest(document, target) != nil {
+		return errors.New("Vercel production acceptance BLOCKED: ACCEPTANCE_MANIFEST_NOT_DISPOSABLE")
+	}
+	backend, _, _, closeBackend, probe, e := openVercelBackendWith(auth, manifestPath, true)
+	if e != nil {
+		return e
+	}
+	defer closeBackend()
+	ctx, stop := shutdownSignalContext()
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+	defer cancel()
+	// Health reuses the configured, owner-bound workflow health probe.
+	receipt := (vercelworkflow.ProductionAcceptanceRunner{Backend: backend, Target: target, Probe: probe}).Run(ctx, planID)
+	if e = json.NewEncoder(os.Stdout).Encode(receipt); e != nil {
+		return errors.New("Vercel production acceptance receipt could not be written")
+	}
+	if receipt.Result != "PASS" {
+		return fmt.Errorf("Vercel production acceptance BLOCKED: %s", receipt.Blocker)
+	}
+	return nil
 }
 
 func vercelMCP(args []string) error {

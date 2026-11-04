@@ -75,7 +75,9 @@ A trusted controller supplies a `Driver` through bootstrap code:
 The current computer-use API exposes no documented way to install this global
 barrier or a qualified driver. Thus actual controller integration remains a
 concrete external blocker. Do not add an extension checkbox or agent-provided
-"paused" acknowledgment as a substitute.
+"paused" acknowledgment as a substitute. The exact route-ownership and
+acceptance checklist for a future host is in
+[computer-use host acceptance](computer-use-host-acceptance.md).
 
 ## Operation and failure behavior
 

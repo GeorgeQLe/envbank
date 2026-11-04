@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,8 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/GeorgeQLe/envbank/internal/lifecycle"
 	"github.com/GeorgeQLe/envbank/internal/mcpserver"
+	"github.com/GeorgeQLe/envbank/internal/ownerapproval"
+	"github.com/GeorgeQLe/envbank/internal/ownerapproval/ownerapprovaltest"
 	"github.com/GeorgeQLe/envbank/internal/provider/vercel"
 	"github.com/GeorgeQLe/envbank/internal/vaultobject"
 )
@@ -100,9 +105,39 @@ func TestVercelCLIBindPlanApprovalAndScopePin(t *testing.T) {
 	if e := json.Unmarshal([]byte(run("plan", nil, "")), &result); e != nil || result.PlanID == "" {
 		t.Fatal("plan unavailable")
 	}
+	approveArgs := append([]string{"vercel", "approve", "--manifest", path, "--plan", result.PlanID, "--source-deployment", "dpl_source", "--health-path", "/health"}, auth...)
+	// Without an owner-enrolled hardware key, approval refuses outright: no
+	// TTY-only or device-key fallback, and no signer is opened.
+	owner := ownerapprovaltest.New("cli-owner")
+	previousSigner := vercelOwnerSigner
+	opened := 0
+	vercelOwnerSigner = func(pin []byte) (ownerapproval.Signer, error) {
+		opened++
+		if !bytes.Equal(pin, owner.PublicKey()) {
+			t.Error("signer opened for an unpinned key")
+		}
+		return owner, nil
+	}
+	defer func() { vercelOwnerSigner = previousSigner }()
+	if _, _, e := captureRunWithStdin(t, approveArgs, ""); e == nil || opened != 0 || prompted {
+		t.Fatal("approval proceeded without a pinned hardware owner key")
+	}
+	pinOwnerKey(t, fixture.firstConfigPath, fixture.passphrasePath, owner.PublicKey())
+	// An unavailable hardware signer (non-macOS/unsigned build) refuses too.
+	vercelOwnerSigner = func([]byte) (ownerapproval.Signer, error) { return nil, ownerapproval.ErrUnavailable }
+	if _, _, e := captureRunWithStdin(t, approveArgs, ""); e == nil || prompted {
+		t.Fatal("approval fell back when hardware signing was unavailable")
+	}
+	vercelOwnerSigner = func(pin []byte) (ownerapproval.Signer, error) {
+		opened++
+		if !bytes.Equal(pin, owner.PublicKey()) {
+			t.Error("signer opened for an unpinned key")
+		}
+		return owner, nil
+	}
 	run("approve", []string{"--plan", result.PlanID, "--source-deployment", "dpl_source", "--health-path", "/health"}, "")
-	if !prompted || mutations != 0 {
-		t.Fatal("approval did not review exact scope or planning mutated provider")
+	if !prompted || mutations != 0 || opened != 1 || owner.Calls != 1 || !strings.Contains(owner.Reasons[0], "prj_fixture") {
+		t.Fatal("approval did not review exact scope, request one owner signature, or planning mutated provider")
 	}
 	api, key := unlockedFixtureAPI(t, fixture.firstConfigPath, fixture.passphrasePath)
 	objects, e := api.ListObjects(key)
@@ -116,6 +151,10 @@ func TestVercelCLIBindPlanApprovalAndScopePin(t *testing.T) {
 		}
 		if object.Kind == vaultobject.KindAutomationPolicy {
 			policies++
+			var stored lifecycle.AutomationPolicy
+			if json.Unmarshal(object.Payload, &stored) != nil || ownerapproval.Verify(stored, owner.PublicKey(), time.Now()) != nil {
+				t.Fatal("stored approval lacks a valid owner-pinned hardware signature")
+			}
 		}
 		if strings.Contains(string(object.Payload), "fake-vercel-cli-credential") {
 			t.Fatal("provider credential entered object schema")
