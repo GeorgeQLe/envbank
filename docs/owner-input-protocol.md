@@ -1,7 +1,22 @@
 # Owner-input provider protocol v1 (`envbank.owner-input/v1`)
 
-Status (November 4, 2026): **specification; client and provider in progress;
-not qualified.**
+Status (November 4, 2026):
+
+- **Broker client implemented** (`internal/ownerinput`, `envbank agent-broker --owner-input chromux`).
+  - It verifies the provider's code signature from the connection's audit
+    token: pinned Team ID and identifier, plus hardened runtime.
+  - It pairs once per session: the owner confirms the 6-digit code in the
+    terminal.
+  - It pins the paired build's cdhash for the rest of the session.
+  - It falls back to the terminal when the provider is unavailable or
+    unverified.
+
+  The signature check is tested against real processes: a Developer ID signed
+  binary is accepted, while a wrong Team ID, a wrong identifier and an ad-hoc
+  signature are refused.
+- **Provider requester verification:** in progress on the provider side.
+- **Not qualified** until a signed, installed provider passes the
+  qualification below.
 
 A desktop host app (the *provider*) collects owner secrets: the vault
 passphrase, the recovery passphrase, and later values for ingest. It hands each
@@ -43,6 +58,12 @@ that reads `LOCAL_PEERPID` and validates the requester's code signature: a
 pinned EnvBank Team ID with hardened runtime. Until requester authentication
 is implemented, the provider must stay disabled for real secrets. An
 on-screen request code is advisory only.
+
+**Key custody.** Code signing is only as strong as the signing key. If the
+Keychain grants `codesign` "Always Allow", a same-user agent can sign an
+impostor with the owner's own Team ID. Approve signing prompts one at a
+time. The per-session cdhash pin makes a newly signed impostor fail anyway,
+unless it is the build the owner paired with.
 
 ## Provider authentication (broker side, before sending anything)
 

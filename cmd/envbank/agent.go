@@ -15,6 +15,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/agentbroker"
 	"github.com/GeorgeQLe/envbank/internal/client"
 	"github.com/GeorgeQLe/envbank/internal/mcpserver"
+	"github.com/GeorgeQLe/envbank/internal/ownerinput"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/setup"
 	"golang.org/x/term"
@@ -103,6 +104,10 @@ func agentBrokerCommand(args []string) error {
 	socket := fs.String("socket", agentbroker.DefaultSocketPath(), "Unix socket agents connect to")
 	idle := fs.Duration("idle-lock", 30*time.Minute, "lock (exit) after this long without requests")
 	lifetime := fs.Duration("max-lifetime", 12*time.Hour, "lock (exit) after this long regardless of activity")
+	ownerInput := fs.String("owner-input", "terminal", "where the owner types secrets: terminal or chromux (verified, paired desktop provider)")
+	oiTeam := fs.String("owner-input-team", "NC56VXK48K", "Apple Team ID the desktop provider must be signed by")
+	oiIdent := fs.String("owner-input-identifier", "party.gblock.chromux.v2.desktop", "code-signing identifier of the desktop provider")
+	oiSocket := fs.String("owner-input-socket", ownerinput.DefaultSocketPath(), "desktop provider socket")
 	auth := addAuthFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -110,9 +115,26 @@ func agentBrokerCommand(args []string) error {
 	if fs.NArg() != 0 || *idle < time.Minute || *lifetime < *idle {
 		return errors.New("usage: envbank agent-broker [--socket PATH] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]")
 	}
-	prompter, err := agentbroker.NewTerminalPrompter(os.Stdin, os.Stdout)
+	terminal, err := agentbroker.NewTerminalPrompter(os.Stdin, os.Stdout)
 	if err != nil {
 		return err
+	}
+	prompter := &ownerSurface{TerminalPrompter: terminal}
+	switch *ownerInput {
+	case "terminal":
+	case "chromux":
+		p := &ownerinput.Provider{Socket: *oiSocket, TeamID: *oiTeam, Identifier: *oiIdent}
+		pctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		err := pairProvider(pctx, p, terminal)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "Chromux secure input not paired (%v); secrets will be typed in this terminal.\n", err)
+		} else {
+			prompter.provider = p
+			fmt.Println("Chromux secure input paired for this session.")
+		}
+	default:
+		return errors.New("--owner-input must be terminal or chromux")
 	}
 	state, err := term.GetState(int(os.Stdin.Fd()))
 	if err != nil {

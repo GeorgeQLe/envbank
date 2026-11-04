@@ -33,6 +33,13 @@ func NewTerminalPrompter(in *os.File, out io.Writer) (*TerminalPrompter, error) 
 	return &TerminalPrompter{In: in, Out: out, readPassword: term.ReadPassword}, nil
 }
 
+// NewTestTerminalPrompter builds a prompter over arbitrary files with an
+// injected password reader (for tests in other packages; production code uses
+// NewTerminalPrompter, which requires a real terminal).
+func NewTestTerminalPrompter(in *os.File, out io.Writer, readPassword func(int) ([]byte, error)) *TerminalPrompter {
+	return &TerminalPrompter{In: in, Out: out, readPassword: readPassword}
+}
+
 // Sanitize renders agent-supplied text as a single visible line: control
 // characters (including ESC) and non-printing runes become \x escapes.
 //
