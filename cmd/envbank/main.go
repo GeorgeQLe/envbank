@@ -329,7 +329,9 @@ func mcpCommand(args []string) error {
 	if len(args) == 0 || args[0] != "serve" {
 		return errors.New("mcp subcommand is required (supported: serve)")
 	}
-	if len(args)>1{return vercelMCP(args[1:])}
+	if len(args) > 1 {
+		return vercelMCP(args[1:])
+	}
 	return (mcpserver.Server{}).Serve(context.Background(), os.Stdin, os.Stdout)
 }
 
