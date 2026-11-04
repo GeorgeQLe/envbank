@@ -102,6 +102,23 @@ only when the outcome is `entered`, `value` (data). Possible outcomes:
 Pairing replies also carry `provider` (a dictionary of the UI's
 self-report) and `service_cdhash` (string).
 
+### Service ↔ UI messages (implemented in the provider)
+
+- **Hello.** The UI connects to `…owner-input.ui` and sends `{v, kind:"ui_hello"}`.
+  The service replies `{v, kind:"ui_hello", outcome:"registered", service_cdhash}`.
+  The newest verified UI wins, and a request in flight on the old UI ends
+  `cancelled`.
+- **Forwarding.** The service forwards the broker's dictionary plus `route_id`
+  (uint64). The UI replies `{v, nonce, route_id, outcome[, value][, provider]}`.
+  The service validates this reply, then builds a **fresh** broker reply
+  containing only `v`, `nonce`, `outcome`, `value`, `provider` and
+  `service_cdhash`; `route_id` never reaches the broker.
+- **Cancel.** The service sends `{v, kind:"cancel", route_id}` to the UI, with
+  no reply expected.
+- **Other details.** `service_cdhash` is present on every pairing reply. A
+  request with a malformed nonce gets `declined` with no `nonce`, which the
+  broker treats as a protocol error.
+
 ## Broker behavior
 
 - **Pairing.** Pair once per session, using the 6-digit code shown in
