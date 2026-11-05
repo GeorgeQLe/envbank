@@ -133,7 +133,8 @@ func agentBrokerCommand(args []string) error {
 			return errors.New("--owner-input chromux has not passed its installed-build no-leak qualification yet; add --owner-input-unqualified to use it anyway (or use the terminal)")
 		}
 		p := &ownerinput.XPCProvider{Service: *oiService, TeamID: *oiTeam, Identifier: *oiIdent}
-		pctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		// The owner compares the code in Chromux with this terminal; allow time to do it.
+		pctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		err := pairProvider(pctx, p, terminal)
 		cancel()
 		if err != nil {
