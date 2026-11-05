@@ -116,7 +116,30 @@ rotation-engine milestone can be marked complete.
 - Provide an emergency-rotation path with the same safety boundaries.
 - Prefer short-lived credentials when a provider supports them.
 
-### 7. Later hardening
+### 7. Authorized agents beyond macOS
+
+The authorized-agents model ([authorized agents](authorized-agents.md)) is
+currently macOS-only. It relies on XPC per-message code-signing checks,
+LocalAuthentication (Touch ID), SMAppService and the Keychain, which have no
+direct Linux equivalents. Linux support therefore means porting the model to
+Linux primitives, not reusing the macOS code.
+
+- **EnvBank Linux host profile.** Target a standard hardened distribution
+  rather than a custom distro; a custom distro adds maintenance cost without
+  much security beyond this profile. The profile:
+  - runs agents in per-session microVMs or under separate uids;
+  - runs the broker as a dedicated system user;
+  - uses Unix-socket IPC with kernel-verified peer uid (`SO_PEERCRED`)
+    across the uid boundary;
+  - injects HTTP API keys through an egress proxy, so values never enter
+    agent-reachable processes;
+  - adds eBPF/audit monitoring of broker access.
+- **FIDO2 owner approvals as the cross-platform method.** Use a security key
+  or platform authenticator for grants and approvals on both Linux and macOS,
+  alongside or instead of Touch ID. The macOS choice of LocalAuthentication
+  stays until a FIDO2 path is designed and reviewed.
+
+### 8. Later hardening
 
 - Detect rollback and add signed audit checkpoints.
 - Add service rate limiting and support for additional platform keychains.

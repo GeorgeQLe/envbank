@@ -316,6 +316,11 @@ What `envbank agent-broker` does today (`internal/authz`,
   The default build has no such flag, marker or namespace; a source/build
   test checks both.
 
+## Platform scope
+
+macOS only for now: XPC, LocalAuthentication, SMAppService and the Keychain.
+The Linux host profile and FIDO2 approvals are on the [roadmap](roadmap.md).
+
 ## Not covered
 
 - **Same-user debugging and memory inspection** of the signed processes.
