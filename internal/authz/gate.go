@@ -15,6 +15,7 @@ import (
 
 	"github.com/GeorgeQLe/envbank/internal/agentbroker"
 	"github.com/GeorgeQLe/envbank/internal/approval"
+	"github.com/GeorgeQLe/envbank/internal/provideraction"
 )
 
 // Request is an agent request from a host session: the agent broker's fields
@@ -32,6 +33,17 @@ type Request struct {
 	Setup          json.RawMessage `json:"setup,omitempty"`
 	Scope          string          `json:"scope,omitempty"`
 	DurationS      int             `json:"duration_s,omitempty"`
+	// Provider fields: actions (grant_request with scope provider), action
+	// and params (provider_action), operation_id (provider_status).
+	Actions     []string        `json:"actions,omitempty"`
+	Action      string          `json:"action,omitempty"`
+	Params      json.RawMessage `json:"params,omitempty"`
+	OperationID string          `json:"operation_id,omitempty"`
+}
+
+// noProviderFields reports that none of the provider fields is set.
+func (r Request) noProviderFields() bool {
+	return len(r.Actions) == 0 && r.Action == "" && len(r.Params) == 0 && r.OperationID == ""
 }
 
 func (r Request) broker() agentbroker.Request {
@@ -68,6 +80,10 @@ type Gate struct {
 	Broker  *agentbroker.Broker
 	Grants  *Store
 	Display Display
+	// Provider runs provider actions. nil (or one without a factory or
+	// vault) answers every provider_action PROVIDER_UNAVAILABLE. Set it
+	// before serving; Close closes it.
+	Provider *provideraction.Service
 
 	mu     sync.Mutex
 	now    func() time.Time
@@ -105,7 +121,12 @@ func NewGate(b *agentbroker.Broker, d Display, now func() time.Time) *Gate {
 	if now == nil {
 		now = time.Now
 	}
-	return &Gate{Broker: b, Grants: NewStore(now, func(id string) { b.EndScope(scopeOf(id)) }), Display: d, now: now, denied: map[tuple]time.Time{}}
+	g := &Gate{Broker: b, Display: d, now: now, denied: map[tuple]time.Time{}}
+	g.Grants = NewStore(now, func(id string) {
+		b.EndScope(scopeOf(id))
+		g.Provider.EndScope(scopeOf(id)) // nil-safe: running provider operations of the grant stop
+	})
+	return g
 }
 
 func scopeOf(grantID string) string { return "grant:" + grantID }
@@ -170,8 +191,12 @@ func (g *Gate) recordDenialLocked(s Session, now time.Time) {
 	g.denied[s.key()] = now
 }
 
-// Close ends every grant (the broker is locking).
-func (g *Gate) Close() { g.Grants.Close() }
+// Close ends every grant and every provider operation (the broker is
+// locking).
+func (g *Gate) Close() {
+	g.Provider.Close() // first, so operations end BROKER_CLOSED
+	g.Grants.Close()
+}
 
 func refuse(code string) agentbroker.Response {
 	return agentbroker.Response{V: agentbroker.ProtocolVersion, Code: code}
@@ -197,6 +222,17 @@ func (g *Gate) Handle(ctx context.Context, s Session, raw []byte) agentbroker.Re
 	}
 	req, err := ParseRequest(raw)
 	if err != nil {
+		return refuse(agentbroker.CodeInvalidRequest)
+	}
+	switch req.Op {
+	case OpProviderAction:
+		return g.providerAction(ctx, s, req)
+	case OpProviderStatus:
+		return g.providerStatus(s, req)
+	}
+	// Only provider operations and provider grant requests carry provider
+	// fields.
+	if !req.noProviderFields() && !(req.Op == OpGrantRequest && req.Scope == ScopeProvider) {
 		return refuse(agentbroker.CodeInvalidRequest)
 	}
 	switch req.Op {
@@ -238,7 +274,7 @@ func (g *Gate) Handle(ctx context.Context, s Session, raw []byte) agentbroker.Re
 }
 
 func onlyOp(r Request) bool {
-	return r.Name == "" && r.Reason == "" && len(r.Secrets) == 0 && len(r.Argv) == 0 && r.Dir == "" && r.TimeoutSeconds == 0 && !r.Always && len(r.Setup) == 0 && r.Scope == "" && r.DurationS == 0
+	return r.Name == "" && r.Reason == "" && len(r.Secrets) == 0 && len(r.Argv) == 0 && r.Dir == "" && r.TimeoutSeconds == 0 && !r.Always && len(r.Setup) == 0 && r.Scope == "" && r.DurationS == 0 && r.noProviderFields()
 }
 
 func (g *Gate) caller(s Session, gr Grant) agentbroker.Caller {
@@ -311,7 +347,10 @@ func (g *Gate) grantRequest(ctx context.Context, s Session, req Request) agentbr
 	if req.DurationS <= 0 || d < MinDuration || d > MaxDuration {
 		return refuse(agentbroker.CodeInvalidRequest)
 	}
-	var secrets []string
+	var secrets, actions []string
+	if req.Scope != ScopeProvider && len(req.Actions) != 0 {
+		return refuse(agentbroker.CodeInvalidRequest)
+	}
 	switch req.Scope {
 	case ScopeNames, ScopeRun, ScopeRequest:
 		if len(req.Secrets) == 0 || len(req.Secrets) > agentbroker.Limits.Secrets {
@@ -322,6 +361,11 @@ func (g *Gate) grantRequest(ctx context.Context, s Session, req Request) agentbr
 			if !agentbroker.ValidName(n) || seen[n] {
 				return refuse(agentbroker.CodeInvalidRequest)
 			}
+			// Control credentials are reserved: only owner entry (request)
+			// may name them; they are never listed or injected.
+			if agentbroker.Reserved(n) && req.Scope != ScopeRequest {
+				return refuse(agentbroker.CodeReserved)
+			}
 			seen[n] = true
 			secrets = append(secrets, n)
 		}
@@ -330,8 +374,27 @@ func (g *Gate) grantRequest(ctx context.Context, s Session, req Request) agentbr
 		if len(req.Secrets) != 0 {
 			return refuse(agentbroker.CodeInvalidRequest)
 		}
+	case ScopeProvider:
+		if len(req.Secrets) != 0 || len(req.Actions) == 0 || len(req.Actions) > len(provideraction.Actions()) {
+			return refuse(agentbroker.CodeInvalidRequest)
+		}
+		seen := map[string]bool{}
+		for _, a := range req.Actions {
+			if !provideraction.ValidAction(a) || seen[a] {
+				return refuse(agentbroker.CodeInvalidRequest)
+			}
+			seen[a] = true
+			actions = append(actions, a)
+		}
+		sort.Strings(actions)
 	default:
 		return refuse(agentbroker.CodeInvalidRequest)
+	}
+	if req.Action != "" || len(req.Params) != 0 || req.OperationID != "" {
+		return refuse(agentbroker.CodeInvalidRequest)
+	}
+	if req.Scope == ScopeProvider {
+		secrets = actions // shown and checked as the grant's terms
 	}
 	if _, ok := grantReason(s, req.Scope, secrets, d, g.now().Add(d)); !ok {
 		return refuse(agentbroker.CodeInvalidRequest) // cannot be shown in full in the Touch ID prompt
@@ -353,7 +416,9 @@ func (g *Gate) grantRequest(ctx context.Context, s Session, req Request) agentbr
 			"scope: " + req.Scope + " (" + scopeText(req.Scope) + ")",
 			"duration: " + humanDuration(d) + " (ends earlier if the broker locks or you revoke it in the host)",
 		}
-		if len(secrets) > 0 {
+		if req.Scope == ScopeProvider {
+			lines = append(lines, "actions: "+strings.Join(actions, ", "))
+		} else if len(secrets) > 0 {
 			lines = append(lines, "secrets: "+strings.Join(secrets, ", "))
 		}
 		if req.Reason != "" {
@@ -366,7 +431,13 @@ func (g *Gate) grantRequest(ctx context.Context, s Session, req Request) agentbr
 			return r
 		}
 		approved = true
-		gr, err := g.Grants.Add(s, req.Scope, secrets, d)
+		var gr Grant
+		var err error
+		if req.Scope == ScopeProvider {
+			gr, err = g.Grants.AddProvider(s, actions, d)
+		} else {
+			gr, err = g.Grants.Add(s, req.Scope, secrets, d)
+		}
 		if err != nil {
 			return refuse(agentbroker.CodeBusy)
 		}
@@ -391,6 +462,8 @@ func scopeText(scope string) string {
 		return "propose an EnvBank device setup; the plan still needs Touch ID"
 	case ScopeRelay:
 		return "request cross-device secret relays"
+	case ScopeProvider:
+		return "ask to run these provider actions; each action still needs Touch ID with its exact plan"
 	}
 	return scope
 }
@@ -407,6 +480,8 @@ func grantReason(s Session, scope string, secrets []string, d time.Duration, exp
 		what = "permission to propose an EnvBank device setup"
 	case ScopeRelay:
 		what = "permission to request secret relays"
+	case ScopeProvider:
+		what = "permission to request provider actions " + strings.Join(secrets, ", ") + " (each needs Touch ID)"
 	default:
 		what = scope + " access to " + strings.Join(secrets, ", ")
 	}

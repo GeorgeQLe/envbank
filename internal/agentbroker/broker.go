@@ -280,15 +280,24 @@ func (b *Broker) HandleFor(ctx context.Context, caller Caller, req Request) Resp
 		if req.Name != "" || req.Reason != "" || len(req.Secrets) != 0 || len(req.Argv) != 0 || req.Dir != "" || req.TimeoutSeconds != 0 {
 			return refuse(CodeInvalidRequest)
 		}
-		names, err := b.currentVault().Names(ctx)
+		all, err := b.currentVault().Names(ctx)
 		if err != nil {
 			return refuse(CodeVaultFailed)
+		}
+		names := []string{}
+		for _, n := range all {
+			if !Reserved(n) { // control credentials are never listed
+				names = append(names, n)
+			}
 		}
 		return Response{V: ProtocolVersion, OK: true, Names: names}
 	case OpRequest:
 		return b.ingest(ctx, caller, req)
 	case OpRun:
 		return b.run(ctx, caller, req)
+	case OpProviderAction, OpProviderStatus:
+		// Only the paired host channel, behind a provider grant (authz.Gate).
+		return refuse(CodeNotAuthorized)
 	default:
 		return refuse(CodeInvalidRequest)
 	}
@@ -397,6 +406,11 @@ func (b *Broker) ingest(ctx context.Context, caller Caller, req Request) Respons
 func (b *Broker) run(ctx context.Context, caller Caller, req Request) Response {
 	if req.Name != "" || req.Reason != "" || req.TimeoutSeconds < 0 {
 		return refuse(CodeInvalidRequest)
+	}
+	for _, n := range req.Secrets {
+		if Reserved(n) { // control credentials are never injected
+			return refuse(CodeReserved)
+		}
 	}
 	cmd, err := ResolveCommand(req.Argv, req.Dir, req.Secrets, b.path)
 	if err != nil {

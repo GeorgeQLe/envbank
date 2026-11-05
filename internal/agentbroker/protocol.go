@@ -21,6 +21,7 @@ package agentbroker
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -66,7 +67,23 @@ const (
 	OpRequest = "request"
 	OpRun     = "run"
 	OpSetup   = "setup"
+	// Provider actions (docs/provider-actions.md) exist only on the paired
+	// host channel behind a provider grant. The development socket and MCP
+	// refuse them (NOT_AUTHORIZED).
+	OpProviderAction = "provider_action"
+	OpProviderStatus = "provider_status"
 )
+
+// ReservedPrefix marks control-credential records (CONTROL_VERCEL_TOKEN, …).
+// They are never listed by names, injected by run, or granted under any
+// scope but request (owner-typed entry) and provider (by action, never by
+// name). Matching ignores case.
+const ReservedPrefix = "CONTROL_"
+
+// Reserved reports whether name is a reserved control-credential record.
+func Reserved(name string) bool {
+	return len(name) >= len(ReservedPrefix) && strings.EqualFold(name[:len(ReservedPrefix)], ReservedPrefix)
+}
 
 // Request is the only message an agent can send.
 type Request struct {
@@ -101,12 +118,19 @@ type Response struct {
 	Steps      []string `json:"steps,omitempty"`
 	// Grants lists the calling session's active grants (grant ops only).
 	Grants []GrantInfo `json:"grants,omitempty"`
+	// Provider operations (provider_action, provider_status) only. Result is
+	// a value-free JSON object built by internal/provideraction.
+	OperationID string          `json:"operation_id,omitempty"`
+	Action      string          `json:"action,omitempty"`
+	Step        string          `json:"step,omitempty"`
+	Result      json.RawMessage `json:"result,omitempty"`
 }
 
 // GrantInfo describes one active grant to the session that holds it. It
 // carries names, never values.
 type GrantInfo struct {
-	Secrets   []string `json:"secrets"` // empty for setup and relay grants
+	Secrets   []string `json:"secrets"`           // empty for setup, relay and provider grants
+	Actions   []string `json:"actions,omitempty"` // provider grants only
 	Scope     string   `json:"scope"`
 	GrantedAt string   `json:"granted_at"`
 	ExpiresAt string   `json:"expires_at"`
@@ -146,6 +170,9 @@ const (
 	// the command. The owner was not prompted (or the wait ended unanswered
 	// before a prompt), and nothing ran.
 	CodeTimeBudget = "TIME_BUDGET_EXHAUSTED"
+	// CodeReserved: the request names a reserved CONTROL_* record where only
+	// owner entry (request) may use it. The owner was not prompted.
+	CodeReserved = "RESERVED_NAME"
 )
 
 // States for an ingest request.
