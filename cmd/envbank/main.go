@@ -185,7 +185,7 @@ Usage:
   envbank get NAME [auth flags]
   envbank due [--notify] [auth flags]
   envbank run [auth flags] -- COMMAND [ARGS...]
-  envbank agent-broker --owner-input chromux --owner-input-unqualified [--allow-password-fallback] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]  # owner terminal; grants and approvals need Touch ID
+  envbank agent-broker --owner-input chromux --owner-input-unqualified [--allow-password-fallback] [--provider-actions [--neon-org-id org-…]] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]  # owner terminal; grants and approvals need Touch ID
   envbank agent-broker --legacy-socket [--socket PATH] [...]  # DEVELOPMENT ONLY, unqualified: unauthenticated socket for envbank agent / mcp serve
   envbank setup plan --sync local_server|hosted --device-name NAME --backup-dir DIR [--vault-dir DIR] [--server URL]  # read-only
   envbank setup status [--config PATH] [--socket PATH]                                                              # read-only

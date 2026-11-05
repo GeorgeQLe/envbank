@@ -202,6 +202,16 @@ Authorized agents (the default) are set up through the desktop host; see
 
 `envbank mcp serve --no-agent-broker` omits the secret tools.
 
+### Provider actions
+
+`--provider-actions` (off by default) lets authorized agents on the host
+channel request provider actions (docs/provider-actions.md) using the
+`CONTROL_*` records you seeded. Without it every `provider_action` answers
+`PROVIDER_UNAVAILABLE`. Each action still needs a `provider` grant and its
+own Touch ID showing the full plan. `--neon-org-id org-…` creates Neon
+projects in that organization (only with `--provider-actions`). Provider
+calls go only to the fixed production endpoints; no flag changes them.
+
 ## Not done
 
 - Use with an owner's real vault. Unit tests use a fake vault, with real

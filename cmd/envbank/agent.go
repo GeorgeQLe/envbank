@@ -22,6 +22,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/ownerinput"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/provideraction"
+	"github.com/GeorgeQLe/envbank/internal/provideraction/live"
 	"github.com/GeorgeQLe/envbank/internal/setup"
 	"github.com/GeorgeQLe/envbank/internal/vaultobject"
 	"golang.org/x/term"
@@ -250,9 +251,23 @@ func (v *brokerVault) SaveVercelProject(_ context.Context, p provideraction.Verc
 }
 
 // providerActionFactory is the seam where the concrete Neon, Vercel and
-// Stripe adapters plug in (docs/provider-actions.md). It returns nil in this
-// build, so every provider_action answers PROVIDER_UNAVAILABLE.
-var providerActionFactory = func() provideraction.Factory { return nil }
+// Stripe adapters plug in (docs/provider-actions.md). Unless the owner
+// starts the broker with --provider-actions it returns nil, and every
+// provider_action answers PROVIDER_UNAVAILABLE. The live factory always uses
+// the providers' fixed production endpoints.
+func providerActionFactory(enabled bool, neonOrgID string) (provideraction.Factory, error) {
+	if !enabled {
+		if neonOrgID != "" {
+			return nil, errors.New("--neon-org-id needs --provider-actions")
+		}
+		return nil, nil
+	}
+	f, err := live.New(live.Config{NeonOrgID: neonOrgID})
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
 
 // newProviderService builds the broker's provider-action service. vault is
 // nil in setup mode (no vault unlocked): actions are then unavailable.
@@ -288,12 +303,18 @@ func agentBrokerCommand(args []string) error {
 	oiIdent := fs.String("owner-input-identifier", ownerInputIdentifier, "code-signing identifier of the owner-input XPC service")
 	oiService := fs.String("owner-input-service", ownerinput.BrokerServiceName, "Mach service name of the owner-input XPC service")
 	oiUnqualified := fs.Bool("owner-input-unqualified", false, "use the Chromux XPC owner input before its installed-build no-leak qualification has passed")
+	providerActions := fs.Bool("provider-actions", false, "let authorized agents request provider actions (Neon, Vercel, Stripe test mode) with CONTROL_* credentials from the vault; each needs a provider grant and its own Touch ID (default off: PROVIDER_UNAVAILABLE)")
+	neonOrgID := fs.String("neon-org-id", "", "with --provider-actions: Neon organization (org-…) to create projects in")
 	auth := addAuthFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || *idle < time.Minute || *lifetime < *idle {
-		return errors.New("usage: envbank agent-broker [--owner-input chromux --owner-input-unqualified] [--legacy-socket [--socket PATH]] [--allow-password-fallback] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]")
+		return errors.New("usage: envbank agent-broker [--owner-input chromux --owner-input-unqualified] [--legacy-socket [--socket PATH]] [--allow-password-fallback] [--provider-actions [--neon-org-id org-…]] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]")
+	}
+	factory, err := providerActionFactory(*providerActions, *neonOrgID)
+	if err != nil {
+		return err
 	}
 	// A test-approver build never reaches Chromux or a real vault.
 	if err := testBuildGuard(*ownerInput, *oiIdent, auth.configPath); err != nil {
@@ -437,7 +458,10 @@ func agentBrokerCommand(args []string) error {
 	gate := authz.NewGate(broker, prompter, nil)
 	// Provider actions run only on the host channel, behind a provider grant;
 	// with no factory configured they answer PROVIDER_UNAVAILABLE.
-	gate.Provider = newProviderService(vault, providerActionFactory())
+	gate.Provider = newProviderService(vault, factory)
+	if factory != nil {
+		fmt.Println("Provider actions ON (--provider-actions): granted agents may request Neon, Vercel and Stripe (test mode) actions; each shows its plan and needs Touch ID.")
+	}
 	defer gate.Close() // grants and provider operations are memory-only and end when the broker locks
 	var listener net.Listener
 	if *legacySocket {

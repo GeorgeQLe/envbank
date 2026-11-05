@@ -1,10 +1,11 @@
 # Provider actions (`envbank.provider-actions/v1`)
 
-Status (November 5, 2026): **broker side implemented and unit-tested against
-fake providers (`internal/provideraction`, `internal/authz`); no provider
-adapters plugged in yet, so every `provider_action` answers
-`PROVIDER_UNAVAILABLE`; not qualified.** See
-[Implementation notes](#implementation-notes).
+Status (November 5, 2026): **broker side and live adapters implemented;
+tested end to end against stateful loopback fakes of Neon, Vercel and
+Stripe (`internal/provideraction/live`); not yet accepted against the live
+providers; not qualified.** The broker uses the adapters only when started
+with `--provider-actions`; otherwise every `provider_action` answers
+`PROVIDER_UNAVAILABLE`. See [Implementation notes](#implementation-notes).
 
 ## Goal
 
@@ -196,7 +197,8 @@ details or deviates from the above:
   side-effect-free prechecks (`CONTROL_CREDENTIAL_MISSING`, `RECORD_EXISTS`,
   `UNKNOWN_SECRET`, `RECORD_NOT_BOUND`, `DESTINATION_NOT_ALLOWED`,
   `BINDING_MISMATCH`, `BINDING_LIMIT`), then a run slot (`BROKER_BUSY`), and only then Touch
-  ID. A plan whose text does not fit the 600-byte prompt is refused
+  ID. The resource lock (`RESOURCE_BUSY`) is taken just before the record
+  prechecks. A plan whose text does not fit the 600-byte prompt is refused
   (`INVALID_REQUEST`), never clipped. Checks that need a provider call
   (roles prepared, Stripe test-mode key) run after approval as the first,
   read-only step and fail the operation.
@@ -237,9 +239,53 @@ details or deviates from the above:
   a broker buffer, passed to the factory, wiped when the operation ends.
   `CONTROL_STRIPE_KEY` must start `sk_test_` or `rk_test_`
   (`CONTROL_CREDENTIAL_REFUSED`).
+- **Resource locks.** Before its record prechecks, an action locks what it
+  changes: the Neon project, the Vercel project (push, redeploy, delete,
+  rotations), the Stripe lineage and endpoint, and every record it writes or
+  re-binds. A second action needing any of them is refused `RESOURCE_BUSY`
+  before its prompt, while the first is waiting for approval or running. The
+  lock ends with the operation (or a declined prompt).
 - **Adapters seam.** `cmd/envbank/agent.go` `providerActionFactory` returns
-  nil in this build. The ports are `NeonPort`, `VercelPort` and `StripePort`
-  in `internal/provideraction/ports.go`.
+  nil unless the broker runs with `--provider-actions` (and optional
+  `--neon-org-id org-…`); then it is `internal/provideraction/live`. The
+  ports are `NeonPort`, `VercelPort` and `StripePort` in
+  `internal/provideraction/ports.go`; each is an `io.Closer`, closed when
+  the operation ends (the adapters wipe their credential copies) before the
+  broker wipes its buffer.
+- **Live factory.** Fixed production endpoints; `live.New` takes no endpoint,
+  client or transport. The loopback overrides the end-to-end test uses are an
+  unexported field set only from `live`'s `_test.go` files (never compiled
+  into the binary), and the Neon SQL connector hook refuses outside a test
+  binary (`testing.Testing`). Mutations need the running operation's
+  authority (`provideraction.OperationAuthority`): Vercel checks it through
+  `WithMutationAuthorization` immediately before each mutating request, as
+  the Vercel workflow does with its policy check; the Neon and Stripe ports
+  check it before each mutation.
+- **Vercel mapping.** Env pushes use the adapter's exact-scope sensitive
+  `Write` (value read only inside `SecretSource.WithSecret`). "Current
+  deployment" is the production alias target for production, and the newest
+  READY preview deployment of the project, of any branch, for preview (the
+  port has no branch); name `deployment` when the push was branch-scoped. Redeploys are tagged with a random
+  operation ID; `WaitReady` returns `https://<deployment>.vercel.app`.
+- **Production redeploy refused.** Vercel creates a production redeploy
+  staged (custom domains not assigned), so production traffic would keep the
+  old credentials and a rotation would then invalidate them under it. The
+  live port refuses it with `PRODUCTION_PROMOTION_UNSUPPORTED` at
+  `vercel.redeploy`, before creating a deployment and before anything is
+  invalidated. A promotion step (with its own approval wording) is needed
+  before production rotations work.
+- **Health requests.** One HTTPS GET to `<deployment URL><health_path>`: only
+  a URL this operation's `WaitReady` returned, on a single-label
+  `*.vercel.app` host (custom domains are never checked, since a redeploy is
+  never aliased to them); no redirects followed; no credentials, cookies or
+  protection-bypass headers; at most 4 KiB of body read. 2xx is healthy. A
+  `401` (Vercel deployment protection) fails the step with
+  `HEALTH_PROTECTED` and is never bypassed: disable protection on the
+  throwaway project, or use a path it serves unprotected.
+- **Stripe mapping.** Webhook create uses the adapter's `Create` with
+  `url`/`enabled_events` and a random idempotency key; the endpoint is read
+  back with `Endpoint` (ID, URL, events only) and deleted with `Revoke`.
+  Live-mode keys are refused by the service, the factory and the adapter.
 - **Routes.** The development socket refuses `provider_action` and
   `provider_status` (`NOT_AUTHORIZED`); MCP has no provider tools.
 
@@ -249,8 +295,10 @@ details or deviates from the above:
    approval text. Provider errors are mapped to fixed codes
    (`provider.SanitizeError`).
 2. **Endpoints.** Provider calls go only to fixed HTTPS endpoints:
-   `api.vercel.com`, `console.neon.tech`, `api.stripe.com`. The tests use
-   loopback overrides, which are not reachable from agent input.
+   `api.vercel.com`, `console.neon.tech`, `api.stripe.com` (and health checks
+   to the deployment's `*.vercel.app` URL). The tests use loopback
+   overrides, which are not reachable from agent input, flags or the
+   production binary.
 3. **Ordering.** New values are stored durably before any destination is
    written. Old credentials are revoked only after health checks pass. If
    anything fails, the old credential stays valid and the operation ends
