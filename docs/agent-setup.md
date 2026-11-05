@@ -5,9 +5,13 @@ Status (November 4, 2026):
 - **Implemented and tested end to end:** `local_server` setup with
   disposable volumes, through `envbank setup plan|status|apply` and the
   `envbank_device_setup_plan|apply` MCP tools.
-- **Hosted mode:** applies against an https service, but Cloudflare Access
-  credentials are not yet collected, so an Access-protected deployment is
-  not supported yet.
+- **Hosted mode:** applies against an https service. For an
+  Access-protected deployment, `--cloudflare-access` adds an owner-secret
+  step **before any change**: the owner types the Access client ID (visible)
+  and the client secret (hidden, twice). The token goes only into the
+  passphrase-encrypted device identity, as with
+  `init --access-credentials-stdin`. This step is unit-tested; it has not
+  been run against a real Cloudflare deployment.
 - **Not built yet:** the desktop-host input provider (in progress; see the
   [owner-input protocol](owner-input-protocol.md)), `local_only` mode, and
   the relay.

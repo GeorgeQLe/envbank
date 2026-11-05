@@ -15,6 +15,7 @@ import (
 )
 
 type fakeSetupOwner struct {
+	visible  string
 	confirm  bool
 	prompted int
 	notes    []string
@@ -27,7 +28,8 @@ func (o *fakeSetupOwner) ConfirmPlan(context.Context, string, []string) (bool, e
 func (o *fakeSetupOwner) NewPassphrase(context.Context, string, int, []byte) ([]byte, bool, error) {
 	return nil, false, errors.New("must not be reached")
 }
-func (o *fakeSetupOwner) Notify(l string) { o.notes = append(o.notes, l) }
+func (o *fakeSetupOwner) Notify(l string)                                    { o.notes = append(o.notes, l) }
+func (o *fakeSetupOwner) AskVisible(context.Context, string) (string, error) { return o.visible, nil }
 
 type swapInspector struct {
 	calls int
@@ -189,4 +191,42 @@ type swappingOwner struct {
 func (o *swappingOwner) NewPassphrase(context.Context, string, int, []byte) ([]byte, bool, error) {
 	o.swap()
 	return []byte("a-long-enough-passphrase"), true, nil
+}
+
+func TestHostedAccessCredentialsAreOwnerEnteredAndValidated(t *testing.T) {
+	req, vols := setupFixture(t)
+	req.Sync, req.VaultDir, req.ServerURL, req.Access = setup.SyncHosted, "", "https://envbank.example.workers.dev", true
+	p, err := setup.PlanFor(req, staticInspector(vols))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, s := range p.Steps {
+		if s.ID == "access_credentials" && s.OwnerSecret {
+			found = true
+		}
+	}
+	if !found || !p.Layout.Access {
+		t.Fatalf("hosted+access plan lacks an owner-secret access step: %+v", p)
+	}
+	local := req
+	local.Sync, local.ServerURL, local.VaultDir = setup.SyncLocalServer, "", filepath.Join(filepath.Dir(req.BackupDir), "..", "t9", "vault")
+	local.VaultDir = filepath.Clean(local.VaultDir)
+	if _, err := setup.PlanFor(local, staticInspector(vols)); err == nil {
+		t.Fatal("cloudflare_access accepted outside hosted mode")
+	}
+	raw, _ := json.Marshal(req)
+	owner := &fakeSetupOwner{confirm: true, visible: "not a client id"}
+	a := &setupApplier{owner: owner, inspector: staticInspector(vols), service: &fakeService{}, now: time.Now}
+	_, done, err := a.Apply(context.Background(), raw)
+	var r setupRefusal
+	if !errors.As(err, &r) || r.code != "SETUP_ACCESS_INVALID" || len(done) != 0 {
+		t.Fatalf("invalid client id: %v %v", done, err)
+	}
+	if _, err := os.Stat(req.ConfigPath); err == nil {
+		t.Fatal("identity created despite invalid Access credentials")
+	}
+	if !accessClientIDRe.MatchString("0123abcd4567ef89.access") || accessClientIDRe.MatchString("x.access; rm") {
+		t.Fatal("client id pattern")
+	}
 }

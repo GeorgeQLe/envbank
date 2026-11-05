@@ -35,6 +35,7 @@ type Layout struct {
 	Sync             string `json:"sync"`
 	ServerURL        string `json:"server_url"`
 	Listen           string `json:"listen,omitempty"`
+	Access           bool   `json:"cloudflare_access,omitempty"`
 	VaultName        string `json:"vault_name"`
 	DeviceName       string `json:"device_name"`
 	ConfigPath       string `json:"config_path"`
@@ -88,6 +89,7 @@ type Request struct {
 	Sync       string `json:"sync"`
 	ServerURL  string `json:"server_url,omitempty"`
 	Listen     string `json:"listen,omitempty"`
+	Access     bool   `json:"cloudflare_access,omitempty"`
 	VaultName  string `json:"vault_name"`
 	DeviceName string `json:"device_name"`
 	ConfigPath string `json:"config_path"`
@@ -124,6 +126,7 @@ func PlanFor(req Request, inspect Inspector) (Plan, error) {
 			return Plan{}, refuse("hosted mode requires the https:// URL of your EnvBank service")
 		}
 		p.Layout.ServerURL = strings.TrimRight(req.ServerURL, "/")
+		p.Layout.Access = req.Access
 		if req.VaultDir != "" {
 			return Plan{}, refuse("hosted mode keeps vault ciphertext on the service; vault_dir is not used")
 		}
@@ -131,6 +134,9 @@ func PlanFor(req Request, inspect Inspector) (Plan, error) {
 		return Plan{}, refuse("local_only mode is not available yet (it needs the desktop-host local vault adapter)")
 	default:
 		return Plan{}, refuse("sync must be local_server, hosted or local_only")
+	}
+	if req.Access && req.Sync != SyncHosted {
+		return Plan{}, refuse("cloudflare_access applies only to hosted mode")
 	}
 
 	// Device identity: internal, non-removable, ownership-enforcing volume.
@@ -172,6 +178,9 @@ func PlanFor(req Request, inspect Inspector) (Plan, error) {
 
 func stepsFor(l Layout) []Step {
 	var steps []Step
+	if l.Access {
+		steps = append(steps, Step{ID: "access_credentials", Description: "collect the Cloudflare Access service token (client ID and secret) for " + l.ServerURL + "; stored only inside the passphrase-encrypted device identity", OwnerSecret: true})
+	}
 	if l.Sync == SyncLocalServer {
 		steps = append(steps,
 			Step{ID: "prepare_vault_dir", Description: "create the private (0700) vault directory " + l.VaultDir},

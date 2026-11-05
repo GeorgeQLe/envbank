@@ -105,7 +105,7 @@ func setupSchema(obj func(map[string]any, ...string) map[string]any) map[string]
 	str := map[string]any{"type": "string"}
 	return obj(map[string]any{
 		"sync":       map[string]any{"type": "string", "enum": []string{setup.SyncLocalServer, setup.SyncHosted, setup.SyncLocalOnly}},
-		"server_url": str, "listen": str, "vault_name": str, "device_name": str, "config_path": str, "vault_dir": str, "backup_dir": str,
+		"server_url": str, "listen": str, "cloudflare_access": map[string]any{"type": "boolean"}, "vault_name": str, "device_name": str, "config_path": str, "vault_dir": str, "backup_dir": str,
 	}, "sync", "vault_name", "device_name", "config_path", "backup_dir")
 }
 

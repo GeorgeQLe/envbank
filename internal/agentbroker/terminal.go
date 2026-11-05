@@ -259,3 +259,9 @@ func (p *TerminalPrompter) NewPassphrase(ctx context.Context, title string, minB
 	}
 	return nil, false, nil
 }
+
+// AskVisible reads one visible line (for non-secret identifiers such as a
+// Cloudflare Access client ID). The result is trimmed and limited to 64 bytes.
+func (p *TerminalPrompter) AskVisible(ctx context.Context, prompt string) (string, error) {
+	return p.ask(ctx, Sanitize(prompt, 200))
+}

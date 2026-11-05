@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/GeorgeQLe/envbank/internal/agentbroker"
+	"github.com/GeorgeQLe/envbank/internal/client"
 	"github.com/GeorgeQLe/envbank/internal/recovery"
 	"github.com/GeorgeQLe/envbank/internal/setup"
 )
@@ -22,6 +24,7 @@ import (
 // qualified desktop-host provider).
 type setupOwner interface {
 	ConfirmPlan(ctx context.Context, title string, lines []string) (bool, error)
+	AskVisible(ctx context.Context, prompt string) (string, error)
 	NewPassphrase(ctx context.Context, title string, minBytes int, differentFrom []byte) ([]byte, bool, error)
 	Notify(line string)
 }
@@ -132,6 +135,29 @@ func (a *setupApplier) Apply(ctx context.Context, raw json.RawMessage) (agentbro
 		a.owner.Notify("done: " + id)
 		return nil
 	}
+	var access *client.AccessCredentials
+	defer func() {
+		if access != nil {
+			access.ClientSecret = ""
+		}
+	}()
+	if l.Access {
+		if err := step("access_credentials", func() error {
+			id, err := a.owner.AskVisible(ctx, "Cloudflare Access client ID (ends in .access): ")
+			if err != nil || !accessClientIDRe.MatchString(id) {
+				return setupRefusal{"SETUP_ACCESS_INVALID"}
+			}
+			secret, ok, err := a.owner.NewPassphrase(ctx, "Cloudflare Access client secret", 16, nil)
+			if err != nil || !ok {
+				return setupRefusal{CodeDeniedSetup}
+			}
+			access = &client.AccessCredentials{ClientID: id, ClientSecret: string(secret)}
+			wipeBytes(secret)
+			return nil
+		}); err != nil {
+			return nil, done, err
+		}
+	}
 	if l.Sync == setup.SyncLocalServer {
 		if err := step("prepare_vault_dir", func() error { return mkdir(l.VaultDir, l.VaultVolumeUUID) }); err != nil {
 			return nil, done, err
@@ -188,7 +214,7 @@ func (a *setupApplier) Apply(ctx context.Context, raw json.RawMessage) (agentbro
 				return setupRefusal{"SETUP_CONFIG_DIR_FAILED"}
 			}
 		}
-		api, vaultKey, _, fingerprint, err := createVaultDevice(l.ServerURL, l.VaultName, l.DeviceName, passphrase, nil, l.ConfigPath)
+		api, vaultKey, _, fingerprint, err := createVaultDevice(l.ServerURL, l.VaultName, l.DeviceName, passphrase, access, l.ConfigPath)
 		if err != nil {
 			return setupRefusal{"SETUP_CREATE_VAULT_FAILED"}
 		}
@@ -240,6 +266,9 @@ func (a *setupApplier) Apply(ctx context.Context, raw json.RawMessage) (agentbro
 	}
 	return vault, done, nil
 }
+
+// Cloudflare Access service-token client IDs are hex labels ending in ".access".
+var accessClientIDRe = regexp.MustCompile(`^[A-Za-z0-9]{8,64}\.access$`)
 
 // CodeDeniedSetup mirrors the broker's owner-denied code.
 const CodeDeniedSetup = agentbroker.CodeDenied

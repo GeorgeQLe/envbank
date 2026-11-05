@@ -40,6 +40,7 @@ func setupRequestFlags(fs *flag.FlagSet) *setup.Request {
 	fs.StringVar(&r.Sync, "sync", setup.SyncLocalServer, "local_server, hosted or local_only")
 	fs.StringVar(&r.ServerURL, "server", "", "hosted: https URL of the EnvBank service")
 	fs.StringVar(&r.Listen, "listen", "", "local_server: loopback listen address (default 127.0.0.1:7337)")
+	fs.BoolVar(&r.Access, "cloudflare-access", false, "hosted: the service is behind Cloudflare Access (the owner types the service token)")
 	fs.StringVar(&r.VaultName, "vault-name", "personal", "vault name")
 	fs.StringVar(&r.DeviceName, "device-name", "", "this device's name")
 	fs.StringVar(&r.ConfigPath, "config", defaultConfigPath(), "device identity path (internal volume)")
