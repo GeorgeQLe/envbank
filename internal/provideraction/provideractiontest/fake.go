@@ -7,12 +7,15 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/GeorgeQLe/envbank/internal/agentbroker"
 	"github.com/GeorgeQLe/envbank/internal/lifecycle"
 	"github.com/GeorgeQLe/envbank/internal/provideraction"
 )
@@ -84,11 +87,20 @@ type Vault struct {
 	revs map[string]int64
 	// FailStore makes StoreSecret fail for these records.
 	FailStore map[string]bool
+	// FailBinding makes SaveBinding fail for these records.
+	FailBinding map[string]bool
+
+	// Bindings and Vercel provenance, as encoded JSON (the shape the real
+	// store encrypts), with optimistic object revisions.
+	bindings    map[string][]byte
+	bindingRevs map[string]int64
+	projects    map[string][]byte
 }
 
 // NewVault returns a vault holding values (revision 1 each).
 func NewVault(log *Log, values map[string]string) *Vault {
-	v := &Vault{Log: log, vals: map[string][]byte{}, revs: map[string]int64{}, FailStore: map[string]bool{}}
+	v := &Vault{Log: log, vals: map[string][]byte{}, revs: map[string]int64{}, FailStore: map[string]bool{}, FailBinding: map[string]bool{},
+		bindings: map[string][]byte{}, bindingRevs: map[string]int64{}, projects: map[string][]byte{}}
 	for k, val := range values {
 		v.vals[k], v.revs[k] = []byte(val), 1
 	}
@@ -161,6 +173,141 @@ func (v *Vault) Exists(_ context.Context, name string) (bool, error) {
 	defer v.mu.Unlock()
 	_, ok := v.vals[name]
 	return ok, nil
+}
+
+// Names, Values and Store implement agentbroker.Vault, so one fake can back
+// both the agent broker and the provider service (as brokerVault does).
+func (v *Vault) Names(context.Context) ([]string, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := make([]string, 0, len(v.vals))
+	for n := range v.vals {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (v *Vault) Values(_ context.Context, names []string) (map[string]string, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := map[string]string{}
+	for _, n := range names {
+		val, ok := v.vals[n]
+		if !ok {
+			return nil, agentbroker.ErrMissing
+		}
+		out[n] = string(val)
+	}
+	return out, nil
+}
+
+func (v *Vault) Store(_ context.Context, name, value string) error {
+	v.Set(name, value)
+	return nil
+}
+
+// LoadBinding implements provideraction.BindingStore.
+func (v *Vault) LoadBinding(_ context.Context, record string) (provideraction.Binding, int64, error) {
+	v.mu.Lock()
+	raw, ok := v.bindings[record]
+	rev := v.bindingRevs[record]
+	v.mu.Unlock()
+	if !ok {
+		return provideraction.Binding{}, 0, provideraction.ErrMissing
+	}
+	b, err := provideraction.DecodeBinding(raw)
+	return b, rev, err
+}
+
+// SaveBinding implements provideraction.BindingStore.
+func (v *Vault) SaveBinding(_ context.Context, b provideraction.Binding, expected int64) (int64, error) {
+	if !b.Valid() {
+		return 0, errors.New("invalid binding")
+	}
+	raw, err := json.Marshal(b)
+	if err != nil {
+		return 0, err
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.FailBinding[b.Record] {
+		return 0, errors.New("binding store failed")
+	}
+	if v.bindingRevs[b.Record] != expected {
+		return 0, errors.New("revision conflict")
+	}
+	v.bindings[b.Record] = raw
+	v.bindingRevs[b.Record]++
+	return v.bindingRevs[b.Record], nil
+}
+
+// ListBindings implements provideraction.BindingStore.
+func (v *Vault) ListBindings(context.Context) ([]provideraction.StoredBinding, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	var out []provideraction.StoredBinding
+	for rec, raw := range v.bindings {
+		b, err := provideraction.DecodeBinding(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, provideraction.StoredBinding{Binding: b, Revision: v.bindingRevs[rec]})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Binding.Record < out[j].Binding.Record })
+	return out, nil
+}
+
+// LoadVercelProject implements provideraction.BindingStore.
+func (v *Vault) LoadVercelProject(_ context.Context, teamID, projectID string) (provideraction.VercelProject, error) {
+	v.mu.Lock()
+	raw, ok := v.projects[provideraction.VercelProjectKey(teamID, projectID)]
+	v.mu.Unlock()
+	if !ok {
+		return provideraction.VercelProject{}, provideraction.ErrMissing
+	}
+	return provideraction.DecodeVercelProject(raw)
+}
+
+// SaveVercelProject implements provideraction.BindingStore.
+func (v *Vault) SaveVercelProject(_ context.Context, p provideraction.VercelProject) error {
+	if !p.Valid() {
+		return errors.New("invalid provenance")
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	key := provideraction.VercelProjectKey(p.TeamID, p.ProjectID)
+	if _, ok := v.projects[key]; ok {
+		return errors.New("revision conflict")
+	}
+	v.projects[key] = raw
+	return nil
+}
+
+// Bind stores a binding directly (test setup), pinned to the record's
+// current revision.
+func (v *Vault) Bind(b provideraction.Binding) {
+	v.mu.Lock()
+	b.RecordRevision = v.revs[b.Record]
+	if b.AllowedDestinations == nil {
+		b.AllowedDestinations = []provideraction.Destination{}
+	}
+	b.V = provideraction.BindingVersion
+	expected := v.bindingRevs[b.Record]
+	v.mu.Unlock()
+	if _, err := v.SaveBinding(context.Background(), b, expected); err != nil {
+		panic(err)
+	}
+}
+
+// Binding returns record's binding (test assertions only).
+func (v *Vault) Binding(record string) (provideraction.Binding, bool) {
+	b, _, err := v.LoadBinding(context.Background(), record)
+	return b, err == nil
 }
 
 // Clock advances instantly on Sleep.

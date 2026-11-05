@@ -148,6 +148,8 @@ func (v VercelRef) valid(withDeployment bool) bool {
 	return true
 }
 
+func (v VercelRef) dest() Destination { return Destination{TeamID: v.TeamID, ProjectID: v.ProjectID} }
+
 func (v VercelRef) env() VercelEnv {
 	return VercelEnv{TeamID: v.TeamID, ProjectID: v.ProjectID, Target: v.Target, GitBranch: v.GitBranch}
 }

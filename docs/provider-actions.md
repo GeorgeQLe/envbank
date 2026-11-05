@@ -73,17 +73,18 @@ exact plan. There is no "always" for provider actions.
 
 | Action | Params (all non-secret) | Effect | Result (value-free) |
 | --- | --- | --- | --- |
-| `neon.project.create` | `name`, `region_id?`, `pg_version?`, `roles?` (default `[app_a, app_b]`), `records:{pooled, direct}` | Create a project, prepare the rotation roles as its owner role (no adopt), then reset `roles[0]` and store its pooled and direct URIs in the two new records. Owner URIs are discarded, never stored | `project_id`, `branch_id`, `role` (owner), `database`, `active_role`, `prepared_roles`, `records:{name: revision}` |
+| `neon.project.create` | `name`, `region_id?`, `pg_version?`, `roles?` (default `[app_a, app_b]`), `records:{pooled, direct}` | Create a project, prepare the rotation roles as its owner role (no adopt), then reset `roles[0]` and store its pooled and direct URIs in the two new records, bound to the project with no destination. Owner URIs are discarded, never stored | `project_id`, `branch_id`, `role` (owner), `database`, `active_role`, `prepared_roles`, `records:{name: revision}` |
 | `neon.roles.prepare` | `project_id`, `branch_id`, `database`, `owner_role`, `roles?` (default `[app_a, app_b]`), `adopt` | For an existing project: make the roles rotation-ready (see [Neon rotation roles](#neon-rotation-roles)). With `adopt`, existing public-schema objects change owner, and the approval text says so | `prepared_roles` |
-| `neon.project.delete` | `project_id` | Delete the project (throwaway cleanup) | `deleted` |
+| `neon.project.delete` | `project_id` | Delete the project (throwaway cleanup) and revoke its records' bindings | `deleted`, `revoked_bindings` |
 | `neon.rotate` | `project_id`, `branch_id`, `roles:[A, B]` (A is the role the deployment uses now), `owner_role`, `database`, `records:{pooled, direct}`, `vercel:{team_id, project_id, target, deployment?}`, `health_path` | Check the roles are prepared (`NEON_ROLES_NOT_PREPARED` otherwise, with no side effects), then zero-downtime rotation: reset the inactive role's password, store its URIs, push them to Vercel, redeploy, check health, then reset the previously active role (invalidating its old password) | active role, record revisions, `deployment_id` |
-| `vercel.project.create` | `team_id`, `name`, `git_repo?` (`owner/repo`), `framework?` | Create a project | `project_id` |
+| `vercel.project.create` | `team_id`, `name`, `git_repo?` (`owner/repo`), `framework?` | Create a project and record its provenance (allows no record) | `team_id`, `project_id` |
 | `vercel.project.delete` | `team_id`, `project_id` | Delete a project (throwaway cleanup) | `deleted` |
-| `vercel.env.push` | `team_id`, `project_id`, `target` (`preview`\|`production`), `git_branch?`, `variables:{ENV_NAME: record}` | Upsert each variable as a `sensitive` env var | names and states |
+| `vercel.env.push` | `team_id`, `project_id`, `target` (`preview`\|`production`), `git_branch?`, `variables:{ENV_NAME: record}` | Upsert each variable as a `sensitive` env var; every record must be bound and allowed to the project | names and states |
 | `vercel.redeploy` | `team_id`, `project_id`, `target`, `deployment?` (source ID; default current), `health_path?` | Redeploy, wait until ready, check health (at least 3 checks over at least 30 s, as in `lifecycle.HealthEvidence`) | `deployment_id`, health |
-| `stripe.webhook.create` | `url` (HTTPS), `events:[...]`, `record` | Create an endpoint and store `whsec_…` in the record | `endpoint_id`, record revision |
+| `stripe.webhook.create` | `url` (HTTPS), `events:[...]`, `record` | Create an endpoint and store `whsec_…` in the record, bound to the endpoint with no destination | `endpoint_id`, record revision |
 | `stripe.webhook.rotate` | `endpoint_id`, `record`, `previous_record`, `vercel:{…}`, `health_path` | Create a new endpoint with the same URL and events. Move the current secret to `previous_record`, store the new one in `record`, push both, redeploy, check health, then delete the old endpoint | new `endpoint_id`, revisions |
-| `stripe.webhook.delete` | `endpoint_id` | Delete an endpoint (cleanup) | `deleted` |
+| `stripe.webhook.delete` | `endpoint_id` | Delete an endpoint (cleanup) and revoke its bindings (its whole lineage, if it is the current endpoint) | `deleted`, `revoked_bindings` |
+| `binding.allow` | `records:[record...]` (1 to 16), `team_id`, `project_id` | Allow bound records to be deployed to a Vercel project (every target). The only way a destination is added | `team_id`, `project_id`, `records:{name: revision}` |
 
 All IDs are validated against strict patterns:
 
@@ -114,6 +115,56 @@ prepares an existing one (`adopt` reassigns its existing public-schema
 objects). Preparation is idempotent. `neon.rotate` first checks it
 read-only (`RotationRolesReady`).
 
+### Record bindings
+
+Gaps closed: a push could send any non-`CONTROL_` record to any Vercel
+project (whose code the agent may control), and a rotation could overwrite
+any record it named.
+
+- **Store.** When an action creates a record, the broker stores a binding as
+  an encrypted vault object (kind `provider-binding`, keyed by record name;
+  not a record, so `names`, `run` and `request` never reach it): `{v,
+  record, provider, kind, resource, record_revision, allowed_destinations,
+  revoked}`. Kinds: `neon.pooled`, `neon.direct` (resource `project_id`,
+  `branch_id`), `stripe.webhook_secret`, `stripe.webhook_secret_previous`
+  (resource `endpoint_id`, `lineage` = the first endpoint of the rotation
+  chain). Only the provider service writes bindings, inside an approved
+  operation, with optimistic object revisions.
+- **Live.** A binding counts only if it exists, is not revoked, and
+  `record_revision` is the record's current revision. A value written by
+  anything else (owner entry, import) under a bound name is not bound.
+- **Pushes.** `vercel.env.push`, `neon.rotate` and `stripe.webhook.rotate`
+  push a record only if it is bound and `(team_id, project_id)` is in its
+  `allowed_destinations`; otherwise `RECORD_NOT_BOUND` or
+  `DESTINATION_NOT_ALLOWED`, before any prompt. Each operation re-checks
+  as its first step and pushes exactly the bound revision.
+- **Destinations.** Only `binding.allow` adds one (at most 16 per binding,
+  `BINDING_LIMIT`). Its Touch ID text: `ALLOW records A, B to be deployed to
+  Vercel project prj_… (team_…), every target including PRODUCTION; code
+  deployed there can read their values. Project created by this broker`
+  (or `NOT created by this broker`). A push can never widen a binding.
+- **Provenance.** `vercel.project.create` stores a `provider-vercel-project`
+  object; it only changes the `binding.allow` wording.
+- **Rotations.** `neon.rotate` needs both records bound to that exact
+  project and branch with kinds `neon.pooled`/`neon.direct`;
+  `stripe.webhook.rotate` needs `record` bound as `stripe.webhook_secret`
+  to `endpoint_id`, and `previous_record` either absent (then created) or
+  bound as `stripe.webhook_secret_previous` of the same lineage. Otherwise
+  `RECORD_NOT_BOUND` or `BINDING_MISMATCH`, before any prompt. After a
+  rotation the bindings pin the new revisions; Stripe's moves to the new
+  endpoint (same lineage) and `previous_record` inherits the record's
+  destinations. Create actions still refuse existing records.
+- **Deletes.** `neon.project.delete` and `stripe.webhook.delete` mark the
+  related bindings revoked after the provider delete succeeds. They never
+  delete records; the owner removes them.
+- **Unbound records** (owner-entered secrets such as Clerk keys) cannot be
+  pushed or rotated by provider actions in v1. That includes the URIs of a
+  Neon project EnvBank did not create: `neon.roles.prepare` works on it,
+  but `neon.rotate` needs bound records. Future path: an owner-only
+  `binding.adopt` for an existing record, with stronger wording ("EnvBank
+  did not create this value") and the owner's own Touch ID, never one the
+  agent can request alone.
+
 ### Approval text
 
 The broker builds the Touch ID reason from the validated plan only. Example:
@@ -143,7 +194,8 @@ details or deviates from the above:
   (`PROVIDER_UNAVAILABLE`: no factory, or no vault in setup mode), then
   strict params (`INVALID_REQUEST`: unknown fields, patterns, bounds), then
   side-effect-free prechecks (`CONTROL_CREDENTIAL_MISSING`, `RECORD_EXISTS`,
-  `UNKNOWN_SECRET`), then a run slot (`BROKER_BUSY`), and only then Touch
+  `UNKNOWN_SECRET`, `RECORD_NOT_BOUND`, `DESTINATION_NOT_ALLOWED`,
+  `BINDING_MISMATCH`, `BINDING_LIMIT`), then a run slot (`BROKER_BUSY`), and only then Touch
   ID. A plan whose text does not fit the 600-byte prompt is refused
   (`INVALID_REQUEST`), never clipped. Checks that need a provider call
   (roles prepared, Stripe test-mode key) run after approval as the first,
@@ -161,8 +213,14 @@ details or deviates from the above:
 - **Env var names.** Composite actions push each record under an env var of
   the same name (`DATABASE_URL`, `STRIPE_WEBHOOK_SECRET_PREVIOUS`, …).
 - **Records.** Create actions refuse an existing record (`RECORD_EXISTS`).
-  Rotations overwrite their named records; the approval text names them.
-  Each push reads the exact revision this operation stored.
+  Rotations overwrite only bound records (see
+  [Record bindings](#record-bindings)); the approval text names them. Each
+  push reads the exact revision this operation stored or checked.
+- **Binding steps.** `vault.check_bindings` (first step after `control`),
+  `vault.save_bindings`, `vault.allow_destination`, `vault.revoke_bindings`,
+  `vault.save_provenance`. A failed binding save fails the operation before
+  any push; the record then holds an unbound value (fail closed) and the
+  owner deletes it to recreate or re-rotate.
 - **Stripe rotation.** The current secret is copied to `previous_record`
   before the new endpoint is created, so the vault never loses the secret in
   use. If the operation fails after creating the endpoint, the new endpoint

@@ -40,11 +40,25 @@ func newProviderFixture(t *testing.T) *providerFixture {
 	}
 	f.values = append(f.values, brokerValues["API_KEY"])
 	f.g, f.own, f.clk = fixture(t, brokerValues)
+	for _, rec := range []string{"DATABASE_URL", "DATABASE_URL_UNPOOLED"} {
+		controls[rec] = provideractiontest.Sentinel("postgresql://app_a:")
+		f.values = append(f.values, controls[rec])
+	}
 	f.vault = provideractiontest.NewVault(f.log, controls)
+	bindNeonRecords(f.vault)
 	f.fake = provideractiontest.NewProviders(f.log)
 	f.g.Provider = provideraction.New(provideraction.Options{Vault: f.vault, Factory: f.fake, Clock: &provideractiontest.Clock{T: time.Now()}})
 	t.Cleanup(f.g.Close)
 	return f
+}
+
+// bindNeonRecords binds the rotation records as neon.project.create would,
+// allowed to prj_abc123 (team_abc123).
+func bindNeonRecords(v *provideractiontest.Vault) {
+	res := provideraction.BindingResource{ProjectID: "calm-sky-123456", BranchID: "br-main-1"}
+	dest := []provideraction.Destination{{TeamID: "team_abc123", ProjectID: "prj_abc123"}}
+	v.Bind(provideraction.Binding{Record: "DATABASE_URL", Provider: provideraction.ProviderNeon, Kind: provideraction.KindNeonPooled, Resource: res, AllowedDestinations: dest})
+	v.Bind(provideraction.Binding{Record: "DATABASE_URL_UNPOOLED", Provider: provideraction.ProviderNeon, Kind: provideraction.KindNeonDirect, Resource: res, AllowedDestinations: dest})
 }
 
 func (f *providerFixture) secrets() []string {

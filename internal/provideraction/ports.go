@@ -139,7 +139,11 @@ type Vault interface {
 	// revision; ErrMissing if absent.
 	Latest(ctx context.Context, name string, consume func([]byte) error) (int64, error)
 	Exists(ctx context.Context, name string) (bool, error)
+	// BindingStore keeps record bindings and Vercel provenance as encrypted
+	// vault objects beside the records (binding.go).
+	BindingStore
 }
 
-// ErrMissing is returned by Vault.Latest for an absent record.
+// ErrMissing is returned by Vault.Latest for an absent record, and by the
+// BindingStore loads for an absent object.
 var ErrMissing = errors.New("record not found")

@@ -30,6 +30,11 @@ const (
 	KindOperationEvidence    = "operation-evidence"
 	KindRollbackMaterial     = "rollback-material"
 	KindDeploymentOperation  = "deployment-operation"
+	// Provider-action provenance (internal/provideraction binding.go): one
+	// binding per record, keyed by record name, and one object per Vercel
+	// project the broker created, keyed by team/project.
+	KindProviderBinding       = "provider-binding"
+	KindProviderVercelProject = "provider-vercel-project"
 
 	MaxKindBytes    = 64
 	MaxKeyBytes     = 512

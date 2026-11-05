@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +23,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/protocol"
 	"github.com/GeorgeQLe/envbank/internal/provideraction"
 	"github.com/GeorgeQLe/envbank/internal/setup"
+	"github.com/GeorgeQLe/envbank/internal/vaultobject"
 	"golang.org/x/term"
 )
 
@@ -155,6 +157,96 @@ func (v *brokerVault) ReadSecret(_ context.Context, name string, revision int64,
 		return errors.New("record revision changed")
 	}
 	return consume(value)
+}
+
+// objectErr maps an absent vault object (HTTP 404) to ErrMissing.
+func objectErr(err error) error {
+	var status client.HTTPStatusError
+	if errors.As(err, &status) && status.Status == http.StatusNotFound {
+		return provideraction.ErrMissing
+	}
+	return err
+}
+
+// LoadBinding implements provideraction.BindingStore: bindings are
+// encrypted vault objects (never records), keyed by record name.
+func (v *brokerVault) LoadBinding(_ context.Context, record string) (provideraction.Binding, int64, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	object, err := v.api.GetObject(v.vaultKey, vaultobject.KindProviderBinding, record)
+	if err != nil {
+		return provideraction.Binding{}, 0, objectErr(err)
+	}
+	b, err := provideraction.DecodeBinding(object.Payload)
+	if err != nil || b.Record != record {
+		return provideraction.Binding{}, 0, errors.New("provider binding is invalid")
+	}
+	return b, object.Revision, nil
+}
+
+// SaveBinding implements provideraction.BindingStore (optimistic revision).
+func (v *brokerVault) SaveBinding(_ context.Context, b provideraction.Binding, expected int64) (int64, error) {
+	if !b.Valid() {
+		return 0, errors.New("provider binding is invalid")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	object, err := v.api.PutObject(v.vaultKey, vaultobject.KindProviderBinding, b.Record, b, expected)
+	if err != nil {
+		return 0, err
+	}
+	return object.Revision, nil
+}
+
+// ListBindings implements provideraction.BindingStore. An invalid binding
+// fails the whole list: revocation must not skip one silently.
+func (v *brokerVault) ListBindings(context.Context) ([]provideraction.StoredBinding, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	objects, err := v.api.ListObjects(v.vaultKey)
+	if err != nil {
+		return nil, err
+	}
+	var out []provideraction.StoredBinding
+	for _, object := range objects {
+		if object.Kind != vaultobject.KindProviderBinding {
+			continue
+		}
+		b, err := provideraction.DecodeBinding(object.Payload)
+		if err != nil || b.Record != object.Key {
+			return nil, errors.New("provider binding is invalid")
+		}
+		out = append(out, provideraction.StoredBinding{Binding: b, Revision: object.Revision})
+	}
+	return out, nil
+}
+
+// LoadVercelProject implements provideraction.BindingStore.
+func (v *brokerVault) LoadVercelProject(_ context.Context, teamID, projectID string) (provideraction.VercelProject, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	key := provideraction.VercelProjectKey(teamID, projectID)
+	object, err := v.api.GetObject(v.vaultKey, vaultobject.KindProviderVercelProject, key)
+	if err != nil {
+		return provideraction.VercelProject{}, objectErr(err)
+	}
+	p, err := provideraction.DecodeVercelProject(object.Payload)
+	if err != nil || provideraction.VercelProjectKey(p.TeamID, p.ProjectID) != key {
+		return provideraction.VercelProject{}, errors.New("vercel project provenance is invalid")
+	}
+	return p, nil
+}
+
+// SaveVercelProject implements provideraction.BindingStore (create only:
+// project IDs are never reused).
+func (v *brokerVault) SaveVercelProject(_ context.Context, p provideraction.VercelProject) error {
+	if !p.Valid() {
+		return errors.New("vercel project provenance is invalid")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	_, err := v.api.PutObject(v.vaultKey, vaultobject.KindProviderVercelProject, provideraction.VercelProjectKey(p.TeamID, p.ProjectID), p, 0)
+	return err
 }
 
 // providerActionFactory is the seam where the concrete Neon, Vercel and

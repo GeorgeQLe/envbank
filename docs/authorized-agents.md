@@ -260,8 +260,12 @@ What `envbank agent-broker` does today (`internal/authz`,
 - **Scopes.**
   - `names`, `run` and `request` take 1 to 16 secret names.
   - `setup` and `relay` take none.
-  - `provider` takes 1 to 10 action IDs in `actions` and no secrets; it
-    covers `provider_action` for those actions only.
+  - `provider` takes 1 to 12 action IDs (the v1 actions) in `actions` and
+    no secrets; it covers `provider_action` for those actions only.
+  - Record bindings (provider-action provenance) are encrypted vault
+    objects, not records: no op reaches them, and a value written through
+    `request` under a bound name is not bound (see
+    [record bindings](provider-actions.md#record-bindings)).
   - `CONTROL_*` records are reserved: `names` and `run` grants naming them
     are refused (`RESERVED_NAME`), `names` never lists them and `run` never
     injects them; `request` may name them so the owner can seed them.

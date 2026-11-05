@@ -38,10 +38,25 @@ func newEnv(t *testing.T, values map[string]string, opts ...func(*pa.Options)) *
 		e.controls = append(e.controls, v)
 		_ = k
 	}
+	// The Neon rotation records exist, created by the broker (bound to the
+	// project) and allowed to the default Vercel destination.
+	for _, rec := range []string{"DATABASE_URL", "DATABASE_URL_UNPOOLED"} {
+		all[rec] = provideractiontest.Sentinel("postgresql://app_a:")
+		e.controls = append(e.controls, all[rec])
+	}
 	for k, v := range values {
 		all[k] = v
+		e.controls = append(e.controls, v)
 	}
 	e.vault = provideractiontest.NewVault(e.log, all)
+	dest := []pa.Destination{{TeamID: "team_abc123", ProjectID: "prj_abc123"}}
+	neonRes := pa.BindingResource{ProjectID: "calm-sky-123456", BranchID: "br-main-1"}
+	e.vault.Bind(pa.Binding{Record: "DATABASE_URL", Provider: pa.ProviderNeon, Kind: pa.KindNeonPooled, Resource: neonRes, AllowedDestinations: dest})
+	e.vault.Bind(pa.Binding{Record: "DATABASE_URL_UNPOOLED", Provider: pa.ProviderNeon, Kind: pa.KindNeonDirect, Resource: neonRes, AllowedDestinations: dest})
+	if _, ok := all["STRIPE_WEBHOOK_SECRET"]; ok {
+		e.vault.Bind(pa.Binding{Record: "STRIPE_WEBHOOK_SECRET", Provider: pa.ProviderStripe, Kind: pa.KindStripeWebhookSecret,
+			Resource: pa.BindingResource{EndpointID: "we_old1", Lineage: "we_old1"}, AllowedDestinations: dest})
+	}
 	e.fake = provideractiontest.NewProviders(e.log)
 	o := pa.Options{Vault: e.vault, Factory: e.fake, Clock: e.clock}
 	for _, f := range opts {
@@ -142,6 +157,7 @@ func TestParamValidationIsStrict(t *testing.T) {
 		pa.ActionStripeWebhookCreate: js(t, map[string]any{"url": "https://shop.example.com/api/stripe", "events": []string{"invoice.paid"}, "record": "STRIPE_WEBHOOK_SECRET"}),
 		pa.ActionStripeWebhookRotate: stripeRotateParams(t),
 		pa.ActionStripeWebhookDelete: js(t, map[string]any{"endpoint_id": "we_abc"}),
+		pa.ActionBindingAllow:        js(t, map[string]any{"records": []string{"DATABASE_URL", "DATABASE_URL_UNPOOLED"}, "team_id": "team_abc", "project_id": "prj_abc"}),
 	}
 	if len(good) != len(pa.Actions()) {
 		t.Fatalf("every action needs a good case: %v", pa.Actions())
@@ -198,6 +214,12 @@ func TestParamValidationIsStrict(t *testing.T) {
 		{pa.ActionNeonRolesPrepare, `{"project_id":"calm","branch_id":"br-x","database":"d","adopt":false}`},
 		{pa.ActionNeonProjectCreate, `{"name":"x","records":{"pooled":"A","direct":"A"}}`},
 		{pa.ActionVercelProjectCreate, `{"team_id":"team_abc","name":"UPPER"}`},
+		{pa.ActionBindingAllow, `{"records":[],"team_id":"team_abc","project_id":"prj_abc"}`},
+		{pa.ActionBindingAllow, `{"records":["A","A"],"team_id":"team_abc","project_id":"prj_abc"}`},
+		{pa.ActionBindingAllow, `{"records":["CONTROL_VERCEL_TOKEN"],"team_id":"team_abc","project_id":"prj_abc"}`},
+		{pa.ActionBindingAllow, `{"records":["A"],"team_id":"team_abc"}`},
+		{pa.ActionBindingAllow, `{"records":["A"],"team_id":"team_abc","project_id":"prj_abc","target":"production"}`},
+		{pa.ActionBindingAllow, `{"records":["A"],"team_id":"team_abc","project_id":"prj_abc","brokerCreated":true}`},
 		{pa.ActionVercelProjectCreate, `{"team_id":"team_abc","name":"` + strings.Repeat("a", 101) + `"}`},
 	}
 	for _, c := range bad {
@@ -229,7 +251,7 @@ func TestPlanTextIsDeterministicAndNamesEverything(t *testing.T) {
 		t.Fatalf("production plan must say PRODUCTION: %s", prod)
 	}
 	s, _ := pa.Parse(pa.ActionStripeWebhookRotate, stripeRotateParams(t))
-	for _, want := range []string{"ROTATE Stripe webhook we_old1", "copy record STRIPE_WEBHOOK_SECRET to STRIPE_WEBHOOK_SECRET_PREVIOUS", "push both to Vercel prj_abc123", "then delete we_old1"} {
+	for _, want := range []string{"ROTATE Stripe webhook we_old1", "copy bound record STRIPE_WEBHOOK_SECRET to STRIPE_WEBHOOK_SECRET_PREVIOUS (bound as previous)", "push both to Vercel prj_abc123", "then delete we_old1"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("stripe.webhook.rotate plan lacks %q: %s", want, s)
 		}
@@ -260,7 +282,7 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 	if got := e.log.Calls(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("call order:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	wantSteps := []string{pa.StepControl, pa.StepNeonCheckRoles, pa.StepNeonResetNewRole, pa.StepVercelEnvPush, pa.StepVercelCurrent, pa.StepVercelRedeploy, pa.StepVercelWaitReady, pa.StepHealth, pa.StepNeonInvalidateOld}
+	wantSteps := []string{pa.StepControl, pa.StepBindingCheck, pa.StepNeonCheckRoles, pa.StepNeonResetNewRole, pa.StepBindingSave, pa.StepVercelEnvPush, pa.StepVercelCurrent, pa.StepVercelRedeploy, pa.StepVercelWaitReady, pa.StepHealth, pa.StepNeonInvalidateOld}
 	if strings.Join(st.Steps, ",") != strings.Join(wantSteps, ",") {
 		t.Fatalf("steps %v", st.Steps)
 	}
@@ -269,6 +291,12 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 		v, rev := e.vault.Value(rec)
 		if e.fake.Pushed[rec] != v || !strings.Contains(v, "app_b") || st.Result.Records[rec] != rev {
 			t.Fatalf("%s: pushed value or revision does not match the vault", rec)
+		}
+	}
+	for _, rec := range []string{"DATABASE_URL", "DATABASE_URL_UNPOOLED"} {
+		b, _ := e.vault.Binding(rec)
+		if _, rev := e.vault.Value(rec); b.RecordRevision != rev || len(b.AllowedDestinations) != 1 || b.Resource.ProjectID != "calm-sky-123456" {
+			t.Fatalf("%s binding not moved to the new value: %+v", rec, b)
 		}
 	}
 	r := st.Result
@@ -482,13 +510,24 @@ func TestOtherActionsAndPrechecks(t *testing.T) {
 		t.Fatalf("stripe create %+v", st)
 	}
 	e.noLeak(t, "stripe create", st)
-	st = e.run(t, pa.ActionVercelEnvPush, js(t, map[string]any{"team_id": "team_a", "project_id": "prj_a", "target": "preview", "variables": map[string]string{"APP_KEY": "EXISTING"}}))
+	ctx := context.Background()
+	push := js(t, map[string]any{"team_id": "team_a", "project_id": "prj_a", "target": "preview", "variables": map[string]string{"APP_KEY": "NEW_POOLED"}})
+	if _, code := e.svc.Prepare(ctx, pa.ActionVercelEnvPush, push); code != pa.CodeDestinationNotAllowed {
+		t.Fatalf("push before binding.allow: %q", code)
+	}
+	st = e.run(t, pa.ActionBindingAllow, js(t, map[string]any{"records": []string{"NEW_POOLED"}, "team_id": "team_a", "project_id": "prj_a"}))
+	if st.State != pa.StateSucceeded {
+		t.Fatalf("binding.allow %+v", st)
+	}
+	st = e.run(t, pa.ActionVercelEnvPush, push)
 	if st.State != pa.StateSucceeded || st.Result.Variables["APP_KEY"] != "upserted" {
 		t.Fatalf("env push %+v", st)
 	}
 	e.noLeak(t, "env push", st)
 	// Prechecks refuse before anything happens.
-	ctx := context.Background()
+	if _, code := e.svc.Prepare(ctx, pa.ActionVercelEnvPush, js(t, map[string]any{"team_id": "team_a", "project_id": "prj_a", "target": "preview", "variables": map[string]string{"APP_KEY": "EXISTING"}})); code != pa.CodeRecordNotBound {
+		t.Fatalf("push of an owner-entered record: %q", code)
+	}
 	if _, code := e.svc.Prepare(ctx, pa.ActionStripeWebhookCreate, js(t, map[string]any{"url": "https://shop.example.com/x", "events": []string{"invoice.paid"}, "record": "EXISTING"})); code != pa.CodeRecordExists {
 		t.Fatalf("overwrite by create: %q", code)
 	}
