@@ -23,10 +23,14 @@ const (
 	OutcomeRegistered = "registered"
 )
 
-// agentRequestTimeout bounds the handling of one agent request. The host's
-// service gives up after 150 s (agent tool calls after 120 s), so every
-// request, including any Touch ID prompt and run, is answered before that.
-const agentRequestTimeout = 140 * time.Second
+// agentRequestTimeout is the end-to-end budget of one agent request. The
+// host's agent tool calls give up after 120 s (its service after 150 s), so
+// every request, including any wait for the owner channel, Touch ID prompt
+// and run, is answered within 110 s: no Touch ID prompt starts with less than
+// approval.MinPromptTime left, a run's timeout_seconds is clamped to what is
+// left, and a request out of budget is answered at once with
+// agentbroker.CodeTimeBudget.
+const agentRequestTimeout = 110 * time.Second
 
 // xpcField is one flattened entry of an XPC dictionary, or one instruction
 // for building a reply.

@@ -28,6 +28,15 @@ versioning after the `v` prefix, while `0.x` releases remain unstable.
   `envbank mcp serve` reach only such brokers.
 - added a `run` request field `always` (`envbank agent run --always`) that
   asks for an "always" approval, scoped to the grant.
+- added optional pairing fields `vault_fingerprint` and `device_name` so the
+  host's and the broker's pairing Touch ID text name the broker's vault and
+  device (`setup` before a vault exists).
+- changed the agent-request budget to 110 s end to end: no Touch ID prompt
+  starts with under 15 s left, `timeout_seconds` is clamped to the time left,
+  and a request out of budget gets `TIME_BUDGET_EXHAUSTED` at once.
+- isolated the test-approver build: a separate Keychain service namespace and
+  owner-input identity, test-marked vaults only, and a signing guard
+  (`scripts/check-sign-target.sh`) that refuses tagged binaries.
 
 ## 0.2.0 - 2026-08-10
 

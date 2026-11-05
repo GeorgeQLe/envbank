@@ -1,6 +1,8 @@
 package client
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,9 +40,28 @@ type Config struct {
 	Salt             string      `json:"salt"`
 	Iterations       int         `json:"iterations"`
 	EncryptedSecret  secure.Blob `json:"encrypted_secret"`
+	// TestVault is set only by a test-approver build (TestVaultMarker). Such
+	// a build refuses every config without it.
+	TestVault string `json:"test_vault,omitempty"`
 
 	access   *AccessCredentials
 	migrated bool
+}
+
+// ErrNotTestVault is returned by LoadConfig in a test-approver build for a
+// config that a test-approver build did not create.
+var ErrNotTestVault = errors.New("TEST_APPROVER_BUILD_REFUSED: this device config was not created by a test-approver build (disposable test vaults only)")
+
+// TestVaultMarker is the marker a test-approver build writes into the configs
+// it creates, bound to their vault and device IDs.
+func TestVaultMarker(vaultID, deviceID string) string {
+	sum := sha256.Sum256([]byte("envbank test-approver vault v1\x00" + vaultID + "\x00" + deviceID))
+	return "test-approver-v1:" + hex.EncodeToString(sum[:16])
+}
+
+// IsTestVault reports whether the config carries a valid test-vault marker.
+func (c *Config) IsTestVault() bool {
+	return c.VaultID != "" && c.TestVault == TestVaultMarker(c.VaultID, c.DeviceID)
 }
 
 func NewConfig(server, vaultID, deviceID, deviceName string, keys secure.DeviceKeys, passphrase []byte) (*Config, error) {
@@ -53,6 +74,9 @@ func NewConfig(server, vaultID, deviceID, deviceName string, keys secure.DeviceK
 		DeviceName: deviceName, SigningPublic: keys.SigningPublic,
 		WrappingPublic: keys.WrappingPublic, Salt: secure.Encode(salt),
 		Iterations: secure.LocalIterations,
+	}
+	if testBuild {
+		cfg.TestVault = TestVaultMarker(vaultID, deviceID)
 	}
 	if err := cfg.Lock(keys.Secrets, passphrase); err != nil {
 		return nil, err
@@ -71,6 +95,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if (cfg.Version != 1 && cfg.Version != ConfigVersion) || cfg.Iterations < 100_000 || cfg.Iterations > 10_000_000 {
 		return nil, errors.New("unsupported or unsafe config format")
+	}
+	if testBuild && !cfg.IsTestVault() {
+		return nil, ErrNotTestVault
 	}
 	return &cfg, nil
 }

@@ -62,11 +62,12 @@ type Approver interface {
 const MaxReasonBytes = 600
 
 // DefaultTimeout is how long an approval waits for the owner. A request's
-// own deadline shortens it (agent requests are answered within 140 s).
+// own deadline shortens it (agent requests are answered within 110 s).
 const DefaultTimeout = 2 * time.Minute
 
-// MinPromptTime: with less time left than this, no prompt is shown.
-const MinPromptTime = 10 * time.Second
+// MinPromptTime: with less time left than this, no prompt is shown (the
+// request is refused with TIME_BUDGET_EXHAUSTED instead).
+const MinPromptTime = 15 * time.Second
 
 // Clean renders untrusted text as one plain line of at most maxRunes runes:
 // control, format (including bidi overrides) and other non-printing runes

@@ -40,6 +40,10 @@ update documentation, and ensure every required check passes. Never commit real
 credentials, device configs, databases, recovery artifacts, or generated
 binaries.
 
+Code signing: run `scripts/check-sign-target.sh BINARY` on every binary before
+it is signed. It fails for a test-approver build (`-tags envbank_testapprover`),
+which must never be signed.
+
 By intentionally submitting a contribution, you agree that it is provided
 under the project's [Apache License 2.0](LICENSE), as described in section 5 of
 that license. No CLA or DCO sign-off is required.

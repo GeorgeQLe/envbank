@@ -11,6 +11,10 @@ import (
 	"testing"
 
 	"github.com/GeorgeQLe/envbank/internal/approval"
+	"github.com/GeorgeQLe/envbank/internal/client"
+	"github.com/GeorgeQLe/envbank/internal/keychain"
+	"github.com/GeorgeQLe/envbank/internal/ownerinput"
+	"github.com/GeorgeQLe/envbank/internal/secure"
 )
 
 func TestFileApproverAnswersFromItsFile(t *testing.T) {
@@ -42,13 +46,14 @@ func TestTestApproverBuildRefusesChromuxAndRealConfigs(t *testing.T) {
 	answer := filepath.Join(t.TempDir(), "approve")
 	disposable := filepath.Join(t.TempDir(), "device.json")
 	for name, args := range map[string][]string{
-		"chromux":           {"--owner-input", "chromux", "--owner-input-unqualified", "--config", disposable},
-		"chromux+approver":  {"--test-approver-file", answer, "--owner-input", "chromux", "--owner-input-unqualified", "--legacy-socket", "--config", disposable},
-		"other channel":     {"--owner-input", "xpc", "--config", disposable},
-		"default config":    {"--test-approver-file", answer, "--legacy-socket"},
-		"home config":       {"--legacy-socket", "--config", filepath.Join(os.Getenv("HOME"), ".envbank-test-device.json")},
-		"escape via dotdot": {"--legacy-socket", "--config", filepath.Join(os.TempDir(), "..", "device.json")},
-		"tmpdir itself":     {"--legacy-socket", "--config", os.TempDir()},
+		"chromux":                         {"--owner-input", "chromux", "--owner-input-unqualified", "--config", disposable},
+		"chromux+approver":                {"--test-approver-file", answer, "--owner-input", "chromux", "--owner-input-unqualified", "--legacy-socket", "--config", disposable},
+		"other channel":                   {"--owner-input", "xpc", "--config", disposable},
+		"default config":                  {"--test-approver-file", answer, "--legacy-socket"},
+		"home config":                     {"--legacy-socket", "--config", filepath.Join(os.Getenv("HOME"), ".envbank-test-device.json")},
+		"escape via dotdot":               {"--legacy-socket", "--config", filepath.Join(os.TempDir(), "..", "device.json")},
+		"tmpdir itself":                   {"--legacy-socket", "--config", os.TempDir()},
+		"production owner-input identity": {"--legacy-socket", "--owner-input-identifier", ownerinput.ServiceIdentifier, "--config", disposable},
 	} {
 		err := agentBrokerCommand(args)
 		if err == nil || !strings.HasPrefix(err.Error(), testBuildRefused+": ") {
@@ -62,7 +67,43 @@ func TestTestApproverBuildRefusesChromuxAndRealConfigs(t *testing.T) {
 	}
 	// A TMPDIR that is the home directory proves nothing.
 	t.Setenv("TMPDIR", os.Getenv("HOME"))
-	if err := testBuildGuard("terminal", filepath.Join(os.Getenv("HOME"), "x", "device.json")); err == nil {
+	if err := testBuildGuard("terminal", ownerInputIdentifier, filepath.Join(os.Getenv("HOME"), "x", "device.json")); err == nil {
 		t.Fatal("TMPDIR=$HOME accepted")
+	}
+}
+
+// A tagged build has its own Keychain namespace and owner-input identity,
+// and refuses any device config that a tagged build did not create, even
+// under TMPDIR, before any prompt.
+func TestTestApproverBuildRefusesProductionIdentityAndVaults(t *testing.T) {
+	if keychain.ServiceName(keychain.Service) == keychain.Service || ownerInputIdentifier == ownerinput.ServiceIdentifier ||
+		!strings.HasPrefix(ownerInputIdentifier, testBuildSigningIdentifier) {
+		t.Fatal("test build shares a production Keychain service or signing identity")
+	}
+	keys, err := secure.NewDeviceKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := client.NewConfig("http://127.0.0.1:1", "vault", "device", "test", keys, []byte("disposable-passphrase"))
+	if err != nil || !cfg.IsTestVault() {
+		t.Fatalf("tagged build did not mark its config: %v", err)
+	}
+	dir := t.TempDir()
+	marked := filepath.Join(dir, "marked.json")
+	if err := cfg.Save(marked); err != nil {
+		t.Fatal(err)
+	}
+	cfg.TestVault = "" // as written by a production build
+	unmarked := filepath.Join(dir, "unmarked.json")
+	if err := cfg.Save(unmarked); err != nil {
+		t.Fatal(err)
+	}
+	err = agentBrokerCommand([]string{"--legacy-socket", "--config", unmarked})
+	if err == nil || !strings.HasPrefix(err.Error(), testBuildRefused+": ") {
+		t.Fatalf("unmarked config: %v", err)
+	}
+	err = agentBrokerCommand([]string{"--legacy-socket", "--config", marked})
+	if err == nil || strings.Contains(err.Error(), testBuildRefused) || !strings.Contains(err.Error(), "interactive terminal") {
+		t.Fatalf("marked config: %v", err)
 	}
 }

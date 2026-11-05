@@ -103,12 +103,20 @@ func TestTerminalTypingCannotConfirmSetupOrPairing(t *testing.T) {
 		t.Fatal("unavailable biometry approved")
 	}
 	p := &fakePairer{}
-	if err := pairProvider(context.Background(), p, tp, deny); err == nil || p.confirmed {
+	if err := pairProvider(context.Background(), p, tp, deny, ownerinput.PairingLabel{VaultFingerprint: ownerinput.SetupVaultFingerprint}); err == nil || p.confirmed {
 		t.Fatal("paired without Touch ID")
 	}
 	ok := &recordingApprover{outcome: approval.Approved}
-	if err := pairProvider(context.Background(), p, tp, ok); err != nil || !p.confirmed || !strings.Contains(ok.reasons[0], "code 123456") {
+	label := ownerinput.PairingLabel{VaultFingerprint: ownerinput.VaultFingerprint("vault-1"), DeviceName: "Owner\u202eMac"}
+	if err := pairProvider(context.Background(), p, tp, ok, label); err != nil || !p.confirmed || !strings.Contains(ok.reasons[0], "code 123456") {
 		t.Fatalf("pairing: %v %v", err, ok.reasons)
+	}
+	// The broker's Touch ID reason names its vault and (sanitized) device.
+	if !strings.Contains(ok.reasons[0], "vault "+ownerinput.VaultFingerprint("vault-1")) || !strings.Contains(ok.reasons[0], "device “Owner?Mac”") {
+		t.Fatalf("pairing reason does not name the vault/device: %q", ok.reasons[0])
+	}
+	if deny.reasons[len(deny.reasons)-1] == "" || !strings.Contains(deny.reasons[len(deny.reasons)-1], "setup mode") {
+		t.Fatalf("setup-mode pairing reason: %q", deny.reasons[len(deny.reasons)-1])
 	}
 	_ = r.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 	buf := make([]byte, 64)

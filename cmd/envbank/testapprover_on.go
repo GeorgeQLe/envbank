@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/GeorgeQLe/envbank/internal/approval"
+	"github.com/GeorgeQLe/envbank/internal/ownerinput"
 )
 
 // TEST-ONLY BUILD (-tags envbank_testapprover). This file is not compiled
@@ -32,13 +33,29 @@ func registerTestApprover(fs *flag.FlagSet) func() approval.Approver {
 // testBuildRefused is the fixed refusal of the test-approver build.
 const testBuildRefused = "TEST_APPROVER_BUILD_REFUSED"
 
+// testBuildSigningIdentifier is the separate code-signing identity of the
+// test-approver build. Production identities (com.georgeqle.envbank for the
+// broker, ownerinput.ServiceIdentifier for the owner-input service) are never
+// expected or trusted by it; scripts/check-sign-target.sh refuses to sign a
+// tagged binary at all. Its Keychain items live under keychain.TestService.
+const testBuildSigningIdentifier = "com.georgeqle.envbank.testapprover"
+
+// ownerInputIdentifier is the owner-input service identifier a tagged build
+// expects: never the production service's.
+const ownerInputIdentifier = testBuildSigningIdentifier + ".owner-input"
+
 // testBuildGuard keeps a test-approver binary away from anything real: it
 // never uses Chromux or any XPC agent channel (only the terminal and the
-// development socket), and it only opens device configs under TMPDIR, so a
-// real vault cannot be unlocked with file-answered approvals.
-func testBuildGuard(ownerInput, configPath string) error {
+// development socket), never expects the production owner-input identity, and
+// it only opens device configs under TMPDIR, so a real vault cannot be
+// unlocked with file-answered approvals. (Configs must also carry the test
+// marker that only a tagged build writes: client.LoadConfig refuses others.)
+func testBuildGuard(ownerInput, identifier, configPath string) error {
 	if ownerInput != "terminal" {
 		return errors.New(testBuildRefused + ": a test-approver build never uses --owner-input chromux or any XPC agent channel")
+	}
+	if identifier != ownerInputIdentifier || identifier == ownerinput.ServiceIdentifier {
+		return errors.New(testBuildRefused + ": a test-approver build never expects the production owner-input identity")
 	}
 	if !underTempDir(configPath) {
 		return errors.New(testBuildRefused + ": a test-approver build only opens device configs under TMPDIR (disposable vaults)")

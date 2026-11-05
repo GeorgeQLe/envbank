@@ -141,6 +141,11 @@ const (
 	// argument, directory, secrets) does not fit in the Touch ID prompt, so it
 	// cannot be approved. The owner was not prompted.
 	CodeCommandTooLong = "COMMAND_TOO_LONG_TO_APPROVE"
+	// CodeTimeBudget: the request's end-to-end time budget (110 s on the
+	// agent channel) does not leave enough time to prompt the owner or run
+	// the command. The owner was not prompted (or the wait ended unanswered
+	// before a prompt), and nothing ran.
+	CodeTimeBudget = "TIME_BUDGET_EXHAUSTED"
 )
 
 // States for an ingest request.

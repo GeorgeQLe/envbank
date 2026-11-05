@@ -114,7 +114,7 @@ func agentBrokerCommand(args []string) error {
 	useExisting := fs.Bool("use-existing-server", false, "setup: allow reusing an EnvBank server you already started on the plan's address")
 	ownerInput := fs.String("owner-input", "terminal", "where the owner types secrets: terminal or chromux (verified, paired desktop provider)")
 	oiTeam := fs.String("owner-input-team", "NC56VXK48K", "Apple Team ID the desktop owner-input service must be signed by (Developer ID)")
-	oiIdent := fs.String("owner-input-identifier", ownerinput.ServiceIdentifier, "code-signing identifier of the owner-input XPC service")
+	oiIdent := fs.String("owner-input-identifier", ownerInputIdentifier, "code-signing identifier of the owner-input XPC service")
 	oiService := fs.String("owner-input-service", ownerinput.BrokerServiceName, "Mach service name of the owner-input XPC service")
 	oiUnqualified := fs.Bool("owner-input-unqualified", false, "use the Chromux XPC owner input before its installed-build no-leak qualification has passed")
 	auth := addAuthFlags(fs)
@@ -125,8 +125,18 @@ func agentBrokerCommand(args []string) error {
 		return errors.New("usage: envbank agent-broker [--owner-input chromux --owner-input-unqualified] [--legacy-socket [--socket PATH]] [--allow-password-fallback] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]")
 	}
 	// A test-approver build never reaches Chromux or a real vault.
-	if err := testBuildGuard(*ownerInput, auth.configPath); err != nil {
+	if err := testBuildGuard(*ownerInput, *oiIdent, auth.configPath); err != nil {
 		return err
+	}
+	// The config is read (not unlocked) first: a broken one fails before any
+	// prompt, and its vault and device name the broker in the pairing.
+	cfg, cfgErr := client.LoadConfig(auth.configPath)
+	if cfgErr != nil && !errors.Is(cfgErr, os.ErrNotExist) {
+		return cfgErr
+	}
+	label := ownerinput.PairingLabel{VaultFingerprint: ownerinput.SetupVaultFingerprint}
+	if cfgErr == nil {
+		label = ownerinput.PairingLabel{VaultFingerprint: ownerinput.VaultFingerprint(cfg.VaultID), DeviceName: cfg.DeviceName}
 	}
 	terminal, err := agentbroker.NewTerminalPrompter(os.Stdin, os.Stdout)
 	if err != nil {
@@ -162,13 +172,13 @@ func agentBrokerCommand(args []string) error {
 		if !*oiUnqualified {
 			return errors.New("--owner-input chromux has not passed its installed-build no-leak qualification yet; add --owner-input-unqualified to use it anyway (or use the terminal)")
 		}
-		p := &ownerinput.XPCProvider{Service: *oiService, TeamID: *oiTeam, Identifier: *oiIdent}
+		p := &ownerinput.XPCProvider{Service: *oiService, TeamID: *oiTeam, Identifier: *oiIdent, Label: label}
 		ch := &ownerinput.AgentChannel{Provider: p, Notify: prompter.Notify}
 		// Pairing happens on the connection the agent channel registers on,
 		// and needs the owner's Touch ID in Chromux (the service replies
 		// "confirmed") and then here. Allow time to compare the codes.
 		pctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		err := pairProvider(pctx, channelPairer{ch: ch, serialize: &ownerChannel}, terminal, approver)
+		err := pairProvider(pctx, channelPairer{ch: ch, serialize: &ownerChannel}, terminal, approver, label)
 		cancel()
 		if err != nil {
 			fmt.Fprintf(os.Stdout, "Chromux secure input not paired (%v); secrets will be typed in this terminal.\n", err)
@@ -195,8 +205,7 @@ func agentBrokerCommand(args []string) error {
 			vault.wipe()
 		}
 	}()
-	cfg, err := client.LoadConfig(auth.configPath)
-	switch {
+	switch err := cfgErr; {
 	case errors.Is(err, os.ErrNotExist) && !*setupMode:
 		return fmt.Errorf("no EnvBank device config at %s: run `envbank init` or `envbank enroll-request`, or start `envbank agent-broker --setup` to let an agent propose a setup", auth.configPath)
 	case errors.Is(err, os.ErrNotExist):

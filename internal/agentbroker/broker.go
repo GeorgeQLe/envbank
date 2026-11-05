@@ -223,6 +223,10 @@ func (b *Broker) ForgetAlways(scope string) {
 // response: ok, DENIED_BY_OWNER or APPROVAL_UNAVAILABLE. Callers hold the
 // owner channel (WithOwnerPrompt).
 func (b *Broker) Approve(ctx context.Context, reason string) Response {
+	if !promptTimeLeft(ctx) {
+		b.prompter.Notify("refused: too little of the request's time budget is left for a Touch ID prompt")
+		return refuse(CodeTimeBudget)
+	}
 	if !b.approver.Available() {
 		b.prompter.Notify("Touch ID is unavailable on this Mac: approval refused (nothing typed here can approve)")
 		return refuse(CodeApprovalUnavailable)
@@ -297,16 +301,28 @@ func (b *Broker) WithOwnerPrompt(ctx context.Context, fn func() Response) Respon
 }
 
 func (b *Broker) withPrompt(ctx context.Context, fn func() Response) Response {
+	if !promptTimeLeft(ctx) {
+		return refuse(CodeTimeBudget)
+	}
 	select {
 	case b.queued <- struct{}{}:
 	default:
 		return refuse(CodeBusy)
 	}
 	defer func() { <-b.queued }()
-	// Waiting is bounded by the request's own context (the host gives up on
-	// an agent request after 150 s), so a queued request never hangs.
+	// Waiting is bounded by the request's own budget (110 s on the agent
+	// channel): a queued request is answered TIME_BUDGET_EXHAUSTED as soon as
+	// too little is left to prompt, so it never hangs or prompts too late.
+	var budget <-chan time.Time
+	if dl, ok := ctx.Deadline(); ok {
+		t := time.NewTimer(time.Until(dl) - approval.MinPromptTime)
+		defer t.Stop()
+		budget = t.C
+	}
 	select {
 	case b.prompt <- struct{}{}:
+	case <-budget:
+		return refuse(CodeTimeBudget)
 	case <-ctx.Done():
 		return refuse(CodeDenied)
 	}
@@ -316,6 +332,16 @@ func (b *Broker) withPrompt(ctx context.Context, fn func() Response) Response {
 	}
 	return fn()
 }
+
+// promptTimeLeft reports whether ctx leaves at least approval.MinPromptTime
+// for the owner (always, without a deadline).
+func promptTimeLeft(ctx context.Context) bool {
+	dl, ok := ctx.Deadline()
+	return !ok || time.Until(dl) >= approval.MinPromptTime
+}
+
+// runReplyMargin is kept from a run's budget to redact and send its reply.
+const runReplyMargin = 2 * time.Second
 
 func (b *Broker) ingest(ctx context.Context, caller Caller, req Request) Response {
 	if !ValidName(req.Name) || len(req.Secrets) != 0 || len(req.Argv) != 0 || req.Dir != "" || req.TimeoutSeconds != 0 || req.Always ||
@@ -465,6 +491,16 @@ func (b *Broker) run(ctx context.Context, caller Caller, req Request) Response {
 	}
 	if caller.TimeLeft != nil {
 		timeout = min(timeout, caller.TimeLeft())
+	}
+	// timeout_seconds is clamped to what is left of the request's budget,
+	// keeping a margin to reply; with nothing left, nothing runs.
+	if dl, ok := ctx.Deadline(); ok {
+		left := time.Until(dl) - runReplyMargin
+		if left <= 0 {
+			b.prompter.Notify("refused: the request's time budget ran out before " + cmd.Executable + " could start")
+			return refuse(CodeTimeBudget)
+		}
+		timeout = min(timeout, left)
 	}
 	// Ending the grant (revoke, expiry, broker lock) kills the run.
 	scoped, end := context.WithCancelCause(ctx)

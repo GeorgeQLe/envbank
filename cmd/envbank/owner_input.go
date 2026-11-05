@@ -106,8 +106,8 @@ type pairer interface {
 
 // pairProvider pairs a desktop provider for this broker session. The details
 // are shown in the terminal; the owner confirms the code with Touch ID.
-func pairProvider(ctx context.Context, p pairer, t *agentbroker.TerminalPrompter, a approval.Approver) error {
-	return p.Pair(ctx, pairConfirm(ctx, t, a))
+func pairProvider(ctx context.Context, p pairer, t *agentbroker.TerminalPrompter, a approval.Approver, label ownerinput.PairingLabel) error {
+	return p.Pair(ctx, pairConfirm(ctx, t, a, label))
 }
 
 // pairConfirm is the broker-terminal half of pairing: Chromux has already
@@ -115,16 +115,20 @@ func pairProvider(ctx context.Context, p pairer, t *agentbroker.TerminalPrompter
 // the service identity here and asks for Touch ID again. Each confirmation
 // gets its own approval deadline (re-pairing after a service restart happens
 // long after start-up), bounded by ctx only while ctx is live.
-func pairConfirm(ctx context.Context, t *agentbroker.TerminalPrompter, a approval.Approver) func(id ownerinput.Identity, code string) bool {
+//
+// label names this broker's vault and device (the same fields go in the
+// pairing frame, so Chromux's Touch ID text names them too).
+func pairConfirm(ctx context.Context, t *agentbroker.TerminalPrompter, a approval.Approver, label ownerinput.PairingLabel) func(id ownerinput.Identity, code string) bool {
 	return func(id ownerinput.Identity, code string) bool {
 		t.ShowPlan("Pair Chromux secure input", []string{
+			"this broker: " + label.Describe(),
 			fmt.Sprintf("service signed by team %s (Developer ID), identifier %s; verified by macOS on every message", id.TeamID, id.Identifier),
 			"service build cdhash " + id.CDHash + " (pinned for this session)",
 			"Chromux reports that you confirmed pairing code " + code + " there with Touch ID.",
 			"Touch ID here only if the Chromux window showed exactly this code.",
 		})
-		reason := approval.Reason("pair with Chromux secure input that showed code %s (team %s, %s, build %.12s)",
-			code, approval.Clean(id.TeamID, 16), approval.Clean(id.Identifier, 64), approval.Clean(id.CDHash, 64))
+		reason := approval.Reason("pair EnvBank (%s) with Chromux secure input that showed code %s (team %s, %s, build %.12s)",
+			label.Describe(), code, approval.Clean(id.TeamID, 16), approval.Clean(id.Identifier, 64), approval.Clean(id.CDHash, 64))
 		actx := ctx
 		if ctx.Err() != nil {
 			actx = context.Background()

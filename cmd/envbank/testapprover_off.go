@@ -6,6 +6,7 @@ import (
 	"flag"
 
 	"github.com/GeorgeQLe/envbank/internal/approval"
+	"github.com/GeorgeQLe/envbank/internal/ownerinput"
 )
 
 // registerTestApprover adds nothing in the default build: production
@@ -15,5 +16,9 @@ func registerTestApprover(*flag.FlagSet) func() approval.Approver {
 	return func() approval.Approver { return nil }
 }
 
+// ownerInputIdentifier is the code-signing identifier the broker expects of
+// the owner-input XPC service by default.
+const ownerInputIdentifier = ownerinput.ServiceIdentifier
+
 // testBuildGuard restricts nothing in the default build.
-func testBuildGuard(string, string) error { return nil }
+func testBuildGuard(string, string, string) error { return nil }

@@ -3,6 +3,8 @@ package ownerinput
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -10,6 +12,9 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"github.com/GeorgeQLe/envbank/internal/approval"
 )
 
 // XPCVersion is the XPC transport version (docs/owner-input-xpc.md).
@@ -40,6 +45,9 @@ type XPCProvider struct {
 	Service    string
 	TeamID     string
 	Identifier string
+	// Label names this broker's vault and device in the pairing frame, so
+	// the host's Touch ID text says which broker is asking (optional).
+	Label PairingLabel
 
 	mu     sync.Mutex
 	cdhash string // pinned after pairing
@@ -57,6 +65,69 @@ func (p *XPCProvider) Requirement() (string, error) {
 		req += fmt.Sprintf(` and cdhash H"%s"`, p.cdhash)
 	}
 	return req, nil
+}
+
+// PairingLabel is the optional broker identity sent with a pairing:
+// vault_fingerprint (a short hash of the vault ID, or "setup" before a vault
+// exists) and device_name (this device's EnvBank name, sanitized). Both are
+// at most MaxPairingLabelBytes; neither is secret or authoritative.
+type PairingLabel struct {
+	VaultFingerprint string
+	DeviceName       string
+}
+
+// MaxPairingLabelBytes bounds each pairing label field.
+const MaxPairingLabelBytes = 64
+
+// SetupVaultFingerprint is the vault_fingerprint of a broker in setup mode.
+const SetupVaultFingerprint = "setup"
+
+var fingerprintRe = regexp.MustCompile(`^([0-9a-f]{16}|setup)$`)
+
+// VaultFingerprint is the short public fingerprint of a vault ID shown in
+// pairing prompts: 16 hex digits of a domain-separated SHA-256.
+func VaultFingerprint(vaultID string) string {
+	sum := sha256.Sum256([]byte("envbank vault fingerprint v1\x00" + vaultID))
+	return hex.EncodeToString(sum[:8])
+}
+
+// CleanDeviceName renders a device name as one plain line of at most
+// MaxPairingLabelBytes bytes (control and format characters replaced).
+func CleanDeviceName(name string) string {
+	s := approval.Clean(name, MaxPairingLabelBytes)
+	for len(s) > MaxPairingLabelBytes {
+		_, n := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-n]
+	}
+	return s
+}
+
+// fields returns the label's pairing-frame fields; an invalid fingerprint is
+// omitted rather than sent.
+func (l PairingLabel) fields() []xpcField {
+	var f []xpcField
+	if fingerprintRe.MatchString(l.VaultFingerprint) {
+		f = append(f, xpcField{'S', "vault_fingerprint", l.VaultFingerprint})
+	}
+	if d := CleanDeviceName(l.DeviceName); d != "" {
+		f = append(f, xpcField{'S', "device_name", d})
+	}
+	return f
+}
+
+// Describe is the label as shown in the broker's own pairing prompt.
+func (l PairingLabel) Describe() string {
+	v := "unknown vault"
+	switch {
+	case l.VaultFingerprint == SetupVaultFingerprint:
+		v = "setup mode, no vault yet"
+	case fingerprintRe.MatchString(l.VaultFingerprint):
+		v = "vault " + l.VaultFingerprint
+	}
+	if d := CleanDeviceName(l.DeviceName); d != "" {
+		return v + ", device " + approval.Quote(d, MaxPairingLabelBytes)
+	}
+	return v
 }
 
 // OutcomeConfirmed is the only pairing outcome that pairs: the service shows
@@ -87,8 +158,9 @@ func (p *XPCProvider) pairOn(ctx context.Context, conn agentConn, confirm func(i
 	}
 	code := fmt.Sprintf("%06d", n.Int64())
 	expires := time.Now().Add(requestTTL).UTC()
-	r, err := conn.Request([]xpcField{{'S', "v", XPCVersion}, {'S', "kind", "pairing"}, {'S', "nonce", nonce},
-		{'S', "pairing_code", code}, {'S', "expires_at", expires.Format(time.RFC3339)}}, time.Until(expires)+responseWaitExtra)
+	frame := []xpcField{{'S', "v", XPCVersion}, {'S', "kind", "pairing"}, {'S', "nonce", nonce},
+		{'S', "pairing_code", code}, {'S', "expires_at", expires.Format(time.RFC3339)}}
+	r, err := conn.Request(append(frame, p.Label.fields()...), time.Until(expires)+responseWaitExtra)
 	if err != nil {
 		return err
 	}

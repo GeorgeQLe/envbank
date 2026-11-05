@@ -1,8 +1,8 @@
 # Authorized agents (`envbank.authorized-agents/v1`)
 
-Status (November 4, 2026): **broker side implemented and unit-tested; host
-side (the desktop host's forwarding, tool surface and settings) not built
-yet; not run end to end; not qualified.** See
+Status (November 5, 2026): **broker side implemented and unit-tested; host
+side (the desktop host's forwarding, tool surface and settings) built,
+unqualified; not qualified end to end.** See
 [Broker implementation](#broker-implementation).
 
 Owner decisions:
@@ -43,9 +43,8 @@ anything: the broker runs the biometric check itself.
   connection** (the service replies `confirmed` only after the owner's
   Touch ID in Chromux; then the owner's Touch ID in the broker terminal), and
   only then sends `{v, kind:"broker_hello"}` on it. Only the broker
-  connection that completed a host-confirmed pairing may register; the
-  service keeps it as the agent-request target and warns the owner in
-  Chromux whenever the registered broker connection changes. Secret entry
+  connection that completed a host-confirmed pairing may register (see
+  [Broker replacement](#broker-implementation) below). Secret entry
   (`kind:"entry"`) also goes only over this paired connection; the service
   refuses entry on any other broker connection.
 - **Forwarding.** Chromux sends `{v, kind:"agent_request", session, request}`
@@ -138,6 +137,12 @@ The reply is the agent broker response (value-free, fixed codes) plus `route_id`
   access.
 - **No silent requests.** The host never creates `grant_request` on its own.
   Only a session's tool call does.
+- **Remote debugging is refused by the host.** Refusing to run the secure
+  window, pairing or agent forwarding while the host is remotely debuggable
+  (for example started with a remote-debugging port, through which an agent
+  could drive it) is the host's job. The broker cannot observe the host's
+  launch flags and does not check them; it relies on the host's code
+  signature (no `get-task-allow`) and the host-side refusal.
 
 ## Broker implementation
 
@@ -155,9 +160,21 @@ What `envbank agent-broker` does today (`internal/authz`,
   same connection. If the connection is interrupted (the service
   restarted), the broker pairs again on it, then says hello again; if it
   becomes invalid, it reconnects (pairing again) with backoff (1 s up to
-  30 s). The
-  service makes the newest broker connection the agent-request target. At
-  most 8 requests are handled at a time.
+  30 s). At most 8 requests are handled at a time.
+- **Broker replacement (host side).** The agent-request target is never
+  simply the newest broker connection. Only a broker connection that
+  completed a host-confirmed pairing may register. While a broker is
+  registered, another paired broker replaces it only after an explicit owner
+  action in Chromux Settings confirmed with Touch ID; until then the
+  registered broker stays the target and the newcomer is refused. The
+  service warns the owner in Chromux whenever the registered broker changes.
+- **Pairing identity.** The pairing frame carries `vault_fingerprint` (16
+  lowercase hex digits of a domain-separated SHA-256 of the vault ID, or
+  `setup` in setup mode) and `device_name` (this device's EnvBank name,
+  cleaned to one plain line, at most 64 bytes), so the host's Touch ID text
+  names which broker is asking. The broker's own pairing Touch ID reason
+  names the same vault and device. Both fields are optional, non-secret and
+  for display only (owner-input-xpc.md).
 - **`agent_request`, as received by the broker.** Every message carries
   `v:"envbank.owner-input-xpc/v1"`. The service sends this one as a message
   expecting a reply, on the broker's existing connection, with exactly these
@@ -213,12 +230,16 @@ What `envbank agent-broker` does today (`internal/authz`,
     (empty for `setup` and `relay`) and times are RFC 3339 UTC.
 - **Time budget.** The host's service gives up on an agent request after
   150 s, and agent tool calls are capped at 120 s, so the broker answers
-  every agent request within 140 s:
-  - A request still waiting for the owner channel at the deadline gets
-    `DENIED_BY_OWNER`.
-  - A Touch ID prompt is limited to the time left; with under 10 s left, it
-    is not shown.
-  - A run still going at the deadline is killed and reported `timed_out`.
+  every agent request within an end-to-end budget of 110 s:
+  - No Touch ID prompt starts with under 15 s of the budget left. A request
+    still waiting for the owner channel when only 15 s are left, or reaching
+    an approval with less, is answered at once with the fixed code
+    `TIME_BUDGET_EXHAUSTED` (the owner is not prompted).
+  - A Touch ID prompt is limited to the time left.
+  - A run's `timeout_seconds` is clamped to the budget left (less a 2 s
+    reply margin); with no time left it is not started
+    (`TIME_BUDGET_EXHAUSTED`). A run still going then is killed and
+    reported `timed_out`.
 - **Scopes.**
   - `names`, `run` and `request` take 1 to 16 secret names.
   - `setup` and `relay` take none.
@@ -270,8 +291,23 @@ What `envbank agent-broker` does today (`internal/authz`,
   `--test-approver-file PATH`, which answers approvals from a file, for
   disposable end-to-end runs only. Such a build refuses
   `--owner-input chromux` (so any XPC agent channel) and any `--config`
-  outside a dedicated `TMPDIR` with `TEST_APPROVER_BUILD_REFUSED`. The
-  default build has no such flag; a source/build test checks both.
+  outside a dedicated `TMPDIR` with `TEST_APPROVER_BUILD_REFUSED`. It has its
+  own identity, separate from production:
+  - **Keychain.** Every Keychain service it uses is moved under
+    `com.georgeqle.envbank.testapprover`, so it can never read, overwrite or
+    delete production Keychain items.
+  - **Code signing.** It expects the owner-input service identifier
+    `com.georgeqle.envbank.testapprover.owner-input`, never the production
+    one, and it must never be signed: `scripts/check-sign-target.sh
+    BINARY` fails if `go version -m` shows the `envbank_testapprover` tag,
+    and **every signing step must run it on the binary first**.
+  - **Test vaults only.** Every device config it creates carries a
+    `test_vault` marker bound to its vault and device IDs; it refuses to load
+    any config without a valid marker (`TEST_APPROVER_BUILD_REFUSED`), so a
+    vault created by a production build cannot be opened by it.
+
+  The default build has no such flag, marker or namespace; a source/build
+  test checks both.
 
 ## Not covered
 

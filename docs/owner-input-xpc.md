@@ -110,6 +110,8 @@ type-checked. Unknown keys mean the message is dropped and the reply is
 | `nonce` | string | 32 lowercase hex |
 | `expires_at` | string | RFC 3339, at most 120 s ahead |
 | `pairing_code` | string | pairing only, 6 digits |
+| `vault_fingerprint` | string | pairing only, optional: 16 lowercase hex digits (domain-separated SHA-256 of the vault ID) or `setup` before a vault exists; at most 64 characters |
+| `device_name` | string | pairing only, optional: the broker device's EnvBank name, one plain line (control and bidi characters replaced), at most 64 bytes; untrusted, display only |
 | `purpose` | string | entry only: `new_vault_passphrase`, `recovery_passphrase`, `unlock_passphrase` or `secret_value` |
 | `title` `detail` `subject` | string | entry only; untrusted; at most 80 / 300 / 128 characters; no control or bidi characters |
 | `min_bytes` `max_bytes` | int64 | entry only; `1 ≤ min ≤ max ≤ 4096` |
@@ -145,9 +147,16 @@ pairing on that connection. The service must:
 - accept `entry` only on that same paired connection, and refuse it on any
   other broker connection (an unpaired broker must never be able to open a
   secure-input window and receive what the owner types);
+- never let the newest broker connection replace a registered one by
+  itself: a different paired broker becomes the target only after an
+  explicit owner action in Chromux Settings confirmed with Touch ID;
 - warn the owner in Chromux whenever the registered broker connection
   changes (a new broker, or the same broker after a reconnect), before
-  routing anything to it.
+  routing anything to it;
+- name the broker in its pairing Touch ID text with `vault_fingerprint` and
+  `device_name` when present (both are display-only labels, not identity);
+- refuse pairing, entry and agent forwarding while the host is remotely
+  debuggable (host-side; the broker cannot check it).
 
 ### Service ↔ UI messages (implemented in the provider)
 
@@ -172,7 +181,9 @@ pairing on that connection. The service must:
   6-digit code shown in Chromux. The service replies `confirmed` only after
   the owner's Touch ID in Chromux; the broker then shows the code, the
   service's team, identifier and cdhash in its terminal and asks for Touch ID
-  again (the reason names the code). Any other outcome, a wrong nonce, an
+  again (the reason names the code and this broker's vault fingerprint and
+  device name, the same values it sent as `vault_fingerprint` and
+  `device_name`). Any other outcome, a wrong nonce, an
   unknown key or a `value` pins nothing and closes the connection. A new
   connection, or a service restart, pairs again (both Touch IDs) before
   `broker_hello`; a re-pairing must report the same pinned build. After 3

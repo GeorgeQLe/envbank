@@ -97,7 +97,7 @@ import (
 )
 
 func (SystemStore) Put(service, account string, secret []byte) error {
-	cs, ca := C.CString(service), C.CString(account)
+	cs, ca := C.CString(ServiceName(service)), C.CString(account)
 	defer C.free(unsafe.Pointer(cs))
 	defer C.free(unsafe.Pointer(ca))
 	var ptr *C.uchar
@@ -112,7 +112,7 @@ func (SystemStore) Put(service, account string, secret []byte) error {
 }
 
 func (SystemStore) Get(service, account, prompt string) ([]byte, error) {
-	cs, ca := C.CString(service), C.CString(account)
+	cs, ca := C.CString(ServiceName(service)), C.CString(account)
 	defer C.free(unsafe.Pointer(cs))
 	defer C.free(unsafe.Pointer(ca))
 	_ = prompt
@@ -133,7 +133,7 @@ func (SystemStore) Get(service, account, prompt string) ([]byte, error) {
 }
 
 func (SystemStore) Delete(service, account string) error {
-	cs, ca := C.CString(service), C.CString(account)
+	cs, ca := C.CString(ServiceName(service)), C.CString(account)
 	defer C.free(unsafe.Pointer(cs))
 	defer C.free(unsafe.Pointer(ca))
 	status := C.envbank_delete(cs, ca)
