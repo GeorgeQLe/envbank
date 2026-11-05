@@ -1,3 +1,33 @@
+# Provider actions — agents provision and rotate Stripe/Neon for Vercel (2026-11-05)
+
+Goal: agents, through EnvBank and Chromux, set up Stripe and Neon for a Vercel project and rotate keys on demand, with only an owner Touch ID prompt. The contract is [provider-actions.md](../docs/provider-actions.md). The branch is `feat/provider-actions` at d9c1395, not pushed. It holds the authz work, the PR #50 Vercel integration, adapters, the broker ops, bindings, production promote and rollback, and fixes from two security reviews.
+
+Owner decisions:
+- The Stripe API key comes from Vercel Connect managed keys.
+- Throwaway live acceptance is allowed: Stripe test mode only, Touch ID for each action, and everything deleted afterwards.
+
+- [x] Adapters, broker `provider_action`/`provider_status`, bindings, locks, live factory, synthetic e2e, production promote with rollback.
+- [x] Review 1 (10 findings) fixed in f867fe2.
+- [x] Review 2 (H1, M1–M3, L1–L5, group role) fixed in d9c1395. Partial fixes:
+  - L2: the create-time windows in neon.project.create and Stripe create/rotate are not resumable.
+  - L4: a deployed *previous* Stripe secret does not block a delete.
+  - L5: the production source is checked at execute, not before the prompt.
+- [ ] Third independent review of d9c1395: new `vercel.env.remove`, `StoreSecretAt`/`RECORD_CHANGED`, env ownership (`replace_existing`), `pending_role` resume, the 570-byte plan budget and label clipping, Stripe drift.
+- [ ] Chromux mirror of the d9c1395 wire changes, plus the XPC depth fix (see Chromux `tasks/todo.md`).
+- [ ] Build and sign both apps with Developer ID (Team NC56VXK48K). Back up the installed builds to Artifacts/ first. Keychain prompts: Allow, never Always Allow. Then reinstall envbank and Chromux v2 Rebuild.app, and the owner reconnects.
+- [ ] Live Touch ID e2e with synthetic values and a throwaway vault (handoff checks a–h).
+- [ ] Owner seeds `CONTROL_VERCEL_TOKEN`, `CONTROL_NEON_API_KEY` and `CONTROL_STRIPE_KEY` (test mode) through Chromux secure entry.
+- [ ] Throwaway live acceptance: new Vercel project, new Neon project, and a Stripe test-mode webhook; rotate each; then delete everything. Open questions to settle live:
+  - Do API-created Neon roles get ADMIN, and does the pooler honour `SET role`?
+  - Neon and Vercel response and URL shapes, and the branch filter.
+  - Vercel deployment protection (`HEALTH_PROTECTED`).
+  - Vercel Connect managed-key rotation (no API, so test the connector swap), and whether managed keys can be test mode.
+  - Rollback does not restore old env values.
+  - The in-memory operation journal is lost when the broker restarts.
+- [ ] Known limitation: StoreSecret/Names/Values still decrypt all records into Go strings (memory hygiene, finding 8).
+- [ ] Open PRs (EnvBank feat/provider-actions; Chromux feat/authorized-agents). Do not merge without the owner.
+- [ ] Owner: dismiss the PR #50 CodeQL false positives, create the `envbank-notary` notarytool profile, and identify and rotate the Bearer string found in ~/.codex history.
+
 # Current work
 
 ## Vercel integration — implementation verified, live acceptance pending
