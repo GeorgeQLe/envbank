@@ -1495,6 +1495,16 @@ func setSecret(args []string, rotate bool) error {
 // putSecretValue stores one value as a new revision of NAME, preserving the
 // existing record's metadata. rotateDays < 0 keeps the current interval.
 func putSecretValue(api *client.API, vaultKey []byte, name, value string, rotateDays int) (protocol.SecretRecord, error) {
+	return putSecretValueAt(api, vaultKey, name, value, rotateDays, -1)
+}
+
+// errRecordRevision: putSecretValueAt found NAME at another revision than
+// want, or the server refused the write as a revision conflict.
+var errRecordRevision = errors.New("record changed")
+
+// putSecretValueAt is putSecretValue only over revision want (0: NAME
+// absent; -1: any revision).
+func putSecretValueAt(api *client.API, vaultKey []byte, name, value string, rotateDays int, want int64) (protocol.SecretRecord, error) {
 	encrypted, err := api.ListRecords()
 	if err != nil {
 		return protocol.SecretRecord{}, err
@@ -1516,6 +1526,9 @@ func putSecretValue(api *client.API, vaultKey []byte, name, value string, rotate
 			break
 		}
 	}
+	if want >= 0 && expected != want {
+		return protocol.SecretRecord{}, errRecordRevision
+	}
 	if rotateDays >= 0 {
 		record.RotateEveryDays = rotateDays
 	}
@@ -1524,6 +1537,10 @@ func putSecretValue(api *client.API, vaultKey []byte, name, value string, rotate
 		return protocol.SecretRecord{}, err
 	}
 	if _, err := api.PutRecord(id, protocol.PutRecordRequest{ExpectedRevision: expected, Blob: blob}); err != nil {
+		var status client.HTTPStatusError
+		if want >= 0 && errors.As(err, &status) && status.Status == http.StatusConflict {
+			return protocol.SecretRecord{}, errRecordRevision
+		}
 		return protocol.SecretRecord{}, err
 	}
 	return record, nil

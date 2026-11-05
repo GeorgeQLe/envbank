@@ -93,7 +93,7 @@ func TestBindingAllowNeedsItsOwnTouchID(t *testing.T) {
 		f.vault.Bind(provideraction.Binding{Record: rec, Provider: provideraction.ProviderNeon, Kind: provideraction.KindNeonPooled,
 			Resource: provideraction.BindingResource{ProjectID: "calm-sky-123456", BranchID: "br-main-1"}})
 	}
-	if r, _ := f.call(t, s, allowReq("prj_new1", many...)); r.Code != agentbroker.CodeInvalidRequest {
+	if r, _ := f.call(t, s, allowReq("prj_new1", many...)); r.Code != provideraction.CodePlanTooLong {
 		t.Fatalf("over-long: %+v", r)
 	}
 	if _, approvals := f.own.prompts(); approvals != 3 {

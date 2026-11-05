@@ -42,8 +42,11 @@ const (
 	maxEvents      = 16
 	maxVariables   = 16
 	maxRecordName  = 64
-	// maxRotationTargets bounds the Vercel scopes one rotation rewrites.
-	maxRotationTargets = 8
+	// maxRotationTargets bounds the Vercel scopes one rotation rewrites,
+	// and so the distinct scopes env.push may spread one bound record over:
+	// the rotation approval names every scope within the prompt limit
+	// (TestRotationApprovalBudget).
+	maxRotationTargets = 3
 )
 
 // Targets.
@@ -309,6 +312,20 @@ type (
 		Production bool              `json:"production,omitempty"`
 		GitBranch  string            `json:"git_branch,omitempty"`
 		Variables  map[string]string `json:"variables"` // ENV_NAME: record
+		// ReplaceExisting lets the push take over env vars this broker
+		// recorded as holding another record (the approval names each).
+		ReplaceExisting bool `json:"replace_existing,omitempty"`
+		// set by precheck: env name -> record that owns it now
+		replaced map[string]string
+	}
+	vercelEnvRemove struct {
+		Record     string `json:"record"`
+		Env        string `json:"env"`
+		TeamID     string `json:"team_id"`
+		ProjectID  string `json:"project_id"`
+		Target     string `json:"target"`
+		Production bool   `json:"production,omitempty"`
+		GitBranch  string `json:"git_branch,omitempty"`
 	}
 	vercelRedeploy struct {
 		TeamID     string `json:"team_id"`
@@ -330,8 +347,11 @@ type (
 		PreviousRecord string     `json:"previous_record"`
 		Vercel         VercelRefs `json:"vercel"`
 		HealthPath     string     `json:"health_path"`
-		// set by precheck: the endpoint a live previous_record is bound to
+		// set by precheck: the endpoint a live previous_record is bound to,
+		// and the URL and events this broker created the endpoint with
 		prevEndpoint string
+		url          string
+		events       []string
 	}
 	stripeWebhookDelete struct {
 		EndpointID string `json:"endpoint_id"`
@@ -418,6 +438,10 @@ func (p *vercelEnvPush) envNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func (p *vercelEnvRemove) validate() bool {
+	return p.ref().valid(false) && validRecord(p.Record) && validRecord(p.Env)
 }
 
 func (p *vercelRedeploy) ref() VercelRef {

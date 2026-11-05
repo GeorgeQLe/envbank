@@ -34,10 +34,10 @@ func TestResourceLockRefusesSecondOperationBeforeItsPrompt(t *testing.T) {
 			},
 			func(t *testing.T) (string, json.RawMessage) {
 				return pa.ActionNeonProjectDelete, js(t, map[string]any{"project_id": "other-project-1"})
-			}, true},
+			}, false}, // after the rotation the records are deployed: RESOURCE_STILL_DEPLOYED, not busy
 		{"vercel project: push then redeploy",
 			func(t *testing.T) (string, json.RawMessage) {
-				return pa.ActionVercelEnvPush, js(t, map[string]any{"team_id": "team_abc123", "project_id": "prj_abc123", "target": "preview", "variables": map[string]string{"DATABASE_URL": "DATABASE_URL"}})
+				return pa.ActionVercelEnvPush, js(t, map[string]any{"team_id": "team_abc123", "project_id": "prj_abc123", "target": "preview", "git_branch": "main", "variables": map[string]string{"DATABASE_URL": "DATABASE_URL"}})
 			},
 			func(t *testing.T) (string, json.RawMessage) {
 				return pa.ActionVercelRedeploy, redeployParams(t, "prj_abc123")

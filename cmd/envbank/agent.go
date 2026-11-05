@@ -131,20 +131,31 @@ func (v *brokerVault) Store(_ context.Context, name, value string) error {
 	return err
 }
 
-// StoreSecret implements provideraction.Vault (lifecycle.RecordWriter): it
-// durably stores the value fill supplies and returns the new revision.
-func (v *brokerVault) StoreSecret(_ context.Context, name string, fill func(func([]byte) error) error) (int64, error) {
+// StoreSecretAt implements provideraction.Vault: it durably stores the
+// value fill supplies only over revision expected (0: absent) and returns
+// the new revision; another revision is provideraction.ErrRecordChanged.
+func (v *brokerVault) StoreSecretAt(_ context.Context, name string, expected int64, fill func(func([]byte) error) error) (int64, error) {
+	if expected < 0 {
+		return 0, errors.New("record could not be stored")
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	var revision int64
+	changed := false
 	err := fill(func(value []byte) error {
-		record, err := putSecretValue(v.api, v.vaultKey, name, string(value), -1)
+		record, err := putSecretValueAt(v.api, v.vaultKey, name, string(value), -1, expected)
+		if errors.Is(err, errRecordRevision) {
+			changed = true
+		}
 		if err != nil {
 			return err
 		}
 		revision = record.Revision
 		return nil
 	})
+	if changed {
+		return 0, provideraction.ErrRecordChanged
+	}
 	if err != nil || revision < 1 {
 		return 0, errors.New("record could not be stored")
 	}

@@ -89,6 +89,9 @@ type Vault struct {
 	FailStore map[string]bool
 	// FailBinding makes SaveBinding fail for these records.
 	FailBinding map[string]bool
+	// BeforeStore, if set, runs before each StoreSecretAt checks the
+	// revision (race tests: change the record in between).
+	BeforeStore func(name string)
 	// reads lists every record whose value was read (Latest, ReadSecret).
 	reads []string
 
@@ -138,6 +141,40 @@ func (v *Vault) StoreSecret(_ context.Context, name string, fill func(func([]byt
 		return 0, err
 	}
 	v.mu.Lock()
+	v.vals[name] = got
+	v.revs[name]++
+	rev := v.revs[name]
+	v.mu.Unlock()
+	if v.Log != nil {
+		v.Log.Add("vault.store " + name)
+	}
+	return rev, nil
+}
+
+// StoreSecretAt is StoreSecret only when name is at revision expected (0:
+// absent); otherwise it stores nothing and returns ErrRecordChanged.
+func (v *Vault) StoreSecretAt(ctx context.Context, name string, expected int64, fill func(func([]byte) error) error) (int64, error) {
+	if v.BeforeStore != nil {
+		v.BeforeStore(name)
+	}
+	v.mu.Lock()
+	fail := v.FailStore[name]
+	v.mu.Unlock()
+	if fail {
+		return 0, errors.New("store failed")
+	}
+	var got []byte
+	if err := fill(func(b []byte) error { got = append([]byte(nil), b...); return nil }); err != nil {
+		return 0, err
+	}
+	v.mu.Lock()
+	if v.revs[name] != expected {
+		v.mu.Unlock()
+		if v.Log != nil {
+			v.Log.Add("vault.store_refused " + name)
+		}
+		return 0, provideraction.ErrRecordChanged
+	}
 	v.vals[name] = got
 	v.revs[name]++
 	rev := v.revs[name]
@@ -382,7 +419,7 @@ func (v *Vault) CreatedNeonProject(projectID, branchID string) {
 // setup).
 func (v *Vault) CreatedEndpoint(id, lineage string) {
 	if err := v.SaveStripeEndpoint(context.Background(), provideraction.StripeEndpointProvenance{V: provideraction.BindingVersion, EndpointID: id,
-		URL: "https://shop.example.com/api/stripe/webhook", Lineage: lineage}); err != nil {
+		URL: "https://shop.example.com/api/stripe/webhook", Lineage: lineage, Events: []string{"checkout.session.completed", "invoice.paid"}}); err != nil {
 		panic(err)
 	}
 }
@@ -683,6 +720,16 @@ func (v vercel) UpsertSensitiveEnv(ctx context.Context, env provideraction.Verce
 		v.p.mu.Unlock()
 		return nil
 	})
+}
+
+func (v vercel) DeleteEnv(ctx context.Context, env provideraction.VercelEnv, key string) error {
+	if err := v.p.call(ctx, "vercel.delete_env "+key+" "+env.Target); err != nil {
+		return err
+	}
+	v.p.mu.Lock()
+	delete(v.p.Pushed, key)
+	v.p.mu.Unlock()
+	return nil
 }
 
 func (v vercel) CurrentDeployment(ctx context.Context, env provideraction.VercelEnv) (string, error) {

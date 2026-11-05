@@ -21,23 +21,27 @@ func (p *stripeWebhookCreate) precheck(ctx context.Context, v Vault) string {
 }
 func (p *stripeWebhookCreate) execute(r *run) error {
 	if err := r.step(StepStripeCreate, CodeProviderFailed, func() error {
-		w := r.recorder()
+		// The record was absent at the precheck: created, never overwritten.
+		w := r.recorder(map[string]int64{p.Record: 0})
 		id, err := r.stripe.CreateWebhook(r.ctx, p.URL, append([]string(nil), p.Events...), w.sink(p.Record))
 		if stripeEndpointRe.MatchString(id) {
 			r.res.EndpointID = id // reported even on a later failure, for cleanup
 		}
 		if err != nil {
-			return err
+			return w.check(err)
 		}
 		if !stripeEndpointRe.MatchString(id) {
 			return fail(CodeProviderResponse)
 		}
 		return w.require(r.res, p.Record)
 	}); err != nil {
+		// The endpoint exists even though its secret was not stored: its
+		// provenance lets stripe.webhook.delete clean it up.
+		r.keepEndpointProvenance(r.res.EndpointID, p.URL, r.res.EndpointID, p.Events)
 		return err
 	}
 	id := r.res.EndpointID
-	if err := r.saveEndpointProvenance(id, p.URL, id); err != nil {
+	if err := r.saveEndpointProvenance(id, p.URL, id, p.Events); err != nil {
 		return err
 	}
 	return r.step(StepBindingSave, agentbroker.CodeVaultFailed, func() error {
@@ -45,15 +49,29 @@ func (p *stripeWebhookCreate) execute(r *run) error {
 	})
 }
 
-// saveEndpointProvenance records that this broker created endpoint id.
-func (r *run) saveEndpointProvenance(id, url, lineage string) error {
+// saveEndpointProvenance records that this broker created endpoint id,
+// with the URL and events it created it with.
+func (r *run) saveEndpointProvenance(id, url, lineage string, events []string) error {
 	return r.step(StepProvenanceSave, agentbroker.CodeVaultFailed, func() error {
-		prov := StripeEndpointProvenance{V: BindingVersion, EndpointID: id, URL: url, Lineage: lineage}
+		prov := StripeEndpointProvenance{V: BindingVersion, EndpointID: id, URL: url, Lineage: lineage, Events: append([]string(nil), events...)}
 		if !prov.Valid() || r.vault.SaveStripeEndpoint(r.ctx, prov) != nil {
 			return fail(agentbroker.CodeVaultFailed)
 		}
 		return nil
 	})
+}
+
+// keepEndpointProvenance is the best-effort provenance save after a failed
+// create step that still created endpoint id (no step: the operation has
+// already failed with that step's code).
+func (r *run) keepEndpointProvenance(id, url, lineage string, events []string) {
+	if id == "" {
+		return
+	}
+	prov := StripeEndpointProvenance{V: BindingVersion, EndpointID: id, URL: url, Lineage: lineage, Events: append([]string(nil), events...)}
+	if prov.Valid() {
+		_ = r.vault.SaveStripeEndpoint(r.ctx, prov)
+	}
 }
 
 func (p *stripeWebhookDelete) summary() string {
@@ -65,7 +83,16 @@ func (p *stripeWebhookDelete) summary() string {
 }
 func (p *stripeWebhookDelete) controls() []string { return []string{ControlStripe} }
 
-// precheck: v1 deletes only endpoints this broker created.
+// current: the binding of a record holding this endpoint's current secret.
+// (A previous secret of the same endpoint is not checked: deleting the
+// orphan of an interrupted rotation must stay possible, and its
+// deployments also hold the current secret.)
+func (p *stripeWebhookDelete) current(b Binding) bool {
+	return b.Provider == ProviderStripe && b.Kind == KindStripeWebhookSecret && b.Resource.EndpointID == p.EndpointID
+}
+
+// precheck: v1 deletes only endpoints this broker created, and only once
+// its current secret is no longer deployed (vercel.env.remove).
 func (p *stripeWebhookDelete) precheck(ctx context.Context, v Vault) string {
 	prov, err := v.LoadStripeEndpoint(ctx, p.EndpointID)
 	switch {
@@ -75,9 +102,17 @@ func (p *stripeWebhookDelete) precheck(ctx context.Context, v Vault) string {
 		return agentbroker.CodeVaultFailed
 	}
 	p.url = prov.URL
-	return ""
+	return stillDeployed(ctx, v, p.current)
 }
 func (p *stripeWebhookDelete) execute(r *run) error {
+	if err := r.step(StepBindingCheck, agentbroker.CodeVaultFailed, func() error {
+		if code := stillDeployed(r.ctx, r.vault, p.current); code != "" {
+			return fail(code)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
 	err := r.step(StepStripeDelete, CodeProviderFailed, func() error { return r.stripe.DeleteWebhook(r.ctx, p.EndpointID) })
 	r.res.Deleted = err == nil
 	if err != nil {
@@ -107,33 +142,44 @@ func (p *stripeWebhookDelete) execute(r *run) error {
 
 // ---- stripe.webhook.rotate ----
 
+// summary is terse: the whole plan must fit the Touch ID prompt
+// (docs/provider-actions.md, "Approval text budget"). The URL and event
+// count come from the endpoint's provenance (precheck); the new endpoint is
+// created with exactly those.
 func (p *stripeWebhookRotate) summary() string {
-	return "ROTATE Stripe webhook " + p.EndpointID + ": new endpoint, same URL and events; copy bound record " + p.Record +
-		" to " + p.PreviousRecord + " (bound as previous), new secret in " + p.Record + ", push both" +
-		rotationText(p.Vercel, p.HealthPath) + ", then delete " + p.EndpointID
+	what := p.EndpointID
+	if p.url != "" {
+		what += " (" + p.url + ", " + strconv.Itoa(len(p.events)) + " events)"
+	}
+	return "ROTATE Stripe webhook " + what + " to a copy: new secret into " + p.Record + ", old kept in " + p.PreviousRecord +
+		rotationText(p.Vercel, p.HealthPath) + "; then DELETE the old one"
 }
 func (p *stripeWebhookRotate) controls() []string     { return []string{ControlStripe, ControlVercel} }
 func (p *stripeWebhookRotate) liveControls() []string { return []string{ControlStripe} }
 
 // stripeChecked is a rotation's checked bindings. prevRev is the object
-// revision of previous_record's binding (0 when none); prev is its live
-// binding, nil when previous_record is absent (it is created) or holds the
-// secret of an endpoint already deleted (its binding was revoked by
+// revision of previous_record's binding (0 when none) and prevRecRev the
+// record revision previous_record is written over (0: absent); prev is its
+// live binding, nil when previous_record is absent (it is created) or holds
+// the secret of an endpoint already deleted (its binding was revoked by
 // stripe.webhook.delete; it is overwritten). prevEndpoint is the endpoint a
-// live previous_record is bound to: it must no longer exist.
+// live previous_record is bound to: it must no longer exist. prov is the
+// endpoint's provenance.
 type stripeChecked struct {
 	cur          bound
 	prev         *Binding
 	prevRev      int64
+	prevRecRev   int64
 	prevEndpoint string
+	prov         StripeEndpointProvenance
 	scope        scopePlan
 }
 
-// check: record is bound to this endpoint (its lineage's current one);
-// previous_record is absent, bound as the previous secret of the same
-// lineage, or that binding revoked (its endpoint deleted); every named
-// scope is allowed and together they cover every scope either record was
-// deployed to.
+// check: record is bound to this endpoint (its lineage's current one),
+// which this broker created with recorded URL and events; previous_record
+// is absent, bound as the previous secret of the same lineage, or that
+// binding revoked (its endpoint deleted); every named scope is allowed and
+// together they cover every scope either record was deployed to.
 func (p *stripeWebhookRotate) check(ctx context.Context, v Vault) (stripeChecked, string) {
 	var c stripeChecked
 	if code := mustExist(ctx, v, p.Record); code != "" {
@@ -147,6 +193,18 @@ func (p *stripeWebhookRotate) check(ctx context.Context, v Vault) (stripeChecked
 		return c, CodeBindingMismatch
 	}
 	c.cur = cur
+	prov, err := v.LoadStripeEndpoint(ctx, p.EndpointID)
+	switch {
+	case errors.Is(err, ErrMissing):
+		return c, CodeNotCreatedByBroker
+	case err != nil || prov.EndpointID != p.EndpointID:
+		return c, agentbroker.CodeVaultFailed
+	case prov.Lineage != cur.b.Resource.Lineage:
+		return c, CodeBindingMismatch
+	case prov.Events == nil:
+		return c, CodeStripeEndpointDrift // recorded before events were: not recreatable as approved
+	}
+	c.prov = prov
 	exists, err := v.Exists(ctx, p.PreviousRecord)
 	if err != nil {
 		return c, agentbroker.CodeVaultFailed
@@ -172,7 +230,7 @@ func (p *stripeWebhookRotate) check(ctx context.Context, v Vault) (stripeChecked
 			if r, err := v.Revision(ctx, p.PreviousRecord); err != nil || r != b.RecordRevision {
 				return c, CodeRecordNotBound
 			}
-			c.prevRev = rev
+			c.prevRev, c.prevRecRev = rev, b.RecordRevision
 			break
 		}
 		prev, code := liveBinding(ctx, v, p.PreviousRecord)
@@ -182,7 +240,7 @@ func (p *stripeWebhookRotate) check(ctx context.Context, v Vault) (stripeChecked
 		if !sameLineage(prev.b) {
 			return c, CodeBindingMismatch
 		}
-		c.prev, c.prevRev = &prev.b, prev.objRev
+		c.prev, c.prevRev, c.prevRecRev = &prev.b, prev.objRev, prev.b.RecordRevision
 		if prev.b.Resource.EndpointID != p.EndpointID {
 			c.prevEndpoint = prev.b.Resource.EndpointID
 		}
@@ -192,7 +250,11 @@ func (p *stripeWebhookRotate) check(ctx context.Context, v Vault) (stripeChecked
 		// Created (or overwritten) now: it inherits record's destinations.
 		items[1].b = nil
 	}
-	if c.scope, code = planScope(p.Vercel, items); code != "" {
+	claims, code := envClaims(ctx, v)
+	if code != "" {
+		return c, code
+	}
+	if c.scope, code = planScope(p.Vercel, items, claims); code != "" {
 		return c, code
 	}
 	if !c.scope.fits(c.cur.b, p.Record) {
@@ -208,14 +270,54 @@ func (p *stripeWebhookRotate) precheck(ctx context.Context, v Vault) string {
 	c, code := p.check(ctx, v)
 	if code == "" {
 		p.prevEndpoint = c.prevEndpoint
+		p.url, p.events = c.prov.URL, append([]string(nil), c.prov.Events...)
 	}
 	return code
 }
 
-// liveCheck: an endpoint previous_record is still bound to must be gone. If
-// it still exists, an earlier rotation did not finish: its secret may still
-// be in use, and overwriting previous_record would lose it.
+// sameEndpoint: hook has exactly the URL and event set of prov.
+func sameEndpoint(hook StripeWebhook, prov StripeEndpointProvenance) bool {
+	if hook.URL != prov.URL || len(hook.Events) != len(prov.Events) {
+		return false
+	}
+	want := map[string]bool{}
+	for _, e := range prov.Events {
+		want[e] = true
+	}
+	for _, e := range hook.Events {
+		if !want[e] {
+			return false
+		}
+		delete(want, e)
+	}
+	return len(want) == 0
+}
+
+// readEndpoint reads the live endpoint and refuses drift from what this
+// broker created (STRIPE_ENDPOINT_DRIFT).
+func readEndpoint(ctx context.Context, s StripePort, id string, prov StripeEndpointProvenance) string {
+	hook, err := s.Webhook(ctx, id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return CodeStripeEndpointDrift
+		}
+		return CodeProviderFailed
+	}
+	if !sameEndpoint(hook, prov) {
+		return CodeStripeEndpointDrift
+	}
+	return ""
+}
+
+// liveCheck: the endpoint still has the URL and events the approval names,
+// and an endpoint previous_record is still bound to must be gone. If it
+// still exists, an earlier rotation did not finish: its secret may still be
+// in use, and overwriting previous_record would lose it.
 func (p *stripeWebhookRotate) liveCheck(ctx context.Context, ps *ports) (string, *Result) {
+	prov := StripeEndpointProvenance{EndpointID: p.EndpointID, URL: p.url, Events: p.events}
+	if code := readEndpoint(ctx, ps.stripe, p.EndpointID, prov); code != "" {
+		return code, nil
+	}
 	if p.prevEndpoint == "" {
 		return "", nil
 	}
@@ -242,19 +344,17 @@ func (p *stripeWebhookRotate) execute(r *run) error {
 		if c.prevEndpoint != p.prevEndpoint {
 			return fail(CodeBindingMismatch) // changed since the owner approved
 		}
+		if c.prov.URL != p.url || !sameEndpoint(StripeWebhook{URL: p.url, Events: p.events}, c.prov) {
+			return fail(CodeStripeEndpointDrift)
+		}
 		return nil
 	}); err != nil {
 		return err
 	}
 	cur := c.cur.b
-	var hook StripeWebhook
 	if err := r.step(StepStripeReadEndpoint, CodeProviderFailed, func() error {
-		var err error
-		if hook, err = r.stripe.Webhook(r.ctx, p.EndpointID); err != nil {
-			return err
-		}
-		if !validHTTPSURL(hook.URL) || !validEvents(hook.Events) {
-			return fail(CodeProviderResponse)
+		if code := readEndpoint(r.ctx, r.stripe, p.EndpointID, c.prov); code != "" {
+			return fail(code)
 		}
 		return nil
 	}); err != nil {
@@ -277,11 +377,15 @@ func (p *stripeWebhookRotate) execute(r *run) error {
 		}); err != nil || len(current) == 0 {
 			return fail(agentbroker.CodeVaultFailed)
 		}
-		rev, err := r.vault.StoreSecret(r.ctx, p.PreviousRecord, func(consume func([]byte) error) error {
+		// Written only over the revision checked (0: created).
+		rev, err := r.vault.StoreSecretAt(r.ctx, p.PreviousRecord, c.prevRecRev, func(consume func([]byte) error) error {
 			view := append([]byte(nil), current...)
 			defer wipe(view)
 			return consume(view)
 		})
+		if errors.Is(err, ErrRecordChanged) {
+			return fail(CodeRecordChanged)
+		}
 		if err != nil || rev < 1 {
 			return fail(agentbroker.CodeVaultFailed)
 		}
@@ -304,22 +408,23 @@ func (p *stripeWebhookRotate) execute(r *run) error {
 		return err
 	}
 	if err := r.step(StepStripeCreate, CodeProviderFailed, func() error {
-		w := r.recorder()
-		id, err := r.stripe.CreateWebhook(r.ctx, hook.URL, append([]string(nil), hook.Events...), w.sink(p.Record))
-		if stripeEndpointRe.MatchString(id) {
+		w := r.recorder(map[string]int64{p.Record: cur.RecordRevision})
+		id, err := r.stripe.CreateWebhook(r.ctx, c.prov.URL, append([]string(nil), c.prov.Events...), w.sink(p.Record))
+		if stripeEndpointRe.MatchString(id) && id != p.EndpointID {
 			r.res.EndpointID = id
 		}
 		if err != nil {
-			return err
+			return w.check(err)
 		}
 		if !stripeEndpointRe.MatchString(id) || id == p.EndpointID {
 			return fail(CodeProviderResponse)
 		}
 		return w.require(r.res, p.Record)
 	}); err != nil {
+		r.keepEndpointProvenance(r.res.EndpointID, c.prov.URL, cur.Resource.Lineage, c.prov.Events)
 		return err
 	}
-	if err := r.saveEndpointProvenance(r.res.EndpointID, hook.URL, cur.Resource.Lineage); err != nil {
+	if err := r.saveEndpointProvenance(r.res.EndpointID, c.prov.URL, cur.Resource.Lineage, c.prov.Events); err != nil {
 		return err
 	}
 	// The record's binding moves to the new endpoint (same lineage); every

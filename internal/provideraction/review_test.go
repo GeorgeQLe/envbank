@@ -72,7 +72,7 @@ func TestRotationCoversEveryDeployedScope(t *testing.T) {
 		t.Fatalf("production-only rotation: %q", code)
 	}
 	// A scope the records may not go to is still refused.
-	other := map[string]any{"team_id": "team_abc123", "project_id": "prj_other", "target": "preview"}
+	other := map[string]any{"team_id": "team_abc123", "project_id": "prj_other", "target": "preview", "git_branch": "main"}
 	if code := e.prepareCode(t, pa.ActionNeonRotate, neonRotate(t, vercelRef("production"), vercelRef("preview"), other)); code != pa.CodeDestinationNotAllowed {
 		t.Fatalf("not allowed scope: %q", code)
 	}
@@ -80,7 +80,7 @@ func TestRotationCoversEveryDeployedScope(t *testing.T) {
 
 	params := neonRotate(t, vercelRef("production"), vercelRef("preview"))
 	text := e.summary(t, pa.ActionNeonRotate, params)
-	for _, want := range []string{"to, and redeploy, each of Vercel prj_abc123 (team_abc123) preview; Vercel prj_abc123 (team_abc123) PRODUCTION (STAGED, last)", "PROMOTE", "then invalidate role app_a"} {
+	for _, want := range []string{"on Vercel team_abc123: prj_abc123 preview@main+PRODUCTION; PRODUCTION last: STAGED, PROMOTE", "then INVALIDATE old role app_a"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("plan lacks %q: %s", want, text)
 		}
@@ -186,7 +186,7 @@ func TestNeonActiveRoleIsDerived(t *testing.T) {
 		t.Fatalf("reset of the retiring role asserted: %q", code)
 	}
 	text := e.summary(t, pa.ActionNeonRotate, rotateParams(t))
-	if !strings.Contains(text, "COMPLETE the interrupted Neon rotation to role app_b") || !strings.Contains(text, "then invalidate role app_a") {
+	if !strings.Contains(text, "COMPLETE Neon calm-sky-123456/br-main-1/appdb rotation to role app_b") || !strings.Contains(text, "then INVALIDATE old role app_a") {
 		t.Fatalf("resume text: %s", text)
 	}
 	e.fake.Fail = ""
@@ -207,7 +207,7 @@ func TestNeonActiveRoleIsDerived(t *testing.T) {
 		t.Fatalf("binding after resume %+v", b)
 	}
 	// The one after that rotates normally, back to app_a.
-	if text := e.summary(t, pa.ActionNeonRotate, rotateParams(t)); !strings.HasPrefix(text, "ROTATE Neon role app_a to active") {
+	if text := e.summary(t, pa.ActionNeonRotate, rotateParams(t)); !strings.Contains(text, "reset role app_a into") || !strings.Contains(text, "INVALIDATE old role app_b") {
 		t.Fatalf("next text: %s", text)
 	}
 }
@@ -347,8 +347,8 @@ func TestStripeRotationRefusesOrphanEndpoint(t *testing.T) {
 	if code != pa.CodeStripeOrphanEndpoint || detail == nil || detail.OrphanEndpointID != "we_old1" {
 		t.Fatalf("orphan: %q %+v", code, detail)
 	}
-	if calls := e.log.Calls()[mark:]; strings.Join(calls, ",") != "stripe.webhook we_old1" {
-		t.Fatalf("only the read-only endpoint read may run: %v", calls)
+	if calls := e.log.Calls()[mark:]; strings.Join(calls, ",") != "stripe.webhook "+second+",stripe.webhook we_old1" {
+		t.Fatalf("only the read-only endpoint reads may run: %v", calls)
 	}
 	if prev, _ := e.vault.Value("STRIPE_WEBHOOK_SECRET_PREVIOUS"); prev != old {
 		t.Fatal("the secret in use was lost")

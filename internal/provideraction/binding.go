@@ -134,7 +134,14 @@ type Binding struct {
 	Roles        []string `json:"roles,omitempty"`
 	ActiveRole   string   `json:"active_role,omitempty"`
 	RetiringRole string   `json:"retiring_role,omitempty"`
-	Revoked      bool     `json:"revoked,omitempty"`
+	// PendingRole (Neon, no rotation retiring) is set just before a
+	// rotation resets that inactive role's password and cleared when the
+	// bindings follow the new URIs. While it is set, the record may already
+	// hold the new URIs one revision ahead of record_revision (the store
+	// succeeded, the binding save did not); the next neon.rotate retries
+	// the reset instead of refusing the record as unbound.
+	PendingRole string `json:"pending_role,omitempty"`
+	Revoked     bool   `json:"revoked,omitempty"`
 }
 
 // Valid reports whether b is a well-formed binding.
@@ -152,7 +159,7 @@ func (b Binding) Valid() bool {
 		}
 	case KindStripeWebhookSecret, KindStripeWebhookSecretPrevious:
 		if b.Provider != ProviderStripe || !stripeEndpointRe.MatchString(r.EndpointID) || !stripeEndpointRe.MatchString(r.Lineage) || r.ProjectID != "" || r.BranchID != "" ||
-			b.Roles != nil || b.ActiveRole != "" || b.RetiringRole != "" {
+			b.Roles != nil || b.ActiveRole != "" || b.RetiringRole != "" || b.PendingRole != "" {
 			return false
 		}
 	default:
@@ -184,7 +191,7 @@ func (b Binding) Valid() bool {
 // incomplete rotation, the other one retiring.
 func (b Binding) validRoles() bool {
 	if b.Roles == nil {
-		return b.ActiveRole == "" && b.RetiringRole == ""
+		return b.ActiveRole == "" && b.RetiringRole == "" && b.PendingRole == ""
 	}
 	if len(b.Roles) != 2 {
 		return false
@@ -200,6 +207,9 @@ func (b Binding) validRoles() bool {
 		other = b.Roles[0]
 	default:
 		return false
+	}
+	if b.PendingRole != "" {
+		return b.RetiringRole == "" && b.PendingRole == other
 	}
 	return b.RetiringRole == "" || b.RetiringRole == other
 }
@@ -244,6 +254,36 @@ func (b Binding) withDeployed(ds ...Deployed) (Binding, bool) {
 		}
 	}
 	return c, len(c.DeployedTo) <= MaxDeployedTo
+}
+
+// without returns a copy that no longer lists ds.
+func (b Binding) without(ds ...Deployed) Binding {
+	c := b.clone()
+	drop := map[Deployed]bool{}
+	for _, d := range ds {
+		drop[d] = true
+	}
+	var kept []Deployed
+	for _, d := range c.DeployedTo {
+		if !drop[d] {
+			kept = append(kept, d)
+		}
+	}
+	c.DeployedTo = kept
+	return c
+}
+
+// deployedScopes lists the distinct scopes of deployed_to.
+func (b Binding) deployedScopes() []DeployTarget {
+	seen := map[DeployTarget]bool{}
+	var out []DeployTarget
+	for _, d := range b.DeployedTo {
+		if !seen[d.DeployTarget] {
+			seen[d.DeployTarget] = true
+			out = append(out, d.DeployTarget)
+		}
+	}
+	return out
 }
 
 func (b Binding) allows(d Destination) bool {
@@ -348,17 +388,23 @@ func DecodeNeonProject(raw []byte) (NeonProjectProvenance, error) {
 }
 
 // StripeEndpointProvenance records that this broker created a Stripe
-// webhook endpoint (by stripe.webhook.create or a rotation).
+// webhook endpoint (by stripe.webhook.create or a rotation), with the URL
+// and enabled events it created it with. A rotation recreates exactly
+// those and refuses an endpoint that drifted from them. Events is absent
+// only in provenance written before it was recorded (such an endpoint can
+// still be deleted, not rotated).
 type StripeEndpointProvenance struct {
-	V          int    `json:"v"`
-	EndpointID string `json:"endpoint_id"`
-	URL        string `json:"url"`
-	Lineage    string `json:"lineage"`
+	V          int      `json:"v"`
+	EndpointID string   `json:"endpoint_id"`
+	URL        string   `json:"url"`
+	Lineage    string   `json:"lineage"`
+	Events     []string `json:"events,omitempty"`
 }
 
 // Valid reports whether p is well formed.
 func (p StripeEndpointProvenance) Valid() bool {
-	return p.V == BindingVersion && stripeEndpointRe.MatchString(p.EndpointID) && validHTTPSURL(p.URL) && stripeEndpointRe.MatchString(p.Lineage)
+	return p.V == BindingVersion && stripeEndpointRe.MatchString(p.EndpointID) && validHTTPSURL(p.URL) && stripeEndpointRe.MatchString(p.Lineage) &&
+		(p.Events == nil || validEvents(p.Events))
 }
 
 // DecodeStripeEndpoint strictly decodes and validates a stored provenance payload.
@@ -414,10 +460,13 @@ func decodeStrictBytes(raw []byte, v any) error {
 
 // ---- checks (used before the prompt and again as an operation's first step) ----
 
-// bound is a live binding as checked.
+// bound is a live binding as checked; rev is the record's revision as
+// observed (record_revision, or for a pending Neon binding possibly one
+// ahead).
 type bound struct {
 	b      Binding
 	objRev int64
+	rev    int64
 }
 
 // liveBinding loads record's binding and checks it is live: present, not
@@ -444,7 +493,7 @@ func liveBinding(ctx context.Context, v Vault, record string) (bound, string) {
 	if rev != b.RecordRevision {
 		return bound{}, CodeRecordNotBound // written by something other than this broker
 	}
-	return bound{b: b, objRev: objRev}, ""
+	return bound{b: b, objRev: objRev, rev: rev}, ""
 }
 
 // boundForPush checks that every record may be deployed to dest.
@@ -463,17 +512,51 @@ func boundForPush(ctx context.Context, v Vault, dest Destination, records ...str
 	return out, ""
 }
 
-// boundToNeon checks a record is bound to exactly this Neon project and branch
-// with kind.
+// boundToNeon checks a record is bound to exactly this Neon project and
+// branch with kind. A pending binding (PendingRole) is live also when the
+// record is exactly one revision ahead: an interrupted rotation stored the
+// new URIs, which were never pushed anywhere.
 func boundToNeon(ctx context.Context, v Vault, record, kind, projectID, branchID string) (bound, string) {
-	lb, code := liveBinding(ctx, v, record)
-	if code != "" {
-		return bound{}, code
+	b, objRev, err := v.LoadBinding(ctx, record)
+	if errors.Is(err, ErrMissing) {
+		return bound{}, CodeRecordNotBound
 	}
-	if lb.b.Provider != ProviderNeon || lb.b.Kind != kind || lb.b.Resource.ProjectID != projectID || lb.b.Resource.BranchID != branchID {
+	if err != nil || b.Record != record || !b.Valid() {
+		return bound{}, agentbroker.CodeVaultFailed
+	}
+	if b.Revoked {
+		return bound{}, CodeRecordNotBound
+	}
+	if b.Provider != ProviderNeon || b.Kind != kind || b.Resource.ProjectID != projectID || b.Resource.BranchID != branchID {
 		return bound{}, CodeBindingMismatch
 	}
-	return lb, ""
+	rev, err := v.Revision(ctx, record)
+	if errors.Is(err, ErrMissing) {
+		return bound{}, agentbroker.CodeUnknownSecret
+	}
+	if err != nil {
+		return bound{}, agentbroker.CodeVaultFailed
+	}
+	if rev != b.RecordRevision && !(b.PendingRole != "" && rev == b.RecordRevision+1) {
+		return bound{}, CodeRecordNotBound
+	}
+	return bound{b: b, objRev: objRev, rev: rev}, ""
+}
+
+// stillDeployed refuses (RESOURCE_STILL_DEPLOYED) when a non-revoked
+// binding match selects still lists a deployed_to entry: deleting the
+// provider resource would break those deployments silently.
+func stillDeployed(ctx context.Context, v Vault, match func(Binding) bool) string {
+	all, err := v.ListBindings(ctx)
+	if err != nil {
+		return agentbroker.CodeVaultFailed
+	}
+	for _, sb := range all {
+		if !sb.Binding.Revoked && match(sb.Binding) && len(sb.Binding.DeployedTo) > 0 {
+			return CodeResourceStillDeployed
+		}
+	}
+	return ""
 }
 
 // replaceBinding stores b for a record this operation just created (the

@@ -44,8 +44,8 @@ func TestBranchScopedPreviewRedeploy(t *testing.T) {
 func TestRotationScopeEndToEnd(t *testing.T) {
 	p := newProdFixture(t) // records pushed to production of p.project
 	h := p.h
-	preview := map[string]any{"team_id": h.fx.team, "project_id": p.project, "target": "preview"}
-	push := map[string]any{"team_id": h.fx.team, "project_id": p.project, "target": "preview",
+	preview := map[string]any{"team_id": h.fx.team, "project_id": p.project, "target": "preview", "git_branch": "main"}
+	push := map[string]any{"team_id": h.fx.team, "project_id": p.project, "target": "preview", "git_branch": "main",
 		"variables": map[string]string{"DATABASE_URL": "DATABASE_URL", "DATABASE_URL_UNPOOLED": "DATABASE_URL_UNPOOLED"}}
 	h.mustSucceed(provideraction.ActionVercelEnvPush, push)
 	args := map[string]any{}
@@ -62,7 +62,7 @@ func TestRotationScopeEndToEnd(t *testing.T) {
 	rot := h.mustSucceed(provideraction.ActionNeonRotate, args)
 	appB := value(h.vault, "DATABASE_URL")
 	if len(rot.Redeployed) != 2 || rot.Redeployed[1].Target != "production" || !rot.ProductionVerified || rot.InvalidatedRole != "app_a" ||
-		h.fx.vercel.envValueIn(p.project, "DATABASE_URL", "production") != appB || h.fx.vercel.envValue(p.project, "DATABASE_URL") != appB {
+		h.fx.vercel.envValueIn(p.project, "DATABASE_URL", "production") != appB || h.fx.vercel.envValueAt(p.project, "DATABASE_URL", "preview", "main") != appB {
 		t.Fatalf("rotation %+v", rot)
 	}
 	p.noLeaks(t)
@@ -78,7 +78,7 @@ func TestStripeOrphanRefusalNamesTheEndpoint(t *testing.T) {
 	first := h.mustSucceed(provideraction.ActionStripeWebhookCreate, map[string]any{"url": "https://envbank-e2e-stripe.vercel.app/api/stripe",
 		"events": []string{"invoice.paid"}, "record": "STRIPE_WEBHOOK_SECRET"}).EndpointID
 	h.mustSucceed(provideraction.ActionBindingAllow, map[string]any{"records": []string{"STRIPE_WEBHOOK_SECRET"}, "team_id": team, "project_id": project})
-	preview := []any{map[string]any{"team_id": team, "project_id": project, "target": "preview"}}
+	preview := []any{map[string]any{"team_id": team, "project_id": project, "target": "preview", "git_branch": "main"}}
 	rotate := func(endpoint string) map[string]any {
 		return map[string]any{"endpoint_id": endpoint, "record": "STRIPE_WEBHOOK_SECRET", "previous_record": "STRIPE_WEBHOOK_SECRET_PREVIOUS",
 			"vercel": preview, "health_path": "/api/health"}

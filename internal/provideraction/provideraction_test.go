@@ -82,6 +82,8 @@ func vercelRef(target string) map[string]any {
 	m := map[string]any{"team_id": "team_abc123", "project_id": "prj_abc123", "target": target}
 	if target == "production" {
 		m["production"] = true
+	} else {
+		m["git_branch"] = "main" // rotations never rewrite an all-branches preview var
 	}
 	return m
 }
@@ -166,6 +168,7 @@ func TestParamValidationIsStrict(t *testing.T) {
 		pa.ActionVercelProjectCreate: js(t, map[string]any{"team_id": "team_abc", "name": "throwaway-app", "git_repo": "owner/repo", "framework": "nextjs"}),
 		pa.ActionVercelProjectDelete: js(t, map[string]any{"team_id": "team_abc", "project_id": "prj_abc"}),
 		pa.ActionVercelEnvPush:       js(t, map[string]any{"team_id": "team_abc", "project_id": "prj_abc", "target": "preview", "git_branch": "feat/x", "variables": map[string]string{"DATABASE_URL": "DATABASE_URL"}}),
+		pa.ActionVercelEnvRemove:     js(t, map[string]any{"record": "DATABASE_URL", "env": "POSTGRES_URL", "team_id": "team_abc", "project_id": "prj_abc", "target": "production", "production": true}),
 		pa.ActionVercelRedeploy:      js(t, map[string]any{"team_id": "team_abc", "project_id": "prj_abc", "target": "production", "production": true, "deployment": "dpl_abc"}),
 		pa.ActionStripeWebhookCreate: js(t, map[string]any{"url": "https://shop.example.com/api/stripe", "events": []string{"invoice.paid"}, "record": "STRIPE_WEBHOOK_SECRET"}),
 		pa.ActionStripeWebhookRotate: stripeRotateParams(t),
@@ -256,7 +259,7 @@ func TestPlanTextIsDeterministicAndNamesEverything(t *testing.T) {
 	if a != b || a == "" {
 		t.Fatalf("plan text not deterministic: %q %q", a, b)
 	}
-	for _, want := range []string{"ROTATE Neon role app_b to active", "calm-sky-123456", "br-main-1", "DATABASE_URL, DATABASE_URL_UNPOOLED", "Vercel prj_abc123 (team_abc123) preview", "redeploy from the current deployment", "/api/health", "then invalidate role app_a"} {
+	for _, want := range []string{"ROTATE Neon calm-sky-123456/br-main-1/appdb: reset role app_b into DATABASE_URL, DATABASE_URL_UNPOOLED", "push, redeploy, health /api/health on Vercel team_abc123: prj_abc123 preview@main", "then INVALIDATE old role app_a"} {
 		if !strings.Contains(a, want) {
 			t.Errorf("neon.rotate plan lacks %q: %s", want, a)
 		}
@@ -268,14 +271,19 @@ func TestPlanTextIsDeterministicAndNamesEverything(t *testing.T) {
 	_ = json.Unmarshal(rotateParams(t), &p)
 	p["vercel"] = []any{vercelRef("production")}
 	prod, ok := pa.Parse(pa.ActionNeonRotate, js(t, p))
-	if !ok || !strings.Contains(prod, "Vercel prj_abc123 (team_abc123) PRODUCTION") {
+	if !ok || !strings.Contains(prod, "Vercel team_abc123: prj_abc123 PRODUCTION; PRODUCTION last: STAGED, PROMOTE, auto ROLL BACK on failure") {
 		t.Fatalf("production plan must say PRODUCTION: %s", prod)
 	}
 	s, _ := pa.Parse(pa.ActionStripeWebhookRotate, stripeRotateParams(t))
-	for _, want := range []string{"ROTATE Stripe webhook we_old1", "copy bound record STRIPE_WEBHOOK_SECRET to STRIPE_WEBHOOK_SECRET_PREVIOUS (bound as previous)", "push both to Vercel prj_abc123", "then delete we_old1"} {
+	for _, want := range []string{"ROTATE Stripe webhook we_old1 to a copy: new secret into STRIPE_WEBHOOK_SECRET, old kept in STRIPE_WEBHOOK_SECRET_PREVIOUS", "on Vercel team_abc123: prj_abc123 preview@main", "then DELETE the old one"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("stripe.webhook.rotate plan lacks %q: %s", want, s)
 		}
+	}
+	// Prepared, the text names the URL and event count from the provenance.
+	es := newEnv(t, map[string]string{"STRIPE_WEBHOOK_SECRET": provideractiontest.Sentinel("whsec_")})
+	if s := es.summary(t, pa.ActionStripeWebhookRotate, stripeRotateParams(t)); !strings.Contains(s, "ROTATE Stripe webhook we_old1 (https://shop.example.com/api/stripe/webhook, 2 events) to a copy") {
+		t.Errorf("prepared stripe.webhook.rotate plan lacks the endpoint: %s", s)
 	}
 }
 
@@ -294,7 +302,7 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 		"vault.store DATABASE_URL_UNPOOLED",
 		"vercel.upsert DATABASE_URL preview",
 		"vercel.upsert DATABASE_URL_UNPOOLED preview",
-		"vercel.current",
+		"vercel.current branch=main",
 		"vercel.redeploy dpl_current",
 		"vercel.wait_ready",
 		"vercel.health /api/health",
@@ -305,7 +313,7 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 	if got := e.log.Calls(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("call order:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	wantSteps := []string{pa.StepControl, pa.StepBindingCheck, pa.StepNeonCheckRoles, pa.StepNeonResetNewRole, pa.StepBindingSave, pa.StepVercelEnvPush, pa.StepVercelCurrent, pa.StepVercelRedeploy, pa.StepVercelWaitReady, pa.StepHealth, pa.StepNeonInvalidateOld, pa.StepBindingFinish}
+	wantSteps := []string{pa.StepControl, pa.StepBindingCheck, pa.StepNeonCheckRoles, pa.StepBindingPending, pa.StepNeonResetNewRole, pa.StepBindingSave, pa.StepVercelEnvPush, pa.StepVercelCurrent, pa.StepVercelRedeploy, pa.StepVercelWaitReady, pa.StepHealth, pa.StepNeonInvalidateOld, pa.StepBindingFinish}
 	if strings.Join(st.Steps, ",") != strings.Join(wantSteps, ",") {
 		t.Fatalf("steps %v", st.Steps)
 	}
@@ -319,7 +327,7 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 	for _, rec := range []string{"DATABASE_URL", "DATABASE_URL_UNPOOLED"} {
 		b, _ := e.vault.Binding(rec)
 		if _, rev := e.vault.Value(rec); b.RecordRevision != rev || len(b.AllowedDestinations) != 1 || b.Resource.ProjectID != "calm-sky-123456" ||
-			b.ActiveRole != "app_b" || b.RetiringRole != "" || len(b.DeployedTo) != 1 || b.DeployedTo[0].Env != rec || b.DeployedTo[0].Target != "preview" {
+			b.ActiveRole != "app_b" || b.RetiringRole != "" || b.PendingRole != "" || len(b.DeployedTo) != 1 || b.DeployedTo[0].Env != rec || b.DeployedTo[0].Target != "preview" {
 			t.Fatalf("%s binding not moved to the new value: %+v", rec, b)
 		}
 	}
@@ -349,7 +357,7 @@ func TestNeonRotateFailureAtEachStepKeepsOldRole(t *testing.T) {
 		"neon.reset app_b":                            pa.StepNeonResetNewRole,
 		"vercel.upsert DATABASE_URL preview":          pa.StepVercelEnvPush,
 		"vercel.upsert DATABASE_URL_UNPOOLED preview": pa.StepVercelEnvPush,
-		"vercel.current":                              pa.StepVercelCurrent,
+		"vercel.current branch=main":                  pa.StepVercelCurrent,
 		"vercel.redeploy dpl_current":                 pa.StepVercelRedeploy,
 		"vercel.wait_ready":                           pa.StepVercelWaitReady,
 		"vercel.health /api/health":                   pa.StepHealth,
@@ -411,13 +419,14 @@ func TestStripeWebhookRotateOrder(t *testing.T) {
 		t.Fatalf("status %+v", st)
 	}
 	want := []string{
-		"stripe.webhook we_old1",
+		"stripe.webhook we_old1", // before the prompt: no drift from the provenance
+		"stripe.webhook we_old1", // again when running
 		"vault.store STRIPE_WEBHOOK_SECRET_PREVIOUS",
 		"stripe.create",
 		"vault.store STRIPE_WEBHOOK_SECRET",
 		"vercel.upsert STRIPE_WEBHOOK_SECRET preview",
 		"vercel.upsert STRIPE_WEBHOOK_SECRET_PREVIOUS preview",
-		"vercel.current",
+		"vercel.current branch=main",
 		"vercel.redeploy dpl_current",
 		"vercel.wait_ready",
 		"vercel.health /api/health",
@@ -448,7 +457,11 @@ func TestStripeWebhookRotateFailureNeverDeletesOld(t *testing.T) {
 		t.Run(call, func(t *testing.T) {
 			old := provideractiontest.Sentinel("whsec_")
 			e := newEnv(t, map[string]string{"STRIPE_WEBHOOK_SECRET": old})
-			e.fake.Fail = call
+			if call == "stripe.webhook we_old1" {
+				e.fake.FailAfter = map[string]int{call: 2} // the read when running, not the precheck
+			} else {
+				e.fake.Fail = call
+			}
 			st := e.run(t, pa.ActionStripeWebhookRotate, stripeRotateParams(t))
 			if st.State != pa.StateFailed || st.Step == "" || st.Code == "" {
 				t.Fatalf("status %+v", st)

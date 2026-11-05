@@ -44,9 +44,9 @@ func (g *Gate) providerAction(ctx context.Context, s Session, req Request) agent
 		return resp
 	}
 	defer prep.Release()
-	reason, fits := providerReason(s, prep.Summary())
-	if !fits {
-		return refuse(agentbroker.CodeInvalidRequest) // the plan cannot be shown in full: never prompt clipped
+	reason, code := providerReason(s, prep.Summary())
+	if code != "" {
+		return refuse(code) // the plan cannot be shown in full: never prompt clipped
 	}
 	caller := g.caller(s, gr)
 	var opID string
@@ -86,38 +86,60 @@ func (g *Gate) providerAction(ctx context.Context, s Session, req Request) agent
 
 // providerReason is the Touch ID text: the plan in full, then the session
 // (authoritative), then the label last, ASCII-only inside fixed delimiters
-// so it cannot read as plan text. Nothing is clipped: a reason that does not
-// fit is refused.
-func providerReason(s Session, summary string) (string, bool) {
+// so it cannot read as plan text. The plan is never clipped: one that does
+// not fit with room for a minimal label is refused (PLAN_TOO_LONG). The
+// label gets the rest of the budget and is clipped to it, so the agent's
+// label can never make an approval fail.
+func providerReason(s Session, summary string) (string, string) {
 	authoritative := "perform a provider action: " + summary + ", for " + s.Ident()
-	if authoritative == "" || approval.Clean(authoritative, approval.MaxReasonBytes) != authoritative {
-		return "", false
+	if approval.Clean(authoritative, len(authoritative)) != authoritative {
+		return "", agentbroker.CodeInvalidRequest
+	}
+	if len(authoritative) > MaxProviderPlanBytes {
+		return "", provideraction.CodePlanTooLong
 	}
 	reason := authoritative
-	if label := asciiLabel(s.Label); label != "" {
-		reason += `; [agent label: "` + label + `"]`
+	if label := asciiLabel(s.Label, approval.MaxReasonBytes-len(authoritative)-len(labelOpen)-len(labelClose)); label != "" {
+		reason += labelOpen + label + labelClose
 	}
 	if len(reason) > approval.MaxReasonBytes {
-		return "", false
+		return "", provideraction.CodePlanTooLong // unreachable: the label is clipped to fit
 	}
-	return reason, true
+	return reason, ""
 }
 
-// maxLabelRunes bounds the label shown in a provider approval.
-const maxLabelRunes = 80
+const (
+	labelOpen  = `; [agent label: "`
+	labelClose = `"]`
+	// maxLabelRunes bounds the label shown in a provider approval.
+	maxLabelRunes = 80
+	// minLabelRunes is the label room every plan leaves: at least this
+	// much of the label, then "...", is always shown.
+	minLabelRunes = 8
+	// MaxProviderPlanBytes bounds "perform a provider action: <plan>, for
+	// <session>": the prompt limit less the label's minimum room.
+	MaxProviderPlanBytes = approval.MaxReasonBytes - len(labelOpen) - len(labelClose) - minLabelRunes - len("...")
+)
 
-// asciiLabel renders the agent-influenced label for a provider approval:
-// cleaned to one line without quote-like characters (approval.Plain), then
-// every rune that is not printable ASCII, and the delimiters '"', '[' and
-// ']', become '?'. A label too long is clipped with "..." (ASCII): the
-// label is never authoritative, and the whole reason is refused, never
-// clipped, if it does not fit.
-func asciiLabel(label string) string {
+// asciiLabel renders the agent-influenced label for a provider approval in
+// at most room bytes (never less than minLabelRunes plus "..."): cleaned to
+// one line without quote-like characters (approval.Plain), then every rune
+// that is not printable ASCII, and the delimiters '"', '[' and ']', become
+// '?'. A label longer than maxLabelRunes or than room is clipped with
+// "..." (ASCII): the label is never authoritative.
+func asciiLabel(label string, room int) string {
+	limit := maxLabelRunes
+	if room-len("...") < limit {
+		limit = room - len("...")
+	}
+	if limit < minLabelRunes {
+		limit = minLabelRunes
+	}
 	clean := approval.Plain(label, 1<<10)
 	var b strings.Builder
 	n := 0
 	for _, r := range clean {
-		if n == maxLabelRunes {
+		if n == limit {
 			b.WriteString("...")
 			break
 		}

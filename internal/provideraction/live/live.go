@@ -393,6 +393,17 @@ func (p *vercelPort) UpsertSensitiveEnv(ctx context.Context, env provideraction.
 	})
 }
 
+// DeleteEnv removes the sensitive variable key from exactly env's scope
+// (absent is success; the adapter refuses plain or overlapping entries).
+func (p *vercelPort) DeleteEnv(ctx context.Context, env provideraction.VercelEnv, key string) error {
+	scope := vercel.Scope{TeamID: env.TeamID, ProjectID: env.ProjectID, Environment: env.Target, GitBranch: env.GitBranch}
+	a, err := p.project(scope)
+	if err != nil {
+		return err
+	}
+	return a.DeleteEnv(mutating(ctx), key)
+}
+
 // CurrentDeployment: for a branch-scoped preview, the adapter lists with
 // Vercel's branch filter and then proves the deployment's own git branch
 // (gitSource ref and commit-ref meta) is env.GitBranch.

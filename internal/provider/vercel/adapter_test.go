@@ -2,6 +2,7 @@ package vercel
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -470,4 +471,69 @@ func TestJSONEscapingMatchesEncodingJSON(t *testing.T) {
 			t.Fatal("unexpected body allocation")
 		}
 	}
+}
+
+func TestDeleteEnvRemovesOnlyTheExactSensitiveEntry(t *testing.T) {
+	deletePath := "/v9/projects/" + testProject + "/env/envOLD1"
+	t.Run("present", func(t *testing.T) {
+		fake := newFake(t)
+		fake.project("")
+		fake.envs(env("envOLD1", "DATABASE_URL", "sensitive", `["preview"]`, testBranch, ""),
+			env("envOTHER", "DATABASE_URL", "sensitive", `["production"]`, "", ""))
+		fake.handle(http.MethodDelete, deletePath, func(w http.ResponseWriter, _ *http.Request) {
+			fake.envs(env("envOTHER", "DATABASE_URL", "sensitive", `["production"]`, "", ""))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		})
+		adapter := fake.adapter(t, previewScope())
+		if err := adapter.DeleteEnv(background, "DATABASE_URL"); err != nil {
+			t.Fatal(err)
+		}
+		if fake.count(http.MethodDelete, deletePath) != 1 || fake.mutations() != 1 {
+			t.Fatalf("expected exactly one delete of the exact entry")
+		}
+	})
+	t.Run("absent is success", func(t *testing.T) {
+		fake := newFake(t)
+		fake.project("")
+		fake.envs(env("envOTHER", "DATABASE_URL", "sensitive", `["production"]`, "", ""))
+		adapter := fake.adapter(t, previewScope())
+		if err := adapter.DeleteEnv(background, "DATABASE_URL"); err != nil || fake.mutations() != 0 {
+			t.Fatalf("absent: err %v, %d mutations", err, fake.mutations())
+		}
+	})
+	for name, entry := range map[string]string{
+		"plain":   env("envOLD1", "DATABASE_URL", "plain", `["preview"]`, testBranch, ""),
+		"overlap": env("envOLD1", "DATABASE_URL", "sensitive", `["preview","production"]`, testBranch, ""),
+		"case":    env("envOLD1", "database_url", "sensitive", `["preview"]`, testBranch, ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := newFake(t)
+			fake.project("")
+			fake.envs(entry)
+			adapter := fake.adapter(t, previewScope())
+			expectCode(t, adapter.DeleteEnv(background, "DATABASE_URL"), "AMBIGUOUS_EXISTING_ENTRIES")
+			if fake.mutations() != 0 {
+				t.Fatal("ambiguous entry deleted")
+			}
+		})
+	}
+	t.Run("still present after delete", func(t *testing.T) {
+		fake := newFake(t)
+		fake.project("")
+		fake.envs(env("envOLD1", "DATABASE_URL", "sensitive", `["preview"]`, testBranch, ""))
+		fake.json(http.MethodDelete, deletePath, http.StatusOK, `{}`)
+		adapter := fake.adapter(t, previewScope())
+		expectCode(t, adapter.DeleteEnv(background, "DATABASE_URL"), "DELETE_CHECKPOINT_UNAVAILABLE")
+	})
+	t.Run("needs mutation authority", func(t *testing.T) {
+		fake := newFake(t)
+		fake.project("")
+		fake.envs(env("envOLD1", "DATABASE_URL", "sensitive", `["preview"]`, testBranch, ""))
+		adapter := fake.adapter(t, previewScope())
+		expectCode(t, adapter.DeleteEnv(context.Background(), "DATABASE_URL"), "AUTHORIZATION_DENIED")
+		if fake.count(http.MethodDelete, deletePath) != 0 {
+			t.Fatal("delete sent without authority")
+		}
+	})
 }

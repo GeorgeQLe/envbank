@@ -101,6 +101,10 @@ type VercelPort interface {
 	// UpsertSensitiveEnv creates or replaces key as a sensitive env var,
 	// reading the value only inside value.WithSecret.
 	UpsertSensitiveEnv(ctx context.Context, env VercelEnv, key string, value *lifecycle.SecretSource) error
+	// DeleteEnv removes key from exactly env's scope, only when it is one
+	// sensitive entry of exactly that scope; absent is success, anything
+	// ambiguous is refused (never deleted).
+	DeleteEnv(ctx context.Context, env VercelEnv, key string) error
 	// CurrentDeployment is, for production, the deployment every verified
 	// production domain of the project is proven to be aliased to (it fails
 	// while an alias job runs or the aliases disagree); for preview, the
@@ -165,9 +169,12 @@ type Factory interface {
 // Vault is the owner-unlocked store as the actions see it: revisioned,
 // callback-scoped reads and durable writes. Implementations never log values.
 type Vault interface {
-	// StoreSecret durably encrypts the value fill supplies under name and
-	// returns its new revision (lifecycle.RecordWriter).
-	lifecycle.RecordWriter
+	// StoreSecretAt durably encrypts the value fill supplies under name and
+	// returns its new revision, only if name's current revision is expected
+	// (0: name must be absent). Otherwise it stores nothing and returns
+	// ErrRecordChanged. Actions write records only through it, with the
+	// revision they checked (and the owner approved).
+	StoreSecretAt(ctx context.Context, name string, expected int64, fill func(func([]byte) error) error) (int64, error)
 	// ReadSecret calls consume with exactly revision of name, or fails
 	// (lifecycle.RecordReader).
 	lifecycle.RecordReader
@@ -187,6 +194,11 @@ type Vault interface {
 // ErrMissing is returned by Vault.Latest for an absent record, and by the
 // BindingStore loads for an absent object.
 var ErrMissing = errors.New("record not found")
+
+// ErrRecordChanged is returned by Vault.StoreSecretAt when the record's
+// revision is not the expected one (it was written, created or removed by
+// something else since the action checked it).
+var ErrRecordChanged = errors.New("record changed")
 
 // ErrNotFound is returned by a port's read when the provider reports the
 // resource does not exist (HTTP 404).

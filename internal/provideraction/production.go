@@ -61,6 +61,12 @@ func (r *run) productionBaseline(ref VercelRef) error {
 		if !vercelDeploymentRe.MatchString(id) {
 			return fail(CodeProviderResponse)
 		}
+		// A named source must be what production serves now: releasing an
+		// older (or unrelated) deployment to production is a rollback or a
+		// different release, not this one.
+		if ref.Deployment != "" && ref.Deployment != id {
+			return fail(CodeProductionSourceNotCurrent)
+		}
 		r.prod = &release{ref: ref, previous: id}
 		r.res.PreviousDeploymentID = id
 		return nil

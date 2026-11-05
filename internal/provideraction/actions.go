@@ -18,6 +18,7 @@ const (
 	ActionVercelProjectCreate = "vercel.project.create"
 	ActionVercelProjectDelete = "vercel.project.delete"
 	ActionVercelEnvPush       = "vercel.env.push"
+	ActionVercelEnvRemove     = "vercel.env.remove"
 	ActionVercelRedeploy      = "vercel.redeploy"
 	ActionStripeWebhookCreate = "stripe.webhook.create"
 	ActionStripeWebhookRotate = "stripe.webhook.rotate"
@@ -63,6 +64,9 @@ const (
 	StepBindingDeployed         = "vault.record_deployments"
 	StepBindingFinish           = "vault.finish_rotation"
 	StepBindingForget           = "vault.forget_deployments"
+	StepVercelEnvRemove         = "vercel.env_remove"
+	StepBindingPending          = "vault.mark_pending"
+	StepBindingRelease          = "vault.release_env_owner"
 )
 
 // Fixed codes: refusals before any prompt, and failure codes of an
@@ -124,6 +128,38 @@ const (
 	// overwrite a secret that may still be in use; the refusal names the
 	// endpoint (orphan_endpoint_id) for cleanup.
 	CodeStripeOrphanEndpoint = "STRIPE_ORPHAN_ENDPOINT"
+	// CodeRecordChanged: a record changed between the approval (or this
+	// step's read) and the write; nothing was overwritten.
+	CodeRecordChanged = "RECORD_CHANGED"
+	// CodeRotationUnscopedPreview: a rotation names, or a binding records,
+	// a preview scope without git_branch (all preview branches). Rotating
+	// it would replace one value for every branch; remove it
+	// (vercel.env.remove) and push per branch instead.
+	CodeRotationUnscopedPreview = "ROTATION_UNSCOPED_PREVIEW"
+	// CodeEnvNameTaken: the env var in that Vercel scope is recorded as
+	// holding another record (env.push without replace_existing), or a
+	// rotation would rewrite an env var another record owns.
+	CodeEnvNameTaken = "ENV_NAME_TAKEN"
+	// CodeNotDeployed: vercel.env.remove names an env var and scope the
+	// record's binding does not list in deployed_to.
+	CodeNotDeployed = "NOT_DEPLOYED"
+	// CodeRotationScopeLimit: env.push would spread a record over more
+	// Vercel scopes than one rotation can name (max_rotation_targets).
+	CodeRotationScopeLimit = "ROTATION_SCOPE_LIMIT"
+	// CodeStripeEndpointDrift: the live Stripe endpoint's URL or events no
+	// longer match what this broker created (or the provenance predates
+	// recorded events).
+	CodeStripeEndpointDrift = "STRIPE_ENDPOINT_DRIFT"
+	// CodeResourceStillDeployed: a delete names a Neon project or Stripe
+	// endpoint whose secret is still deployed to Vercel (deployed_to is not
+	// empty); remove it with vercel.env.remove (or rotate away) first.
+	CodeResourceStillDeployed = "RESOURCE_STILL_DEPLOYED"
+	// CodeProductionSourceNotCurrent: a production redeploy names a
+	// deployment that is not the one serving production now.
+	CodeProductionSourceNotCurrent = "PRODUCTION_SOURCE_NOT_CURRENT"
+	// CodePlanTooLong: the approval text of the plan alone (without the
+	// agent label) exceeds the prompt limit.
+	CodePlanTooLong = "PLAN_TOO_LONG"
 )
 
 // Rollback outcomes (Result.Rollback), set when a production release failed
@@ -188,6 +224,10 @@ type Result struct {
 	// OrphanEndpointID is set only on a STRIPE_ORPHAN_ENDPOINT refusal: the
 	// endpoint previous_record is bound to, which still exists.
 	OrphanEndpointID string `json:"orphan_endpoint_id,omitempty"`
+	// ReplacedRecords names the records whose env vars a
+	// vercel.env.push with replace_existing took over (their bindings no
+	// longer list those entries).
+	ReplacedRecords []string `json:"replaced_records,omitempty"`
 }
 
 // Redeployed is one rebuilt Vercel scope.
@@ -225,6 +265,9 @@ func (r Result) clone() Result {
 	}
 	if r.ForgottenDeployments != nil {
 		c.ForgottenDeployments = append([]string(nil), r.ForgottenDeployments...)
+	}
+	if r.ReplacedRecords != nil {
+		c.ReplacedRecords = append([]string(nil), r.ReplacedRecords...)
 	}
 	if r.Redeployed != nil {
 		c.Redeployed = make([]Redeployed, len(r.Redeployed))
@@ -290,6 +333,7 @@ var registry = map[string]parser{
 	ActionVercelProjectCreate: parse[vercelProjectCreate],
 	ActionVercelProjectDelete: parse[vercelProjectDelete],
 	ActionVercelEnvPush:       parse[vercelEnvPush],
+	ActionVercelEnvRemove:     parse[vercelEnvRemove],
 	ActionVercelRedeploy:      parse[vercelRedeploy],
 	ActionStripeWebhookCreate: parse[stripeWebhookCreate],
 	ActionStripeWebhookRotate: parse[stripeWebhookRotate],

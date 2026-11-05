@@ -72,8 +72,26 @@ func (p *vercelProjectCreate) resources(context.Context, Vault) []string {
 func (p *vercelProjectDelete) resources(context.Context, Vault) []string {
 	return []string{lockVercel(p.TeamID, p.ProjectID)}
 }
-func (p *vercelEnvPush) resources(context.Context, Vault) []string {
-	return []string{lockVercel(p.TeamID, p.ProjectID)}
+
+// env.push also locks every record it pushes, and every record whose env
+// var it may replace (their bindings change), so no rotation of them runs
+// meanwhile.
+func (p *vercelEnvPush) resources(ctx context.Context, v Vault) []string {
+	keys := []string{lockVercel(p.TeamID, p.ProjectID)}
+	for _, rec := range p.recordNames() {
+		keys = append(keys, lockRecord(rec))
+	}
+	if claims, code := envClaims(ctx, v); code == "" {
+		for _, env := range p.envNames() {
+			if owner, ok := claims[Deployed{DeployTarget: p.ref().deployTarget(), Env: env}]; ok {
+				keys = append(keys, lockRecord(owner))
+			}
+		}
+	}
+	return keys
+}
+func (p *vercelEnvRemove) resources(context.Context, Vault) []string {
+	return []string{lockVercel(p.TeamID, p.ProjectID), lockRecord(p.Record)}
 }
 func (p *vercelRedeploy) resources(context.Context, Vault) []string {
 	return []string{lockVercel(p.TeamID, p.ProjectID)}

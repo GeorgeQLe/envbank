@@ -115,7 +115,11 @@ func (p *vercelEnvPush) summary() string {
 	for _, env := range p.envNames() {
 		parts = append(parts, env+" from record "+p.Variables[env])
 	}
-	return "PUSH vault records to " + p.ref().text() + " as sensitive env vars: " + strings.Join(parts, ", ")
+	s := "PUSH vault records to " + p.ref().text() + " as sensitive env vars: " + strings.Join(parts, ", ")
+	for _, env := range p.replacedEnvs() {
+		s += "; REPLACES record " + p.replaced[env] + "'s value in " + env
+	}
+	return s
 }
 func (p *vercelEnvPush) controls() []string { return []string{ControlVercel} }
 func (p *vercelEnvPush) recordNames() []string {
@@ -130,6 +134,17 @@ func (p *vercelEnvPush) recordNames() []string {
 	return recs
 }
 
+// replacedEnvs are the env names (sorted) whose current owner the push
+// replaces.
+func (p *vercelEnvPush) replacedEnvs() []string {
+	out := make([]string, 0, len(p.replaced))
+	for env := range p.replaced {
+		out = append(out, env)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // deployed lists the entries this push writes record to.
 func (p *vercelEnvPush) deployed(record string) []Deployed {
 	var out []Deployed
@@ -142,34 +157,60 @@ func (p *vercelEnvPush) deployed(record string) []Deployed {
 }
 
 // check: every record exists, has a live binding, may be deployed to this
-// project, and has room to record this push in deployed_to.
-func (p *vercelEnvPush) check(ctx context.Context, v Vault) (map[string]bound, string) {
+// project, and has room to record this push in deployed_to, without
+// spreading over more scopes than one rotation can rewrite. An env var
+// another record's binding owns in this scope (envClaims) is replaced only
+// with replace_existing; replaced maps it to that record.
+func (p *vercelEnvPush) check(ctx context.Context, v Vault) (map[string]bound, map[string]string, string) {
 	if code := mustExist(ctx, v, p.recordNames()...); code != "" {
-		return nil, code
+		return nil, nil, code
 	}
 	checked, code := boundForPush(ctx, v, p.ref().dest(), p.recordNames()...)
 	if code != "" {
-		return nil, code
+		return nil, nil, code
 	}
 	for rec, lb := range checked {
-		if _, ok := lb.b.withDeployed(p.deployed(rec)...); !ok {
-			return nil, CodeBindingLimit
+		b, ok := lb.b.withDeployed(p.deployed(rec)...)
+		if !ok {
+			return nil, nil, CodeBindingLimit
+		}
+		if len(b.deployedScopes()) > maxRotationTargets {
+			return nil, nil, CodeRotationScopeLimit
 		}
 	}
-	return checked, ""
+	claims, code := envClaims(ctx, v)
+	if code != "" {
+		return nil, nil, code
+	}
+	replaced := map[string]string{}
+	for _, env := range p.envNames() {
+		owner, ok := claims[Deployed{DeployTarget: p.ref().deployTarget(), Env: env}]
+		if ok && owner != p.Variables[env] {
+			replaced[env] = owner
+		}
+	}
+	if len(replaced) > 0 && !p.ReplaceExisting {
+		return nil, nil, CodeEnvNameTaken
+	}
+	return checked, replaced, ""
 }
 
 // precheck: unbound records (owner-entered secrets) are never pushed.
 func (p *vercelEnvPush) precheck(ctx context.Context, v Vault) string {
-	_, code := p.check(ctx, v)
+	_, replaced, code := p.check(ctx, v)
+	p.replaced = replaced
 	return code
 }
 func (p *vercelEnvPush) execute(r *run) error {
 	var checked map[string]bound
 	if err := r.step(StepVaultReadRevisions, agentbroker.CodeVaultFailed, func() error {
 		var code string
-		if checked, code = p.check(r.ctx, r.vault); code != "" {
+		var replaced map[string]string
+		if checked, replaced, code = p.check(r.ctx, r.vault); code != "" {
 			return fail(code)
+		}
+		if !sameStrings(replaced, p.replaced) {
+			return fail(CodeEnvNameTaken) // changed since the owner approved
 		}
 		// Each push reads exactly the bound revision.
 		for rec, lb := range checked {
@@ -199,7 +240,117 @@ func (p *vercelEnvPush) execute(r *run) error {
 	}); err != nil {
 		return err
 	}
-	return r.push(p.ref().env(), p.Variables)
+	if err := r.push(p.ref().env(), p.Variables); err != nil {
+		return err
+	}
+	if len(p.replaced) == 0 {
+		return nil
+	}
+	// The replaced records no longer live there: their rotations must not
+	// rewrite (and so clobber) these env vars.
+	return r.step(StepBindingRelease, agentbroker.CodeVaultFailed, func() error {
+		drop := map[string][]Deployed{}
+		for _, env := range p.replacedEnvs() {
+			owner := p.replaced[env]
+			drop[owner] = append(drop[owner], Deployed{DeployTarget: p.ref().deployTarget(), Env: env})
+		}
+		owners := make([]string, 0, len(drop))
+		for owner := range drop {
+			owners = append(owners, owner)
+		}
+		sort.Strings(owners)
+		for _, owner := range owners {
+			b, objRev, err := r.vault.LoadBinding(r.ctx, owner)
+			if err != nil {
+				return fail(agentbroker.CodeVaultFailed)
+			}
+			if err := saveBinding(r.ctx, r.vault, b.without(drop[owner]...), objRev); err != nil {
+				return err
+			}
+		}
+		r.res.ReplacedRecords = owners
+		return nil
+	})
+}
+
+func sameStrings(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// ---- vercel.env.remove ----
+
+func (p *vercelEnvRemove) ref() VercelRef {
+	return VercelRef{TeamID: p.TeamID, ProjectID: p.ProjectID, Target: p.Target, Production: p.Production, GitBranch: p.GitBranch}
+}
+
+func (p *vercelEnvRemove) deployed() Deployed {
+	return Deployed{DeployTarget: p.ref().deployTarget(), Env: p.Env}
+}
+
+func (p *vercelEnvRemove) summary() string {
+	return "REMOVE env var " + p.Env + " (record " + p.Record + "'s value) from " + p.ref().text() +
+		"; deployments built with it keep it until redeployed; the record stays in the vault"
+}
+func (p *vercelEnvRemove) controls() []string { return []string{ControlVercel} }
+
+// check: record has a binding (live, stale or revoked: this broker wrote
+// the value) that lists exactly this env var in this scope.
+func (p *vercelEnvRemove) check(ctx context.Context, v Vault) (bound, string) {
+	b, objRev, err := v.LoadBinding(ctx, p.Record)
+	if errors.Is(err, ErrMissing) {
+		return bound{}, CodeRecordNotBound
+	}
+	if err != nil || b.Record != p.Record || !b.Valid() {
+		return bound{}, agentbroker.CodeVaultFailed
+	}
+	for _, d := range b.DeployedTo {
+		if d == p.deployed() {
+			return bound{b: b, objRev: objRev}, ""
+		}
+	}
+	return bound{}, CodeNotDeployed
+}
+func (p *vercelEnvRemove) precheck(ctx context.Context, v Vault) string {
+	_, code := p.check(ctx, v)
+	return code
+}
+func (p *vercelEnvRemove) execute(r *run) error {
+	var lb bound
+	if err := r.step(StepBindingCheck, agentbroker.CodeVaultFailed, func() error {
+		var code string
+		if lb, code = p.check(r.ctx, r.vault); code != "" {
+			return fail(code)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	r.res.TeamID, r.res.ProjectID = p.TeamID, p.ProjectID
+	if err := r.step(StepVercelEnvRemove, CodeProviderFailed, func() error {
+		if err := r.vercel.DeleteEnv(r.ctx, p.ref().env(), p.Env); err != nil {
+			return err
+		}
+		r.res.Variables = map[string]string{p.Env: "removed"}
+		return nil
+	}); err != nil {
+		return err
+	}
+	// Only once it is gone: a rotation no longer needs to rewrite it.
+	return r.step(StepBindingForget, agentbroker.CodeVaultFailed, func() error {
+		if err := saveBinding(r.ctx, r.vault, lb.b.without(p.deployed()), lb.objRev); err != nil {
+			return err
+		}
+		r.res.ForgottenDeployments = []string{p.Record}
+		return nil
+	})
 }
 
 // ---- vercel.redeploy ----
@@ -212,7 +363,12 @@ func (p *vercelRedeploy) healthPath() string {
 }
 func (p *vercelRedeploy) summary() string {
 	if p.Target == TargetProduction {
-		return "REDEPLOY " + p.ref().text() + fromDeployment(p.Deployment) + " as STAGED, check health at " + p.healthPath() + productionText
+		from := " from the deployment serving production now"
+		if p.Deployment != "" {
+			from += " (must be " + p.Deployment + ")"
+		}
+		return "REDEPLOY " + p.ref().text() + from + " as STAGED, check health at " + p.healthPath() +
+			"; then PROMOTE, verify production serves it and recheck, auto ROLL BACK on failure"
 	}
 	return "REDEPLOY " + p.ref().text() + fromDeployment(p.Deployment) + ", then check health at " + p.healthPath()
 }

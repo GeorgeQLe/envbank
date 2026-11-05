@@ -21,11 +21,23 @@ func TestProviderBindingsPersistInTheVault(t *testing.T) {
 	api, key := unlockedFixtureAPI(t, fixture.firstConfigPath, fixture.passphrasePath)
 	first := &brokerVault{api: api, vaultKey: key}
 	value := provideractiontest.Sentinel("postgresql://app_a:")
-	rev, err := first.StoreSecret(ctx, "DATABASE_URL", func(consume func([]byte) error) error { return consume([]byte(value)) })
+	rev, err := first.StoreSecretAt(ctx, "DATABASE_URL", 0, func(consume func([]byte) error) error { return consume([]byte(value)) })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := first.StoreSecret(ctx, provideraction.ControlVercel, func(consume func([]byte) error) error {
+	// Written only over the expected revision: a create over an existing
+	// record, or a stale revision, stores nothing.
+	for _, stale := range []int64{0, rev + 1} {
+		if _, err := first.StoreSecretAt(ctx, "DATABASE_URL", stale, func(consume func([]byte) error) error {
+			return consume([]byte(provideractiontest.Sentinel("postgresql://other:")))
+		}); !errors.Is(err, provideraction.ErrRecordChanged) {
+			t.Fatalf("store at stale revision %d: %v", stale, err)
+		}
+	}
+	if r, err := first.Revision(ctx, "DATABASE_URL"); err != nil || r != rev {
+		t.Fatalf("refused store changed the record: %d %v", r, err)
+	}
+	if _, err := first.StoreSecretAt(ctx, provideraction.ControlVercel, 0, func(consume func([]byte) error) error {
 		return consume([]byte(provideractiontest.Sentinel("vcp_")))
 	}); err != nil {
 		t.Fatal(err)
@@ -53,7 +65,8 @@ func TestProviderBindingsPersistInTheVault(t *testing.T) {
 	if err := first.SaveNeonProject(ctx, neonProv); err == nil {
 		t.Fatal("Neon provenance overwritten")
 	}
-	if err := first.SaveStripeEndpoint(ctx, provideraction.StripeEndpointProvenance{V: 1, EndpointID: "we_abc", URL: "https://shop.example.com/x", Lineage: "we_abc"}); err != nil {
+	if err := first.SaveStripeEndpoint(ctx, provideraction.StripeEndpointProvenance{V: 1, EndpointID: "we_abc", URL: "https://shop.example.com/x", Lineage: "we_abc",
+		Events: []string{"invoice.paid"}}); err != nil {
 		t.Fatal(err)
 	}
 	// Revision-only and single-record reads.

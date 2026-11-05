@@ -429,13 +429,20 @@ func (f *fakeVercel) id(prefix string) string {
 	return fmt.Sprintf("%se2e%d", prefix, f.next)
 }
 
-// envValue returns key's value in the project's preview scope.
+// envValue returns key's value in the project's preview scope of branch
+// main (rotations only rewrite branch-scoped previews).
 func (f *fakeVercel) envValue(projectID, key string) string {
-	return f.envValueIn(projectID, key, "preview")
+	return f.envValueAt(projectID, key, "preview", "main")
 }
 
 // envValueIn returns key's value in the project's target scope.
 func (f *fakeVercel) envValueIn(projectID, key, target string) string {
+	return f.envValueAt(projectID, key, target, "")
+}
+
+// envValueAt returns key's value in the project's target scope for branch
+// ("" = every branch).
+func (f *fakeVercel) envValueAt(projectID, key, target, branch string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p := f.byID[projectID]
@@ -443,7 +450,7 @@ func (f *fakeVercel) envValueIn(projectID, key, target string) string {
 		return ""
 	}
 	for _, e := range p.envs {
-		if e.key == key && e.target == target && e.branch == "" {
+		if e.key == key && e.target == target && e.branch == branch {
 			return e.value
 		}
 	}
@@ -643,6 +650,21 @@ func (f *fakeVercel) serve(w http.ResponseWriter, r *http.Request) {
 		f.aliasLocked(p, d.id)
 		p.jobStatus = "succeeded"
 		writeJSON(w, http.StatusCreated, map[string]any{})
+	case r.Method == http.MethodDelete && len(parts) == 5 && parts[0] == "v9" && parts[1] == "projects" && parts[3] == "env":
+		p := project(parts[2])
+		if p == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		for i, e := range p.envs {
+			if e.id == parts[4] {
+				p.envs = append(p.envs[:i:i], p.envs[i+1:]...)
+				f.ev.add("vercel.env_delete %s %s", e.key, e.target)
+				writeJSON(w, http.StatusOK, map[string]any{})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
 	case len(parts) == 4 && parts[0] == "v10" && parts[1] == "projects" && parts[3] == "env":
 		p := project(parts[2])
 		if p == nil {

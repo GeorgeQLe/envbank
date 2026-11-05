@@ -193,7 +193,7 @@ func TestSyntheticEndToEnd(t *testing.T) {
 	h := newHarness(t, Config{NeonOrgID: "org-e2e-test"})
 	team := h.fx.team
 	preview := func(project string) map[string]any {
-		return map[string]any{"team_id": team, "project_id": project, "target": "preview"}
+		return map[string]any{"team_id": team, "project_id": project, "target": "preview", "git_branch": "main"}
 	}
 
 	// Ungranted: refused before any prompt or provider call.
@@ -313,7 +313,25 @@ func TestSyntheticEndToEnd(t *testing.T) {
 		t.Fatalf("previous binding %+v", b)
 	}
 
-	// Cleanup: deletes revoke the bindings; the records stay.
+	// Cleanup: a deployed endpoint or project is not deleted until its env
+	// vars are removed from Vercel (each removal approved); then deletes
+	// revoke the bindings and the records stay.
+	h.refusedWithoutPrompt(provideraction.CodeResourceStillDeployed, provideraction.ActionStripeWebhookDelete, map[string]any{"endpoint_id": second})
+	h.refusedWithoutPrompt(provideraction.CodeResourceStillDeployed, provideraction.ActionNeonProjectDelete, map[string]any{"project_id": np.ProjectID})
+	for _, rec := range []string{"STRIPE_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET_PREVIOUS", "DATABASE_URL", "DATABASE_URL_UNPOOLED"} {
+		rm := preview(project)
+		rm["record"], rm["env"] = rec, rec
+		res := h.mustSucceed(provideraction.ActionVercelEnvRemove, rm)
+		if res.Variables[rec] != "removed" || h.fx.vercel.envValue(project, rec) != "" || len(h.binding(rec).DeployedTo) != 0 {
+			t.Fatalf("env remove %s: %+v", rec, res)
+		}
+		if a := h.own.approvals(); !strings.Contains(a[len(a)-1], "REMOVE env var "+rec+" (record "+rec+"'s value) from Vercel "+project) {
+			t.Fatalf("env remove text: %s", a[len(a)-1])
+		}
+	}
+	if h.fx.ev.index("vercel.env_delete STRIPE_WEBHOOK_SECRET preview") < 0 {
+		t.Fatalf("env delete missing: %v", h.fx.ev.list())
+	}
 	sd := h.mustSucceed(provideraction.ActionStripeWebhookDelete, map[string]any{"endpoint_id": second})
 	nd := h.mustSucceed(provideraction.ActionNeonProjectDelete, map[string]any{"project_id": np.ProjectID})
 	h.mustSucceed(provideraction.ActionVercelProjectDelete, map[string]any{"team_id": team, "project_id": project})
@@ -340,7 +358,7 @@ func TestSyntheticEndToEnd(t *testing.T) {
 			t.Fatalf("health request carried credentials or left vercel.app: %v %v", r.URL, r.Header)
 		}
 	}
-	if n := len(h.own.approvals()); n != 13 { // grant + 12 actions
+	if n := len(h.own.approvals()); n != 17 { // grant + 12 actions + 4 env removals
 		t.Fatalf("%d approvals", n)
 	}
 }
@@ -367,7 +385,7 @@ func TestDeploymentProtectionStopsRotationBeforeInvalidation(t *testing.T) {
 	r := h.act(provideraction.ActionNeonRotate, map[string]any{"project_id": np.ProjectID, "branch_id": np.BranchID,
 		"roles": []string{"app_a", "app_b"}, "owner_role": np.Role, "database": np.Database,
 		"records": map[string]string{"pooled": "DATABASE_URL", "direct": "DATABASE_URL_UNPOOLED"},
-		"vercel":  []any{map[string]any{"team_id": team, "project_id": project, "target": "preview"}}, "health_path": "/api/health"})
+		"vercel":  []any{map[string]any{"team_id": team, "project_id": project, "target": "preview", "git_branch": "main"}}, "health_path": "/api/health"})
 	if r.resp.State != provideraction.StateFailed || r.resp.Step != provideraction.StepHealth || r.resp.Code != provideraction.CodeHealthProtected {
 		t.Fatalf("status %+v", r.resp)
 	}

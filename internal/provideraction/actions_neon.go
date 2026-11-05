@@ -84,9 +84,11 @@ func (p *neonProjectCreate) execute(r *run) error {
 		return err
 	}
 	if err := r.step(StepNeonResetActive, CodeProviderFailed, func() error {
-		w := r.recorder()
+		// The records were absent at the precheck: they are created, never
+		// overwritten.
+		w := r.recorder(map[string]int64{p.Records.Pooled: 0, p.Records.Direct: 0})
 		if err := r.neon.ResetRolePassword(r.ctx, info.ProjectID, info.BranchID, roles[0], info.Database, w.sink(p.Records.Pooled), w.sink(p.Records.Direct)); err != nil {
-			return err
+			return w.check(err)
 		}
 		return w.require(r.res, p.Records.Pooled, p.Records.Direct)
 	}); err != nil {
@@ -228,7 +230,12 @@ func (p *neonProjectDelete) summary() string {
 }
 func (p *neonProjectDelete) controls() []string { return []string{ControlNeon} }
 
-// precheck: v1 deletes only projects this broker created.
+func (p *neonProjectDelete) ours(b Binding) bool {
+	return b.Provider == ProviderNeon && b.Resource.ProjectID == p.ProjectID
+}
+
+// precheck: v1 deletes only projects this broker created, and only once no
+// record of it is still deployed (vercel.env.remove clears deployed_to).
 func (p *neonProjectDelete) precheck(ctx context.Context, v Vault) string {
 	prov, err := v.LoadNeonProject(ctx, p.ProjectID)
 	switch {
@@ -238,18 +245,24 @@ func (p *neonProjectDelete) precheck(ctx context.Context, v Vault) string {
 		return agentbroker.CodeVaultFailed
 	}
 	p.name = prov.Name
-	return ""
+	return stillDeployed(ctx, v, p.ours)
 }
 func (p *neonProjectDelete) execute(r *run) error {
+	if err := r.step(StepBindingCheck, agentbroker.CodeVaultFailed, func() error {
+		if code := stillDeployed(r.ctx, r.vault, p.ours); code != "" {
+			return fail(code)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
 	err := r.step(StepNeonDeleteProject, CodeProviderFailed, func() error { return r.neon.DeleteProject(r.ctx, p.ProjectID) })
 	r.res.Deleted = err == nil
 	if err != nil {
 		return err
 	}
 	return r.step(StepBindingRevoke, agentbroker.CodeVaultFailed, func() error {
-		names, err := revokeBindings(r.ctx, r.vault, func(b Binding) bool {
-			return b.Provider == ProviderNeon && b.Resource.ProjectID == p.ProjectID
-		})
+		names, err := revokeBindings(r.ctx, r.vault, p.ours)
 		r.res.RevokedBindings = names
 		return err
 	})
@@ -260,30 +273,34 @@ func (p *neonProjectDelete) execute(r *run) error {
 // neonRoleOrder is a rotation's role order, derived from the bindings:
 // old is the role deployments may use now (invalidated at the end), next
 // the role the records hold afterwards. resume: an earlier rotation stored
-// next's URIs but did not finish, so no password is reset; the stored URIs
-// are deployed and old is invalidated.
+// next's URIs and recorded them but did not finish, so no password is
+// reset; the stored URIs are deployed and old is invalidated. retry: an
+// earlier rotation marked the bindings pending (next) and failed before
+// they followed the new URIs; next was never deployed, so its password is
+// reset again, as in a normal rotation.
 type neonRoleOrder struct {
-	old, next string
-	resume    bool
+	old, next     string
+	resume, retry bool
 }
 
+// summary is terse: the whole plan must fit the Touch ID prompt
+// (docs/provider-actions.md, "Approval text budget"). The owner role is a
+// precondition (checked live), not an effect, so it is not shown.
 func (p *neonRotate) summary() string {
 	o := p.derived
 	if o.next == "" && len(p.Roles) == 2 {
 		o = neonRoleOrder{old: p.Roles[0], next: p.Roles[1]}
 	}
-	where := " in project " + p.ProjectID + " branch " + p.BranchID + " database " + p.Database + " (owner " + p.OwnerRole + ")"
+	where := p.ProjectID + "/" + p.BranchID + "/" + p.Database
 	recs := p.Records.Pooled + ", " + p.Records.Direct
-	tail := ", then invalidate role " + o.old
-	if o.next == "" {
-		return "ROTATE Neon rotation roles" + where + ": store the inactive role's new URIs in bound records " + recs + ", push them" +
-			rotationText(p.Vercel, p.HealthPath) + ", then invalidate the previously active role"
+	scopes := rotationText(p.Vercel, p.HealthPath)
+	switch {
+	case o.next == "":
+		return "ROTATE Neon " + where + ": reset the inactive role into " + recs + scopes + "; then INVALIDATE the active role"
+	case o.resume:
+		return "COMPLETE Neon " + where + " rotation to role " + o.next + " (stored in " + recs + ")" + scopes + "; then INVALIDATE old role " + o.old
 	}
-	if o.resume {
-		return "COMPLETE the interrupted Neon rotation to role " + o.next + where + ": push its stored URIs in bound records " + recs + rotationText(p.Vercel, p.HealthPath) + tail
-	}
-	return "ROTATE Neon role " + o.next + " to active" + where + ": store its new URIs in bound records " + recs + ", push them" +
-		rotationText(p.Vercel, p.HealthPath) + tail
+	return "ROTATE Neon " + where + ": reset role " + o.next + " into " + recs + scopes + "; then INVALIDATE old role " + o.old
 }
 func (p *neonRotate) controls() []string     { return []string{ControlNeon, ControlVercel} }
 func (p *neonRotate) liveControls() []string { return []string{ControlNeon} }
@@ -295,10 +312,51 @@ type neonChecked struct {
 	scope          scopePlan
 }
 
+// neonOrder derives the role order from the two bindings' role state
+// (docs/provider-actions.md, "Interrupted rotations"):
+//   - neither pending nor retiring, same active role: a normal rotation;
+//   - any pending: a retry of that rotation; the other binding is either
+//     not marked yet (same active role) or already follows it (active =
+//     pending role, retiring = the old one);
+//   - otherwise, with the same active role and one retiring role: resume.
+func neonOrder(a, b Binding) (neonRoleOrder, bool) {
+	if len(a.Roles) != 2 || strings.Join(a.Roles, ",") != strings.Join(b.Roles, ",") {
+		return neonRoleOrder{}, false
+	}
+	if a.PendingRole == "" && b.PendingRole != "" {
+		a, b = b, a
+	}
+	if a.PendingRole != "" {
+		o := neonRoleOrder{old: a.ActiveRole, next: a.PendingRole, retry: true}
+		switch {
+		case b.PendingRole != "":
+			return o, b.ActiveRole == o.old && b.PendingRole == o.next
+		case b.RetiringRole != "":
+			return o, b.ActiveRole == o.next && b.RetiringRole == o.old
+		}
+		return o, b.ActiveRole == o.old
+	}
+	if a.ActiveRole != b.ActiveRole {
+		return neonRoleOrder{}, false
+	}
+	retiring := a.RetiringRole
+	if retiring == "" {
+		retiring = b.RetiringRole
+	}
+	if retiring == "" {
+		return neonRoleOrder{old: a.ActiveRole, next: a.inactiveRole()}, true
+	}
+	if (a.RetiringRole != "" && a.RetiringRole != retiring) || (b.RetiringRole != "" && b.RetiringRole != retiring) {
+		return neonRoleOrder{}, false
+	}
+	return neonRoleOrder{old: retiring, next: a.ActiveRole, resume: true}, true
+}
+
 // check: both records are bound to this exact project and branch with the
 // matching kinds and agree on the role state, which determines the order;
 // every named scope is allowed and together they cover every scope the
-// records were deployed to.
+// records were deployed to, and no env var they would rewrite belongs to
+// another record.
 func (p *neonRotate) check(ctx context.Context, v Vault) (neonChecked, string) {
 	var c neonChecked
 	var code string
@@ -309,7 +367,8 @@ func (p *neonRotate) check(ctx context.Context, v Vault) (neonChecked, string) {
 		return c, code
 	}
 	a, b := c.pooled.b, c.direct.b
-	if len(a.Roles) != 2 || strings.Join(a.Roles, ",") != strings.Join(b.Roles, ",") || a.ActiveRole != b.ActiveRole || a.RetiringRole != b.RetiringRole {
+	var ok bool
+	if c.order, ok = neonOrder(a, b); !ok {
 		return c, CodeNeonActiveRoleMismatch
 	}
 	for _, role := range a.Roles {
@@ -317,15 +376,20 @@ func (p *neonRotate) check(ctx context.Context, v Vault) (neonChecked, string) {
 			return c, CodeNeonOwnerRoleMismatch
 		}
 	}
-	if a.RetiringRole != "" {
-		c.order = neonRoleOrder{old: a.RetiringRole, next: a.ActiveRole, resume: true}
-	} else {
-		c.order = neonRoleOrder{old: a.ActiveRole, next: a.inactiveRole()}
+	// Only a pending binding may be one revision ahead.
+	for _, lb := range []bound{c.pooled, c.direct} {
+		if lb.rev != lb.b.RecordRevision && !c.order.retry {
+			return c, CodeRecordNotBound
+		}
 	}
 	if p.Roles != nil && (p.Roles[0] != c.order.old || p.Roles[1] != c.order.next) {
 		return c, CodeNeonActiveRoleMismatch
 	}
-	if c.scope, code = planScope(p.Vercel, []scoped{{p.Records.Pooled, &c.pooled.b, true}, {p.Records.Direct, &c.direct.b, true}}); code != "" {
+	claims, code := envClaims(ctx, v)
+	if code != "" {
+		return c, code
+	}
+	if c.scope, code = planScope(p.Vercel, []scoped{{p.Records.Pooled, &c.pooled.b, true}, {p.Records.Direct, &c.direct.b, true}}, claims); code != "" {
 		return c, code
 	}
 	if !c.scope.fits(a, p.Records.Pooled) || !c.scope.fits(b, p.Records.Direct) {
@@ -400,14 +464,37 @@ func (p *neonRotate) execute(r *run) error {
 		}); err != nil {
 			return err
 		}
-	} else if err := r.step(StepNeonResetNewRole, CodeProviderFailed, func() error {
-		w := r.recorder()
-		if err := r.neon.ResetRolePassword(r.ctx, p.ProjectID, p.BranchID, next, p.Database, w.sink(p.Records.Pooled), w.sink(p.Records.Direct)); err != nil {
+	} else {
+		// The bindings say a reset of next is under way before it happens,
+		// so a failure from here on leaves a retryable rotation, never an
+		// unbound record.
+		if err := r.step(StepBindingPending, agentbroker.CodeVaultFailed, func() error {
+			for _, lb := range []*bound{&c.pooled, &c.direct} {
+				if lb.b.PendingRole != "" || lb.b.RetiringRole != "" {
+					continue // marked, or already following next
+				}
+				b := lb.b.clone()
+				b.PendingRole = next
+				rev, err := saveBindingRev(r.ctx, r.vault, b, lb.objRev)
+				if err != nil {
+					return err
+				}
+				lb.b, lb.objRev = b, rev
+			}
+			return nil
+		}); err != nil {
 			return err
 		}
-		return w.require(r.res, p.Records.Pooled, p.Records.Direct) // stored durably before any destination is written
-	}); err != nil {
-		return err
+		if err := r.step(StepNeonResetNewRole, CodeProviderFailed, func() error {
+			// Written only over the revisions just checked.
+			w := r.recorder(map[string]int64{p.Records.Pooled: c.pooled.rev, p.Records.Direct: c.direct.rev})
+			if err := r.neon.ResetRolePassword(r.ctx, p.ProjectID, p.BranchID, next, p.Database, w.sink(p.Records.Pooled), w.sink(p.Records.Direct)); err != nil {
+				return w.check(err)
+			}
+			return w.require(r.res, p.Records.Pooled, p.Records.Direct) // stored durably before any destination is written
+		}); err != nil {
+			return err
+		}
 	}
 	// The bindings follow the new values: next is active, old is retiring
 	// until it is invalidated, and every scope about to be written is
@@ -420,7 +507,7 @@ func (p *neonRotate) execute(r *run) error {
 				return fail(CodeBindingLimit)
 			}
 			b.RecordRevision = r.res.Records[b.Record]
-			b.ActiveRole, b.RetiringRole = next, old
+			b.ActiveRole, b.RetiringRole, b.PendingRole = next, old, ""
 			rev, err := saveBindingRev(r.ctx, r.vault, b, lb.objRev)
 			if err != nil {
 				return err

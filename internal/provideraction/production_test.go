@@ -36,7 +36,11 @@ func TestProductionApprovalTexts(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: params refused", action)
 		}
-		for _, want := range []string{"PRODUCTION", "STAGED", "check health at /api/health", "PROMOTE", "verify production serves it and recheck", "auto ROLL BACK on failure"} {
+		wants := []string{"PRODUCTION", "STAGED", "/api/health", "PROMOTE", "auto ROLL BACK on failure"}
+		if action == pa.ActionVercelRedeploy {
+			wants = append(wants, "check health at /api/health", "verify production serves it and recheck", "must be dpl_")
+		}
+		for _, want := range wants {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s plan lacks %q: %s", action, want, text)
 			}
@@ -82,7 +86,7 @@ func TestProductionNeonRotateOrder(t *testing.T) {
 	if got := e.log.Calls(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("call order:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	wantSteps := []string{pa.StepControl, pa.StepBindingCheck, pa.StepNeonCheckRoles, pa.StepVercelCurrent, pa.StepNeonResetNewRole, pa.StepBindingSave,
+	wantSteps := []string{pa.StepControl, pa.StepBindingCheck, pa.StepNeonCheckRoles, pa.StepVercelCurrent, pa.StepBindingPending, pa.StepNeonResetNewRole, pa.StepBindingSave,
 		pa.StepVercelEnvPush, pa.StepVercelRedeploy, pa.StepVercelWaitReady, pa.StepHealth, pa.StepVercelPromote, pa.StepVercelVerifyProduction,
 		pa.StepHealthProduction, pa.StepVercelConfirmProduction, pa.StepNeonInvalidateOld, pa.StepBindingFinish}
 	if strings.Join(st.Steps, ",") != strings.Join(wantSteps, ",") {

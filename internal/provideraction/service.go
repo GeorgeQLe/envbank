@@ -438,21 +438,37 @@ func (r *run) checkHealth(deploymentURL, path string, into **HealthResult) error
 	return nil
 }
 
-// recorder captures the revisions an adapter's sinks stored.
+// recorder captures the revisions an adapter's sinks stored. Each record is
+// written only at the revision the action checked (want; 0: absent): a
+// record changed since (by the owner, an import, another writer) is never
+// overwritten, and the step fails with RECORD_CHANGED.
 type recorder struct {
-	v    Vault
-	mu   sync.Mutex
-	revs map[string]int64
+	v       Vault
+	mu      sync.Mutex
+	want    map[string]int64
+	revs    map[string]int64
+	changed bool
 }
 
-func (r *run) recorder() *recorder { return &recorder{v: r.vault, revs: map[string]int64{}} }
+func (r *run) recorder(want map[string]int64) *recorder {
+	return &recorder{v: r.vault, want: want, revs: map[string]int64{}}
+}
 
 func (w *recorder) StoreSecret(ctx context.Context, name string, fill func(func([]byte) error) error) (int64, error) {
-	rev, err := w.v.StoreSecret(ctx, name, fill)
+	w.mu.Lock()
+	expected, ok := w.want[name]
+	w.mu.Unlock()
+	if !ok {
+		return 0, fail(agentbroker.CodeVaultFailed) // no checked revision: never written
+	}
+	rev, err := w.v.StoreSecretAt(ctx, name, expected, fill)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if errors.Is(err, ErrRecordChanged) {
+		w.changed = true
+	}
 	if err == nil && rev > 0 {
-		w.mu.Lock()
 		w.revs[name] = rev
-		w.mu.Unlock()
 	}
 	return rev, err
 }
@@ -462,11 +478,25 @@ func (w *recorder) sink(record string) *lifecycle.SecretSink {
 	return s
 }
 
+// check maps an adapter's error: a store refused because the record changed
+// is RECORD_CHANGED, whatever the adapter made of it.
+func (w *recorder) check(err error) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.changed {
+		return fail(CodeRecordChanged)
+	}
+	return err
+}
+
 // require checks that every record was stored durably and records the
 // revisions in res.
 func (w *recorder) require(res *Result, records ...string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.changed {
+		return fail(CodeRecordChanged)
+	}
 	for _, rec := range records {
 		rev, ok := w.revs[rec]
 		if !ok || rev < 1 {

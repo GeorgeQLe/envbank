@@ -277,6 +277,46 @@ func (targets *targetList) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
+// DeleteEnv removes exactly one sensitive variable from exactly this scope
+// after a fresh ownership and metadata check, and proves it gone. An absent
+// variable is success (idempotent); overlapping or non-sensitive entries are
+// refused (AMBIGUOUS_EXISTING_ENTRIES), never deleted. It is a mutation: ctx
+// must carry WithMutationAuthorization. It never retries.
+func (adapter *Adapter) DeleteEnv(ctx context.Context, name string) error {
+	const operation = "env_delete"
+	if !validSecretName(name) {
+		return safeError(operation, "NAME_NOT_ALLOWED", provider.RetryNever)
+	}
+	if _, err := adapter.verifiedProject(ctx, operation); err != nil {
+		return readFailureBeforeWrite(err)
+	}
+	entries, err := adapter.listEnv(ctx, operation)
+	if err != nil {
+		return readFailureBeforeWrite(err)
+	}
+	state := adapter.scope.stateFor(entries, name)
+	switch state.presence() {
+	case provider.PresenceAbsent:
+		return nil
+	case provider.PresencePresent:
+	default:
+		return safeError(operation, "AMBIGUOUS_EXISTING_ENTRIES", provider.RetryNever)
+	}
+	id := state.exact[0].ID
+	if err := adapter.send(ctx, apiCall{operation: operation, method: http.MethodDelete,
+		path: "/v9/projects" + pathSegment(adapter.scope.ProjectID) + "/env" + pathSegment(id), mutation: true}, nil); err != nil {
+		return err
+	}
+	checkpoint, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	after, err := adapter.listEnv(checkpoint, operation)
+	if err != nil || adapter.scope.stateFor(after, name).presence() != provider.PresenceAbsent ||
+		adapter.scope.revisionExcept(entries, name) != adapter.scope.revisionExcept(after, name) {
+		return safeError(operation, "DELETE_CHECKPOINT_UNAVAILABLE", provider.RetryAmbiguous)
+	}
+	return nil
+}
+
 // envEntry deliberately has no value, vsmValue, legacyValue or content-hint
 // fields: those are never decoded.
 type envEntry struct {

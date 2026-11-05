@@ -84,6 +84,8 @@ func rotateReq(target string) map[string]any {
 	v := map[string]any{"team_id": "team_abc123", "project_id": "prj_abc123", "target": target}
 	if target == "production" {
 		v["production"] = true
+	} else {
+		v["git_branch"] = "main" // a rotation never rewrites an all-branches preview var
 	}
 	return map[string]any{"op": "provider_action", "action": "neon.rotate", "reason": "monthly rotation", "params": map[string]any{
 		"project_id": "calm-sky-123456", "branch_id": "br-main-1", "roles": []string{"app_a", "app_b"}, "owner_role": "neondb_owner", "database": "appdb",
@@ -168,12 +170,12 @@ func TestProviderActionApprovalTextAndHappyPath(t *testing.T) {
 	f.own.mu.Lock()
 	reason := f.own.reasons[0]
 	f.own.mu.Unlock()
-	for _, want := range []string{"perform a provider action: ROTATE Neon role app_b to active in project calm-sky-123456", "DATABASE_URL, DATABASE_URL_UNPOOLED", "Vercel prj_abc123 (team_abc123) PRODUCTION", "then invalidate role app_a", ", for " + s.Ident()} {
+	for _, want := range []string{"perform a provider action: ROTATE Neon calm-sky-123456/br-main-1/appdb: reset role app_b into DATABASE_URL, DATABASE_URL_UNPOOLED", "on Vercel team_abc123: prj_abc123 PRODUCTION; PRODUCTION last", "then INVALIDATE old role app_a", ", for " + s.Ident()} {
 		if !strings.Contains(reason, want) {
 			t.Errorf("approval text lacks %q: %s", want, reason)
 		}
 	}
-	if !strings.HasSuffix(reason, `; [agent label: "Rotate prod now"]`) || strings.Index(reason, "agent label") < strings.Index(reason, "invalidate") {
+	if !strings.HasSuffix(reason, `; [agent label: "Rotate prod now"]`) || strings.Index(reason, "agent label") < strings.Index(reason, "INVALIDATE") {
 		t.Errorf("label must come last, in its delimiters: %s", reason)
 	}
 	if strings.Contains(reason, "monthly rotation") || strings.Contains(reason, "always") {
@@ -205,7 +207,7 @@ func TestProviderActionApprovalTextAndHappyPath(t *testing.T) {
 	f.own.mu.Lock()
 	reason = f.own.reasons[1]
 	f.own.mu.Unlock()
-	if !strings.Contains(reason, "ROTATE Neon role app_a to active") || !strings.Contains(reason, "then invalidate role app_b") {
+	if !strings.Contains(reason, "reset role app_a into") || !strings.Contains(reason, "then INVALIDATE old role app_b") {
 		t.Errorf("derived order not shown: %s", reason)
 	}
 }
@@ -399,8 +401,9 @@ func TestRevokeAndCloseStopProviderOperations(t *testing.T) {
 }
 
 // The label is shown ASCII-only inside fixed delimiters, after everything
-// authoritative, so it cannot read as plan text; a reason that does not fit
-// is refused, never clipped.
+// authoritative, so it cannot read as plan text. The plan is never
+// clipped (PLAN_TOO_LONG); the label is clipped to the budget left, so it
+// can never make the approval fail.
 func TestProviderApprovalLabelIsDelimitedASCII(t *testing.T) {
 	s := session("label")
 	for label, want := range map[string]string{
@@ -410,8 +413,8 @@ func TestProviderApprovalLabelIsDelimitedASCII(t *testing.T) {
 		"": "",
 	} {
 		s.Label = label
-		reason, ok := providerReason(s, "ROTATE Neon role app_b to active")
-		if !ok || !strings.HasSuffix(reason, want) || !strings.HasPrefix(reason, "perform a provider action: ROTATE Neon role app_b to active, for "+s.Ident()) {
+		reason, code := providerReason(s, "ROTATE Neon role app_b to active")
+		if code != "" || !strings.HasSuffix(reason, want) || !strings.HasPrefix(reason, "perform a provider action: ROTATE Neon role app_b to active, for "+s.Ident()) {
 			t.Errorf("%q: %q", label, reason)
 		}
 		for _, r := range reason {
@@ -421,18 +424,36 @@ func TestProviderApprovalLabelIsDelimitedASCII(t *testing.T) {
 		}
 	}
 	s.Label = strings.Repeat("x", 200)
-	reason, ok := providerReason(s, "plan")
-	if !ok || !strings.HasSuffix(reason, `"`+strings.Repeat("x", maxLabelRunes)+`..."]`) {
+	reason, code := providerReason(s, "plan")
+	if code != "" || !strings.HasSuffix(reason, `"`+strings.Repeat("x", maxLabelRunes)+`..."]`) {
 		t.Errorf("long label: %q", reason)
 	}
-	// Plan and label together over the limit: refused, not clipped.
-	plan := strings.Repeat("p", approval.MaxReasonBytes-len("perform a provider action: , for ")-len(s.Ident())-10)
-	s.Label = "Rotate prod"
-	if _, ok := providerReason(s, plan); ok {
-		t.Error("over-long reason accepted")
+	frame := len("perform a provider action: , for ") + len(s.Ident())
+	// A plan at the limit still fits with the minimal label, which is
+	// clipped (not refused) whatever the agent set.
+	plan := strings.Repeat("p", MaxProviderPlanBytes-frame)
+	for _, label := range []string{"", "Rotate prod", strings.Repeat("y", 500)} {
+		s.Label = label
+		r, code := providerReason(s, plan)
+		if code != "" || len(r) > approval.MaxReasonBytes || !strings.Contains(r, plan+", for "+s.Ident()) {
+			t.Errorf("label %d bytes: plan at limit refused or clipped: %s %d", len(label), code, len(r))
+		}
+		if label != "" && !strings.Contains(r, `; [agent label: "`+label[:minLabelRunes]) {
+			t.Errorf("label %d bytes: minimum label not shown: %q", len(label), r[len(r)-40:])
+		}
 	}
-	s.Label = ""
-	if r, ok := providerReason(s, plan); !ok || len(r) > approval.MaxReasonBytes {
-		t.Errorf("plan alone should fit: %d", len(r))
+	// A longer label gets all the room left and no more.
+	s.Label = strings.Repeat("z", 500)
+	shorter := strings.Repeat("p", MaxProviderPlanBytes-frame-40)
+	if r, code := providerReason(s, shorter); code != "" || len(r) != approval.MaxReasonBytes {
+		t.Errorf("label not clipped to the budget: %s %d", code, len(r))
+	}
+	// The plan alone over its budget: refused with PLAN_TOO_LONG, label or
+	// not.
+	for _, label := range []string{"", "x"} {
+		s.Label = label
+		if _, code := providerReason(s, plan+"p"); code != provideraction.CodePlanTooLong {
+			t.Errorf("over-long plan: %q", code)
+		}
 	}
 }

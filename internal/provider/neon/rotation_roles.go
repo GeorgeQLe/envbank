@@ -59,8 +59,14 @@ const (
 	sqlLocalSearchPath = "SET LOCAL search_path = pg_catalog, pg_temp"
 	sqlIdentity        = "SELECT current_user::text, current_database()::text, current_setting('server_version_num')"
 	sqlGroupState      = "SELECT rolcanlogin::text, rolsuper::text FROM pg_catalog.pg_roles WHERE rolname = $1::text"
-	roleSettingValue   = "role=" + RotationGroupRole
-	sqlHasPrivileges   = "SELECT pg_catalog.pg_has_role(current_user, $1::text, 'USAGE')::text"
+	// sqlGroupMembers lists the roles that are members of the group (any
+	// grant option).
+	sqlGroupMembers = `SELECT r.rolname::text FROM pg_catalog.pg_auth_members m
+  JOIN pg_catalog.pg_roles g ON g.oid = m.roleid
+  JOIN pg_catalog.pg_roles r ON r.oid = m.member
+  WHERE g.rolname = $1::text ORDER BY 1`
+	roleSettingValue = "role=" + RotationGroupRole
+	sqlHasPrivileges = "SELECT pg_catalog.pg_has_role(current_user, $1::text, 'USAGE')::text"
 
 	// sqlReadiness reports (group is NOLOGIN and not superuser, public is
 	// owned by the group, number of login roles that are INHERIT+SET members
@@ -248,6 +254,18 @@ func prepareRotationSQL(ctx context.Context, operation string, session sqlSessio
 			return sqlError(operation, err, false)
 		}
 	case len(rows) == 1 && len(rows[0]) == 2 && rows[0][0] == "false" && rows[0][1] == "false":
+		// An existing group is ours only if nobody but the owner and the
+		// rotation roles is a member: any other member would act as the
+		// owner of the app's schema and objects.
+		members, err := session.Query(ctx, sqlGroupMembers, RotationGroupRole)
+		if err != nil {
+			return sqlError(operation, err, false)
+		}
+		for _, row := range members {
+			if len(row) != 1 || (row[0] != ownerRole && row[0] != roles[0] && row[0] != roles[1]) {
+				return safeError(operation, "GROUP_ROLE_CONFLICT", provider.RetryNever)
+			}
+		}
 	default:
 		// A same-named role that can log in or is superuser is not ours.
 		return safeError(operation, "GROUP_ROLE_CONFLICT", provider.RetryNever)

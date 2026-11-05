@@ -10,8 +10,16 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/provideraction/provideractiontest"
 )
 
+func envRemove(t *testing.T, record, envName string, ref map[string]any) json.RawMessage {
+	m := map[string]any{"record": record, "env": envName}
+	for k, v := range ref {
+		m[k] = v
+	}
+	return js(t, m)
+}
+
 func pushParams(t *testing.T, project string, vars map[string]string) json.RawMessage {
-	return js(t, map[string]any{"team_id": "team_abc123", "project_id": project, "target": "preview", "variables": vars})
+	return js(t, map[string]any{"team_id": "team_abc123", "project_id": project, "target": "preview", "git_branch": "main", "variables": vars})
 }
 
 // prepareCode prepares and releases, returning the refusal code ("" ok).
@@ -280,7 +288,15 @@ func TestDeletesRevokeBindingsButKeepRecords(t *testing.T) {
 	}
 	// Stripe: rotate, then delete the current endpoint: the whole lineage ends.
 	st = e.run(t, pa.ActionStripeWebhookRotate, stripeRotateParams(t))
-	st = e.run(t, pa.ActionStripeWebhookDelete, js(t, map[string]any{"endpoint_id": st.Result.EndpointID}))
+	endpoint := st.Result.EndpointID
+	// Still deployed: refused until the env var is removed from Vercel.
+	if code := e.prepareCode(t, pa.ActionStripeWebhookDelete, js(t, map[string]any{"endpoint_id": endpoint})); code != pa.CodeResourceStillDeployed {
+		t.Fatalf("delete of a deployed endpoint: %q", code)
+	}
+	if st := e.run(t, pa.ActionVercelEnvRemove, envRemove(t, "STRIPE_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET", vercelRef("preview"))); st.State != pa.StateSucceeded {
+		t.Fatalf("env remove %+v", st)
+	}
+	st = e.run(t, pa.ActionStripeWebhookDelete, js(t, map[string]any{"endpoint_id": endpoint}))
 	if st.State != pa.StateSucceeded || strings.Join(st.Result.RevokedBindings, ",") != "STRIPE_WEBHOOK_SECRET,STRIPE_WEBHOOK_SECRET_PREVIOUS" {
 		t.Fatalf("stripe delete %+v", st)
 	}
@@ -298,7 +314,7 @@ func TestBindingSaveFailureStopsRotationBeforePush(t *testing.T) {
 	e := newEnv(t, nil)
 	e.vault.FailBinding["DATABASE_URL"] = true
 	st := e.run(t, pa.ActionNeonRotate, rotateParams(t))
-	if st.State != pa.StateFailed || st.Step != pa.StepBindingSave || len(e.fake.Pushed) != 0 || e.log.Index("neon.invalidate app_a") >= 0 {
+	if st.State != pa.StateFailed || st.Step != pa.StepBindingPending || len(e.fake.Pushed) != 0 || e.log.Index("neon.reset app_b") >= 0 || e.log.Index("neon.invalidate app_a") >= 0 {
 		t.Fatalf("status %+v", st)
 	}
 	e.noLeak(t, "failed status", st)

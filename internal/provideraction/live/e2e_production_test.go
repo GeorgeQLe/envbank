@@ -131,7 +131,7 @@ func TestProductionNeonRotation(t *testing.T) {
 	}
 	a := h.own.approvals()
 	text := a[len(a)-1]
-	for _, want := range []string{"PRODUCTION", "STAGED redeploy", "PROMOTE", "verify production serves it", "auto ROLL BACK on failure", "then invalidate role app_a"} {
+	for _, want := range []string{"PRODUCTION", "PRODUCTION last: STAGED, PROMOTE", "auto ROLL BACK on failure", "then INVALIDATE old role app_a"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("approval lacks %q: %s", want, text)
 		}
@@ -236,7 +236,7 @@ func TestProductionRedeployAndStripeRotation(t *testing.T) {
 		t.Fatalf("redeploy result %+v", res)
 	}
 	a := h.own.approvals()
-	for _, want := range []string{"REDEPLOY Vercel " + p.project + " (" + h.fx.team + ") PRODUCTION from the current deployment as STAGED, check health at /api/health, PROMOTE",
+	for _, want := range []string{"REDEPLOY Vercel " + p.project + " (" + h.fx.team + ") PRODUCTION from the deployment serving production now as STAGED, check health at /api/health; then PROMOTE, verify production serves it and recheck",
 		"auto ROLL BACK on failure"} {
 		if !strings.Contains(a[len(a)-1], want) {
 			t.Errorf("approval lacks %q: %s", want, a[len(a)-1])

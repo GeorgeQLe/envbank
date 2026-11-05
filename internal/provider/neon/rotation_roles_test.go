@@ -37,6 +37,7 @@ func newFakeSQL() *fakeSQL {
 	return &fakeSQL{results: map[string][][]string{
 		sqlIdentity:       {{testRole, testDB, "170005"}},
 		sqlGroupState:     nil,
+		sqlGroupMembers:   nil,
 		sqlReadiness:      {{"true", "true", "2"}},
 		sqlAdoptRelations: nil,
 		sqlAdoptFunctions: nil,
@@ -185,6 +186,29 @@ func TestPrepareRotationRolesIsIdempotentForExistingGroup(t *testing.T) {
 		if strings.HasPrefix(statement, "CREATE ROLE") {
 			t.Fatal("existing group was recreated")
 		}
+	}
+
+	// An existing group whose members are only the owner and the rotation
+	// roles is accepted; any other member is a conflict, before any grant.
+	db = newFakeSQL()
+	db.results[sqlGroupState] = [][]string{{"false", "false"}}
+	db.results[sqlGroupMembers] = [][]string{{"app_a"}, {"app_b"}, {testRole}}
+	adapter.sqlConnect = db.connector(t)
+	if err := adapter.PrepareRotationRoles(context.Background(), testProject, testBranch, testDB, testRole, testLoginRoles, false); err != nil {
+		t.Fatalf("group with only rotation members: %v", err)
+	}
+	db = newFakeSQL()
+	db.results[sqlGroupState] = [][]string{{"false", "false"}}
+	db.results[sqlGroupMembers] = [][]string{{"app_a"}, {"intruder"}}
+	adapter.sqlConnect = db.connector(t)
+	expectCode(t, adapter.PrepareRotationRoles(context.Background(), testProject, testBranch, testDB, testRole, testLoginRoles, false), "GROUP_ROLE_CONFLICT")
+	for _, statement := range db.statements() {
+		if strings.HasPrefix(statement, "GRANT") {
+			t.Fatal("granted before refusing a foreign group member")
+		}
+	}
+	if last := db.statements()[len(db.statements())-1]; last != "ROLLBACK" {
+		t.Fatalf("member conflict did not roll back: %s", last)
 	}
 
 	for _, conflict := range [][]string{{"true", "false"}, {"false", "true"}} {
