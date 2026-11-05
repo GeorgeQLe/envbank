@@ -190,6 +190,8 @@ type Providers struct {
 	Block chan struct{}
 	// Secret is put into provider error texts.
 	Secret string
+	// RolesNotPrepared makes RotationRolesReady report false.
+	RolesNotPrepared bool
 
 	mu        sync.Mutex
 	Creds     [][]byte          // credential slices the factory was given
@@ -290,8 +292,15 @@ func (n neon) DeleteProject(ctx context.Context, id string) error {
 	return n.p.call(ctx, "neon.delete_project "+id)
 }
 
-func (n neon) EnsureRole(ctx context.Context, _, _, role string) error {
-	return n.p.call(ctx, "neon.ensure_role "+role)
+func (n neon) PrepareRotationRoles(ctx context.Context, _, _, _, owner string, roles [2]string, adopt bool) error {
+	return n.p.call(ctx, fmt.Sprintf("neon.prepare_roles %s %s,%s adopt=%v", owner, roles[0], roles[1], adopt))
+}
+
+func (n neon) RotationRolesReady(ctx context.Context, _, _, _, owner string, roles [2]string) (bool, error) {
+	if err := n.p.call(ctx, fmt.Sprintf("neon.roles_ready %s %s,%s", owner, roles[0], roles[1])); err != nil {
+		return false, err
+	}
+	return !n.p.RolesNotPrepared, nil
 }
 
 func (n neon) ResetRolePassword(ctx context.Context, _, _, role, db string, pooled, direct *lifecycle.SecretSink) error {

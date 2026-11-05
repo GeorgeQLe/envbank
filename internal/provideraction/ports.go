@@ -26,6 +26,13 @@ const (
 	ControlStripe = "CONTROL_STRIPE_KEY"
 )
 
+// NeonGroupRole is the no-login group role that owns the public schema and
+// every app object, so either rotation role can use them.
+const NeonGroupRole = "envbank_app_owner"
+
+// DefaultNeonRoles are the rotation roles when params name none.
+var DefaultNeonRoles = [2]string{"app_a", "app_b"}
+
 // NeonProjectSpec describes a project to create. All fields are validated.
 type NeonProjectSpec struct {
 	Name      string
@@ -33,7 +40,8 @@ type NeonProjectSpec struct {
 	PGVersion int    // 0: the provider default
 }
 
-// NeonProject identifies a created project (no values).
+// NeonProject identifies a created project (no values). Role is the
+// project's default (owner) role.
 type NeonProject struct {
 	ProjectID string
 	BranchID  string
@@ -43,13 +51,23 @@ type NeonProject struct {
 
 // NeonPort is the Neon control-plane surface the actions need.
 type NeonPort interface {
-	// CreateProject creates a project and stores its pooled and direct
-	// connection URIs through the sinks before returning.
+	// CreateProject creates a project and writes its owner role's pooled and
+	// direct connection URIs to the sinks. The broker passes discarding sinks:
+	// owner credentials are never persisted.
 	CreateProject(ctx context.Context, spec NeonProjectSpec, pooled, direct *lifecycle.SecretSink) (NeonProject, error)
 	DeleteProject(ctx context.Context, projectID string) error
-	// EnsureRole creates role on the branch if it does not exist yet (any
-	// password it is created with is discarded, never returned).
-	EnsureRole(ctx context.Context, projectID, branchID, role string) error
+	// PrepareRotationRoles makes the two login roles rotation-ready,
+	// connected as ownerRole (the project owner, through a connection URI
+	// fetched on demand, kept in memory and wiped, never stored): both roles
+	// exist; the no-login group role NeonGroupRole exists, owns the public
+	// schema, and has both roles as members; each role has
+	// `ALTER ROLE … SET role = NeonGroupRole`; and with adopt, existing
+	// public-schema objects are reassigned to NeonGroupRole. Idempotent. Any
+	// password a role is created with is discarded.
+	PrepareRotationRoles(ctx context.Context, projectID, branchID, database, ownerRole string, roles [2]string, adopt bool) error
+	// RotationRolesReady reports whether PrepareRotationRoles' end state
+	// holds for roles (read-only).
+	RotationRolesReady(ctx context.Context, projectID, branchID, database, ownerRole string, roles [2]string) (bool, error)
 	// ResetRolePassword resets role's password, invalidating the old one,
 	// and stores the pooled and direct URIs for database through the sinks.
 	// Both sinks nil means invalidate only: the new password is discarded.

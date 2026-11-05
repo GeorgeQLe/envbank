@@ -364,6 +364,22 @@ func (w *recorder) require(res *Result, records ...string) error {
 	return nil
 }
 
+// discardWriter stores nothing: it wipes what it is given (owner URIs
+// returned by project create, which must never be persisted).
+type discardWriter struct{}
+
+func (discardWriter) StoreSecret(_ context.Context, _ string, fill func(func([]byte) error) error) (int64, error) {
+	if err := fill(func(v []byte) error { wipe(v); return nil }); err != nil {
+		return 0, err
+	}
+	return 1, nil
+}
+
+func discardSink() *lifecycle.SecretSink {
+	s, _ := lifecycle.NewSecretSink(discardWriter{}, "discarded")
+	return s
+}
+
 func wipe(b []byte) {
 	for i := range b {
 		b[i] = 0

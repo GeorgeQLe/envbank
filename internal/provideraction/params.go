@@ -180,7 +180,16 @@ type (
 		Name      string     `json:"name"`
 		RegionID  string     `json:"region_id,omitempty"`
 		PGVersion int        `json:"pg_version,omitempty"`
+		Roles     []string   `json:"roles,omitempty"` // default ["app_a","app_b"]; roles[0] starts active
 		Records   RecordPair `json:"records"`
+	}
+	neonRolesPrepare struct {
+		ProjectID string   `json:"project_id"`
+		BranchID  string   `json:"branch_id"`
+		Database  string   `json:"database"`
+		OwnerRole string   `json:"owner_role"`
+		Roles     []string `json:"roles,omitempty"` // default ["app_a","app_b"]
+		Adopt     bool     `json:"adopt"`
 	}
 	neonProjectDelete struct {
 		ProjectID string `json:"project_id"`
@@ -189,6 +198,7 @@ type (
 		ProjectID  string     `json:"project_id"`
 		BranchID   string     `json:"branch_id"`
 		Roles      []string   `json:"roles"` // [currently active, to become active]
+		OwnerRole  string     `json:"owner_role"`
 		Database   string     `json:"database"`
 		Records    RecordPair `json:"records"`
 		Vercel     VercelRef  `json:"vercel"`
@@ -237,16 +247,44 @@ type (
 	}
 )
 
+// rotationRoles validates a roles param: absent means DefaultNeonRoles;
+// otherwise two distinct identifiers, neither the group role nor owner.
+func rotationRoles(roles []string, owner string) ([2]string, bool) {
+	var out [2]string
+	switch len(roles) {
+	case 0:
+		out = DefaultNeonRoles
+	case 2:
+		out = [2]string{roles[0], roles[1]}
+	default:
+		return out, false
+	}
+	for _, r := range out {
+		if !pgIdentRe.MatchString(r) || strings.EqualFold(r, NeonGroupRole) || (owner != "" && strings.EqualFold(r, owner)) {
+			return out, false
+		}
+	}
+	return out, !strings.EqualFold(out[0], out[1])
+}
+
 func (p *neonProjectCreate) validate() bool {
-	return neonNameRe.MatchString(p.Name) && (p.RegionID == "" || neonRegionRe.MatchString(p.RegionID)) &&
+	_, ok := rotationRoles(p.Roles, "")
+	return ok && neonNameRe.MatchString(p.Name) && (p.RegionID == "" || neonRegionRe.MatchString(p.RegionID)) &&
 		(p.PGVersion == 0 || (p.PGVersion >= 14 && p.PGVersion <= 18)) && p.Records.valid()
+}
+
+func (p *neonRolesPrepare) validate() bool {
+	_, ok := rotationRoles(p.Roles, p.OwnerRole)
+	return ok && neonProjectRe.MatchString(p.ProjectID) && neonBranchRe.MatchString(p.BranchID) &&
+		pgIdentRe.MatchString(p.Database) && pgIdentRe.MatchString(p.OwnerRole) && !strings.EqualFold(p.OwnerRole, NeonGroupRole)
 }
 
 func (p *neonProjectDelete) validate() bool { return neonProjectRe.MatchString(p.ProjectID) }
 
 func (p *neonRotate) validate() bool {
-	return neonProjectRe.MatchString(p.ProjectID) && neonBranchRe.MatchString(p.BranchID) &&
-		len(p.Roles) == 2 && pgIdentRe.MatchString(p.Roles[0]) && pgIdentRe.MatchString(p.Roles[1]) && p.Roles[0] != p.Roles[1] &&
+	_, ok := rotationRoles(p.Roles, p.OwnerRole)
+	return ok && len(p.Roles) == 2 && neonProjectRe.MatchString(p.ProjectID) && neonBranchRe.MatchString(p.BranchID) &&
+		pgIdentRe.MatchString(p.OwnerRole) && !strings.EqualFold(p.OwnerRole, NeonGroupRole) &&
 		pgIdentRe.MatchString(p.Database) && p.Records.valid() && p.Vercel.valid(true) && validHealthPath(p.HealthPath)
 }
 

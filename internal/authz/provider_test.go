@@ -71,7 +71,7 @@ func rotateReq(target string) map[string]any {
 		v["production"] = true
 	}
 	return map[string]any{"op": "provider_action", "action": "neon.rotate", "reason": "monthly rotation", "params": map[string]any{
-		"project_id": "calm-sky-123456", "branch_id": "br-main-1", "roles": []string{"app_a", "app_b"}, "database": "appdb",
+		"project_id": "calm-sky-123456", "branch_id": "br-main-1", "roles": []string{"app_a", "app_b"}, "owner_role": "neondb_owner", "database": "appdb",
 		"records": map[string]string{"pooled": "DATABASE_URL", "direct": "DATABASE_URL_UNPOOLED"}, "vercel": v, "health_path": "/api/health",
 	}}
 }

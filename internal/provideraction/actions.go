@@ -16,6 +16,7 @@ const (
 	ActionNeonProjectCreate   = "neon.project.create"
 	ActionNeonProjectDelete   = "neon.project.delete"
 	ActionNeonRotate          = "neon.rotate"
+	ActionNeonRolesPrepare    = "neon.roles.prepare"
 	ActionVercelProjectCreate = "vercel.project.create"
 	ActionVercelProjectDelete = "vercel.project.delete"
 	ActionVercelEnvPush       = "vercel.env.push"
@@ -30,7 +31,9 @@ const (
 	StepControl             = "control"
 	StepNeonCreateProject   = "neon.create_project"
 	StepNeonDeleteProject   = "neon.delete_project"
-	StepNeonEnsureRole      = "neon.ensure_role"
+	StepNeonPrepareRoles    = "neon.prepare_roles"
+	StepNeonCheckRoles      = "neon.check_roles"
+	StepNeonResetActive     = "neon.reset_active_role"
 	StepNeonResetNewRole    = "neon.reset_new_role"
 	StepNeonInvalidateOld   = "neon.invalidate_old_role"
 	StepVaultReadRevisions  = "vault.read_revisions"
@@ -61,6 +64,9 @@ const (
 	CodeHealthFailed     = "HEALTH_CHECK_FAILED"
 	CodeCancelled        = "CANCELLED"
 	CodeTimedOut         = "TIMED_OUT"
+	// CodeRolesNotPrepared: neon.rotate found the rotation roles not set up
+	// (run neon.roles.prepare first). Nothing was changed.
+	CodeRolesNotPrepared = "NEON_ROLES_NOT_PREPARED"
 )
 
 // Result is an operation's value-free outcome: validated IDs, record names
@@ -72,6 +78,7 @@ type Result struct {
 	Database          string            `json:"database,omitempty"`
 	ActiveRole        string            `json:"active_role,omitempty"`
 	InvalidatedRole   string            `json:"invalidated_role,omitempty"`
+	PreparedRoles     []string          `json:"prepared_roles,omitempty"`
 	DeploymentID      string            `json:"deployment_id,omitempty"`
 	EndpointID        string            `json:"endpoint_id,omitempty"`
 	DeletedEndpointID string            `json:"deleted_endpoint_id,omitempty"`
@@ -100,6 +107,9 @@ func (r Result) clone() Result {
 		for k, v := range r.Variables {
 			c.Variables[k] = v
 		}
+	}
+	if r.PreparedRoles != nil {
+		c.PreparedRoles = append([]string(nil), r.PreparedRoles...)
 	}
 	if r.Health != nil {
 		h := *r.Health
@@ -145,6 +155,7 @@ var registry = map[string]parser{
 	ActionNeonProjectCreate:   parse[neonProjectCreate],
 	ActionNeonProjectDelete:   parse[neonProjectDelete],
 	ActionNeonRotate:          parse[neonRotate],
+	ActionNeonRolesPrepare:    parse[neonRolesPrepare],
 	ActionVercelProjectCreate: parse[vercelProjectCreate],
 	ActionVercelProjectDelete: parse[vercelProjectDelete],
 	ActionVercelEnvPush:       parse[vercelEnvPush],
@@ -218,7 +229,10 @@ func noCheck(context.Context, Vault) string { return "" }
 
 // ---- neon.project.create ----
 
+func (p *neonProjectCreate) roles() [2]string { r, _ := rotationRoles(p.Roles, ""); return r }
+
 func (p *neonProjectCreate) summary() string {
+	roles := p.roles()
 	s := "CREATE Neon project " + p.Name
 	if p.RegionID != "" {
 		s += " in region " + p.RegionID
@@ -226,27 +240,89 @@ func (p *neonProjectCreate) summary() string {
 	if p.PGVersion != 0 {
 		s += " (Postgres " + strconv.Itoa(p.PGVersion) + ")"
 	}
-	return s + " and store its connection URIs in new records " + p.Records.Pooled + " (pooled) and " + p.Records.Direct + " (direct)"
+	return s + ", prepare rotation roles " + roles[0] + ", " + roles[1] + " under group role " + NeonGroupRole +
+		", and store " + roles[0] + "'s connection URIs in new records " + p.Records.Pooled + " (pooled) and " + p.Records.Direct + " (direct)"
 }
 func (p *neonProjectCreate) controls() []string { return []string{ControlNeon} }
 func (p *neonProjectCreate) precheck(ctx context.Context, v Vault) string {
 	return mustNotExist(ctx, v, p.Records.Pooled, p.Records.Direct)
 }
+
+// execute creates the project, prepares the rotation roles as the owner
+// role, then stores the first rotation role's URIs. The owner URIs the
+// adapter returns on create go to discarding sinks and are never stored. A
+// failure after create leaves project_id in the result for cleanup.
 func (p *neonProjectCreate) execute(r *run) error {
-	return r.step(StepNeonCreateProject, CodeProviderFailed, func() error {
-		w := r.recorder()
-		pooled, direct := w.sink(p.Records.Pooled), w.sink(p.Records.Direct)
-		info, err := r.neon.CreateProject(r.ctx, NeonProjectSpec{Name: p.Name, RegionID: p.RegionID, PGVersion: p.PGVersion}, pooled, direct)
-		if err != nil {
-			return err
+	roles := p.roles()
+	var info NeonProject
+	if err := r.step(StepNeonCreateProject, CodeProviderFailed, func() error {
+		var err error
+		info, err = r.neon.CreateProject(r.ctx, NeonProjectSpec{Name: p.Name, RegionID: p.RegionID, PGVersion: p.PGVersion}, discardSink(), discardSink())
+		if neonProjectRe.MatchString(info.ProjectID) {
+			r.res.ProjectID = info.ProjectID // reported even on a later failure, for cleanup
 		}
-		if err := w.require(r.res, p.Records.Pooled, p.Records.Direct); err != nil {
+		if err != nil {
 			return err
 		}
 		if !neonProjectRe.MatchString(info.ProjectID) || !neonBranchRe.MatchString(info.BranchID) || !pgIdentRe.MatchString(info.Role) || !pgIdentRe.MatchString(info.Database) {
 			return fail(CodeProviderResponse)
 		}
-		r.res.ProjectID, r.res.BranchID, r.res.Role, r.res.Database = info.ProjectID, info.BranchID, info.Role, info.Database
+		// The app records must never hold the owner's credentials.
+		for _, role := range roles {
+			if strings.EqualFold(role, info.Role) {
+				return fail(CodeProviderResponse)
+			}
+		}
+		r.res.BranchID, r.res.Role, r.res.Database = info.BranchID, info.Role, info.Database
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := r.step(StepNeonPrepareRoles, CodeProviderFailed, func() error {
+		if err := r.neon.PrepareRotationRoles(r.ctx, info.ProjectID, info.BranchID, info.Database, info.Role, roles, false); err != nil {
+			return err
+		}
+		r.res.PreparedRoles = []string{roles[0], roles[1]}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := r.step(StepNeonResetActive, CodeProviderFailed, func() error {
+		w := r.recorder()
+		if err := r.neon.ResetRolePassword(r.ctx, info.ProjectID, info.BranchID, roles[0], info.Database, w.sink(p.Records.Pooled), w.sink(p.Records.Direct)); err != nil {
+			return err
+		}
+		return w.require(r.res, p.Records.Pooled, p.Records.Direct)
+	}); err != nil {
+		return err
+	}
+	r.res.ActiveRole = roles[0]
+	return nil
+}
+
+// ---- neon.roles.prepare ----
+
+func (p *neonRolesPrepare) roles() [2]string { r, _ := rotationRoles(p.Roles, p.OwnerRole); return r }
+
+func (p *neonRolesPrepare) summary() string {
+	roles := p.roles()
+	s := "PREPARE Neon rotation roles " + roles[0] + ", " + roles[1] + " in project " + p.ProjectID + " branch " + p.BranchID + " database " + p.Database +
+		", connected as owner role " + p.OwnerRole + ": create them and no-login group role " + NeonGroupRole +
+		" if missing, make both members acting as it, and transfer ownership of the public schema to it"
+	if p.Adopt {
+		return s + ", and CHANGE OWNERSHIP of all existing public-schema objects to " + NeonGroupRole
+	}
+	return s + " (existing public-schema objects keep their owners)"
+}
+func (p *neonRolesPrepare) controls() []string                           { return []string{ControlNeon} }
+func (p *neonRolesPrepare) precheck(ctx context.Context, v Vault) string { return noCheck(ctx, v) }
+func (p *neonRolesPrepare) execute(r *run) error {
+	roles := p.roles()
+	return r.step(StepNeonPrepareRoles, CodeProviderFailed, func() error {
+		if err := r.neon.PrepareRotationRoles(r.ctx, p.ProjectID, p.BranchID, p.Database, p.OwnerRole, roles, p.Adopt); err != nil {
+			return err
+		}
+		r.res.PreparedRoles = []string{roles[0], roles[1]}
 		return nil
 	})
 }
@@ -269,7 +345,7 @@ func (p *neonProjectDelete) execute(r *run) error {
 func (p *neonRotate) summary() string {
 	old, next := p.Roles[0], p.Roles[1]
 	return "ROTATE Neon role " + next + " to active in project " + p.ProjectID + " branch " + p.BranchID + " database " + p.Database +
-		": reset its password, store its URIs in " + p.Records.Pooled + ", " + p.Records.Direct + ", push them to " + p.Vercel.text() +
+		" (rotation roles checked as owner role " + p.OwnerRole + "): reset its password, store its URIs in " + p.Records.Pooled + ", " + p.Records.Direct + ", push them to " + p.Vercel.text() +
 		", redeploy" + fromDeployment(p.Vercel.Deployment) + ", check health at " + p.HealthPath + ", then invalidate role " + old
 }
 func (p *neonRotate) controls() []string                           { return []string{ControlNeon, ControlVercel} }
@@ -280,8 +356,18 @@ func (p *neonRotate) precheck(ctx context.Context, v Vault) string { return noCh
 // pushed, deployed and healthy; only then is its password reset.
 func (p *neonRotate) execute(r *run) error {
 	old, next := p.Roles[0], p.Roles[1]
-	if err := r.step(StepNeonEnsureRole, CodeProviderFailed, func() error {
-		return r.neon.EnsureRole(r.ctx, p.ProjectID, p.BranchID, next)
+	// Read-only: both roles must already act as the group owner, or the new
+	// role could not use the old role's tables. Not ready fails with no
+	// side effects.
+	if err := r.step(StepNeonCheckRoles, CodeProviderFailed, func() error {
+		ready, err := r.neon.RotationRolesReady(r.ctx, p.ProjectID, p.BranchID, p.Database, p.OwnerRole, [2]string{old, next})
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return fail(CodeRolesNotPrepared)
+		}
+		return nil
 	}); err != nil {
 		return err
 	}

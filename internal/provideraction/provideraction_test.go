@@ -71,7 +71,7 @@ func vercelRef(target string) map[string]any {
 
 func rotateParams(t *testing.T) json.RawMessage {
 	return js(t, map[string]any{
-		"project_id": "calm-sky-123456", "branch_id": "br-main-1", "roles": []string{"app_a", "app_b"}, "database": "appdb",
+		"project_id": "calm-sky-123456", "branch_id": "br-main-1", "roles": []string{"app_a", "app_b"}, "owner_role": "neondb_owner", "database": "appdb",
 		"records": map[string]string{"pooled": "DATABASE_URL", "direct": "DATABASE_URL_UNPOOLED"},
 		"vercel":  vercelRef("preview"), "health_path": "/api/health",
 	})
@@ -134,6 +134,7 @@ func TestParamValidationIsStrict(t *testing.T) {
 		pa.ActionNeonProjectCreate:   js(t, map[string]any{"name": "throwaway-1", "region_id": "aws-us-east-2", "pg_version": 17, "records": map[string]string{"pooled": "DATABASE_URL", "direct": "DATABASE_URL_UNPOOLED"}}),
 		pa.ActionNeonProjectDelete:   js(t, map[string]any{"project_id": "calm-sky-123456"}),
 		pa.ActionNeonRotate:          rotateParams(t),
+		pa.ActionNeonRolesPrepare:    js(t, map[string]any{"project_id": "calm-sky-123456", "branch_id": "br-main-1", "database": "appdb", "owner_role": "neondb_owner", "adopt": true}),
 		pa.ActionVercelProjectCreate: js(t, map[string]any{"team_id": "team_abc", "name": "throwaway-app", "git_repo": "owner/repo", "framework": "nextjs"}),
 		pa.ActionVercelProjectDelete: js(t, map[string]any{"team_id": "team_abc", "project_id": "prj_abc"}),
 		pa.ActionVercelEnvPush:       js(t, map[string]any{"team_id": "team_abc", "project_id": "prj_abc", "target": "preview", "git_branch": "feat/x", "variables": map[string]string{"DATABASE_URL": "DATABASE_URL"}}),
@@ -187,6 +188,14 @@ func TestParamValidationIsStrict(t *testing.T) {
 		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"br-main-1"`, `"main"`, 1)},         // br-
 		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"/api/health"`, `"api/health"`, 1)}, // path
 		{pa.ActionNeonProjectCreate, `{"name":"x","pg_version":9,"records":{"pooled":"A","direct":"B"}}`},
+		{pa.ActionNeonProjectCreate, `{"name":"x","roles":["app_a"],"records":{"pooled":"A","direct":"B"}}`},
+		{pa.ActionNeonProjectCreate, `{"name":"x","roles":["app_a","envbank_app_owner"],"records":{"pooled":"A","direct":"B"}}`},
+		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"owner_role":"neondb_owner",`, ``, 1)},
+		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"neondb_owner"`, `"app_a"`, 1)},
+		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"neondb_owner"`, `"envbank_app_owner"`, 1)},
+		{pa.ActionNeonRolesPrepare, `{"project_id":"calm","branch_id":"br-x","database":"d","owner_role":"o","roles":["a","b","c"],"adopt":false}`},
+		{pa.ActionNeonRolesPrepare, `{"project_id":"calm","branch_id":"br-x","database":"d","owner_role":"o","roles":["a","A"],"adopt":false}`},
+		{pa.ActionNeonRolesPrepare, `{"project_id":"calm","branch_id":"br-x","database":"d","adopt":false}`},
 		{pa.ActionNeonProjectCreate, `{"name":"x","records":{"pooled":"A","direct":"A"}}`},
 		{pa.ActionVercelProjectCreate, `{"team_id":"team_abc","name":"UPPER"}`},
 		{pa.ActionVercelProjectCreate, `{"team_id":"team_abc","name":"` + strings.Repeat("a", 101) + `"}`},
@@ -234,7 +243,7 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 		t.Fatalf("status %+v", st)
 	}
 	want := []string{
-		"neon.ensure_role app_b",
+		"neon.roles_ready neondb_owner app_a,app_b",
 		"neon.reset app_b",
 		"vault.store DATABASE_URL",
 		"vault.store DATABASE_URL_UNPOOLED",
@@ -251,7 +260,7 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 	if got := e.log.Calls(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("call order:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	wantSteps := []string{pa.StepControl, pa.StepNeonEnsureRole, pa.StepNeonResetNewRole, pa.StepVercelEnvPush, pa.StepVercelCurrent, pa.StepVercelRedeploy, pa.StepVercelWaitReady, pa.StepHealth, pa.StepNeonInvalidateOld}
+	wantSteps := []string{pa.StepControl, pa.StepNeonCheckRoles, pa.StepNeonResetNewRole, pa.StepVercelEnvPush, pa.StepVercelCurrent, pa.StepVercelRedeploy, pa.StepVercelWaitReady, pa.StepHealth, pa.StepNeonInvalidateOld}
 	if strings.Join(st.Steps, ",") != strings.Join(wantSteps, ",") {
 		t.Fatalf("steps %v", st.Steps)
 	}
@@ -281,7 +290,7 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 // role, and must report the step; nothing is ever value-bearing.
 func TestNeonRotateFailureAtEachStepKeepsOldRole(t *testing.T) {
 	steps := map[string]string{
-		"neon.ensure_role app_b":                      pa.StepNeonEnsureRole,
+		"neon.roles_ready neondb_owner app_a,app_b":   pa.StepNeonCheckRoles,
 		"neon.reset app_b":                            pa.StepNeonResetNewRole,
 		"vercel.upsert DATABASE_URL preview":          pa.StepVercelEnvPush,
 		"vercel.upsert DATABASE_URL_UNPOOLED preview": pa.StepVercelEnvPush,
@@ -304,6 +313,17 @@ func TestNeonRotateFailureAtEachStepKeepsOldRole(t *testing.T) {
 			e.noLeak(t, "failed status", st)
 		})
 	}
+	t.Run("roles not prepared", func(t *testing.T) {
+		e := newEnv(t, nil)
+		e.fake.RolesNotPrepared = true
+		st := e.run(t, pa.ActionNeonRotate, rotateParams(t))
+		if st.State != pa.StateFailed || st.Step != pa.StepNeonCheckRoles || st.Code != pa.CodeRolesNotPrepared {
+			t.Fatalf("status %+v", st)
+		}
+		if got := e.log.Calls(); len(got) != 1 || got[0] != "neon.roles_ready neondb_owner app_a,app_b" {
+			t.Fatalf("side effects with unprepared roles: %v", got)
+		}
+	})
 	t.Run("vault store fails", func(t *testing.T) {
 		e := newEnv(t, nil)
 		e.vault.FailStore["DATABASE_URL_UNPOOLED"] = true
@@ -389,13 +409,74 @@ func TestStripeWebhookRotateFailureNeverDeletesOld(t *testing.T) {
 	}
 }
 
+func TestNeonProjectCreatePreparesRolesAndNeverStoresOwner(t *testing.T) {
+	e := newEnv(t, nil)
+	params := js(t, map[string]any{"name": "throwaway", "records": map[string]string{"pooled": "NEW_POOLED", "direct": "NEW_DIRECT"}})
+	st := e.run(t, pa.ActionNeonProjectCreate, params)
+	if st.State != pa.StateSucceeded || st.Result.ProjectID != "calm-sky-123456" || st.Result.ActiveRole != "app_a" || st.Result.Role != "neondb_owner" ||
+		st.Result.Records["NEW_POOLED"] != 1 || strings.Join(st.Result.PreparedRoles, ",") != "app_a,app_b" {
+		t.Fatalf("create %+v", st)
+	}
+	want := []string{"neon.create_project throwaway", "neon.prepare_roles neondb_owner app_a,app_b adopt=false", "neon.reset app_a", "vault.store NEW_POOLED", "vault.store NEW_DIRECT"}
+	if got := e.log.Calls(); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("call order:\n%s", strings.Join(got, "\n"))
+	}
+	for _, rec := range []string{"NEW_POOLED", "NEW_DIRECT"} {
+		if v, _ := e.vault.Value(rec); !strings.HasPrefix(v, "postgresql://app_a:") || strings.Contains(v, "neondb_owner") {
+			t.Fatalf("%s does not hold app_a's credentials only", rec)
+		}
+	}
+	// The owner's password (the first issued secret) is in no record.
+	owner := e.fake.IssuedSecrets()[0]
+	for _, rec := range []string{"NEW_POOLED", "NEW_DIRECT", "discarded"} {
+		if v, _ := e.vault.Value(rec); strings.Contains(v, owner) {
+			t.Fatal("owner credentials persisted")
+		}
+	}
+	e.noLeak(t, "create", st)
+
+	// Custom roles; a failure after create still reports project_id.
+	e = newEnv(t, nil)
+	e.fake.Fail = "neon.prepare_roles neondb_owner app_x,app_y adopt=false"
+	st = e.run(t, pa.ActionNeonProjectCreate, js(t, map[string]any{"name": "throwaway", "roles": []string{"app_x", "app_y"}, "records": map[string]string{"pooled": "P", "direct": "D"}}))
+	if st.State != pa.StateFailed || st.Step != pa.StepNeonPrepareRoles || st.Result.ProjectID != "calm-sky-123456" {
+		t.Fatalf("failed create %+v", st)
+	}
+	if ok, _ := e.vault.Exists(context.Background(), "P"); ok {
+		t.Fatal("record written after a failed role preparation")
+	}
+	e.noLeak(t, "failed create", st)
+}
+
+func TestNeonRolesPrepare(t *testing.T) {
+	params := map[string]any{"project_id": "calm-sky-123456", "branch_id": "br-main-1", "database": "appdb", "owner_role": "neondb_owner", "adopt": true}
+	text, ok := pa.Parse(pa.ActionNeonRolesPrepare, js(t, params))
+	if !ok || !strings.Contains(text, "CHANGE OWNERSHIP of all existing public-schema objects to envbank_app_owner") || !strings.Contains(text, "owner role neondb_owner") || !strings.Contains(text, "app_a, app_b") {
+		t.Fatalf("adopt text: %s", text)
+	}
+	params["adopt"] = false
+	text, _ = pa.Parse(pa.ActionNeonRolesPrepare, js(t, params))
+	if strings.Contains(text, "CHANGE OWNERSHIP") || !strings.Contains(text, "existing public-schema objects keep their owners") {
+		t.Fatalf("no-adopt text: %s", text)
+	}
+	e := newEnv(t, nil)
+	params["adopt"], params["roles"] = true, []string{"web_a", "web_b"}
+	st := e.run(t, pa.ActionNeonRolesPrepare, js(t, params))
+	if st.State != pa.StateSucceeded || strings.Join(st.Result.PreparedRoles, ",") != "web_a,web_b" {
+		t.Fatalf("prepare %+v", st)
+	}
+	if got := e.log.Calls(); len(got) != 1 || got[0] != "neon.prepare_roles neondb_owner web_a,web_b adopt=true" {
+		t.Fatalf("calls %v", got)
+	}
+	e.noLeak(t, "prepare", st)
+}
+
 func TestOtherActionsAndPrechecks(t *testing.T) {
 	e := newEnv(t, map[string]string{"EXISTING": provideractiontest.Sentinel("x_")})
 	st := e.run(t, pa.ActionNeonProjectCreate, js(t, map[string]any{"name": "throwaway", "records": map[string]string{"pooled": "NEW_POOLED", "direct": "NEW_DIRECT"}}))
-	if st.State != pa.StateSucceeded || st.Result.ProjectID != "calm-sky-123456" || st.Result.Records["NEW_POOLED"] != 1 {
+	if st.State != pa.StateSucceeded {
 		t.Fatalf("create %+v", st)
 	}
-	e.noLeak(t, "create", st)
 	st = e.run(t, pa.ActionStripeWebhookCreate, js(t, map[string]any{"url": "https://shop.example.com/api/stripe", "events": []string{"invoice.paid"}, "record": "WHSEC"}))
 	if st.State != pa.StateSucceeded || !strings.HasPrefix(st.Result.EndpointID, "we_") {
 		t.Fatalf("stripe create %+v", st)
