@@ -1,7 +1,31 @@
 # Owner-input XPC transport v1 (`envbank.owner-input-xpc/v1`)
 
-Status (November 4, 2026): **specification; implementation in progress; not
-qualified.** This replaces the filesystem-socket transport of
+Status (November 4, 2026): **implemented, and end-to-end tested with a
+synthetic value; not qualified.**
+
+First signed end-to-end run on macOS 27.2, with a throwaway vault:
+
+- **Builds.** The installed, Developer ID signed Chromux rebuild app had its
+  service registered through `SMAppService` and approved by the owner. The
+  broker was the signed `envbank` (`com.georgeqle.envbank`).
+- **Pairing.** Pairing displayed in Chromux, and the owner confirmed that the
+  code matched the terminal. The service build was then pinned by cdhash.
+- **Entry.** An agent requested `SYNTH_TEST`. The owner typed a random
+  synthetic value in Chromux's secure window. It was stored byte for byte, and
+  the agent received only `stored`.
+- **No leak observed.** The value appeared in neither the agent output nor the
+  broker terminal transcript.
+
+Two defects were found and fixed along the way:
+
+- **Service reply context.** The service dropped the request's reply context,
+  which the client saw as "Connection interrupted" (Chromux `dd580e7`).
+- **Pairing window.** An open pairing window blocked the next entry, which
+  then got `busy`. Being fixed; the run used a manual close.
+
+The broker's pairing window was also extended from 2 to 10 minutes. The
+installed-build no-leak harness and an independent review are still
+required before `qualified`. This replaces the filesystem-socket transport of
 [owner-input-protocol.md](owner-input-protocol.md). That transport is
 disabled because a socket's peer token identifies its last owner, which an
 impostor can arrange via fd hand-off and exec. Message semantics (purposes,
