@@ -41,6 +41,11 @@ type Adapter struct {
 	base   string
 	client *http.Client
 	now    func() time.Time
+	// teamOnly adapters (NewTeam) have no project scope and may only send
+	// team-level project lifecycle calls.
+	teamOnly bool
+	// pollInterval paces WaitReady; tests shorten it.
+	pollInterval time.Duration
 }
 
 var _ provider.Adapter = (*Adapter)(nil)
@@ -54,6 +59,30 @@ func New(token []byte, scope Scope, options Options) (*Adapter, error) {
 	if err := scope.Validate(); err != nil {
 		return nil, err
 	}
+	return newAdapter(token, scope, options)
+}
+
+// NewTeam returns a team-scoped adapter for project lifecycle calls
+// (CreateProject, DeleteProject) before a project scope exists. Every
+// project-scoped method (Inspect, Write, deployments, ...) is refused on it.
+func NewTeam(token []byte, teamID string, options Options) (*Adapter, error) {
+	if len(token) == 0 || len(token) > maxTokenBytes || bytes.IndexFunc(token, func(r rune) bool {
+		return r <= ' ' || r >= 0x7f
+	}) >= 0 {
+		return nil, errors.New("Vercel access token is invalid")
+	}
+	if !teamIDPattern.MatchString(teamID) {
+		return nil, errors.New("Vercel scope team ID is invalid")
+	}
+	adapter, err := newAdapter(token, Scope{TeamID: teamID}, options)
+	if err != nil {
+		return nil, err
+	}
+	adapter.teamOnly = true
+	return adapter, nil
+}
+
+func newAdapter(token []byte, scope Scope, options Options) (*Adapter, error) {
 	base, err := endpointBase(options.Endpoint)
 	if err != nil {
 		return nil, err
@@ -74,7 +103,7 @@ func New(token []byte, scope Scope, options Options) (*Adapter, error) {
 		now = time.Now
 	}
 	return &Adapter{token: append([]byte(nil), token...), scope: scope, base: base,
-		client: &clientCopy, now: now}, nil
+		client: &clientCopy, now: now, pollInterval: defaultPollInterval}, nil
 }
 
 func endpointBase(endpoint string) (string, error) {
@@ -126,6 +155,8 @@ type apiCall struct {
 	body      []byte
 	mutation  bool
 	attempted *bool
+	// teamLevel marks calls that do not depend on the project scope.
+	teamLevel bool
 }
 
 // send performs one request without retries. decode sees the bounded body
@@ -135,6 +166,9 @@ type apiCall struct {
 func (adapter *Adapter) send(ctx context.Context, call apiCall, decode func([]byte) error) error {
 	if adapter == nil || adapter.client == nil {
 		return provider.NewError(call.operation, 0, "NOT_CONFIGURED", provider.RetryNever)
+	}
+	if adapter.teamOnly && !call.teamLevel {
+		return provider.NewError(call.operation, 0, "PROJECT_SCOPE_REQUIRED", provider.RetryNever)
 	}
 	adapter.mu.RLock()
 	if len(adapter.token) == 0 {
