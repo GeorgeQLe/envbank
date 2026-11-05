@@ -1,5 +1,6 @@
 // Package neon implements EnvBank's Neon (API v2) adapter: project create
-// and delete, role creation and role password reset. Connection URIs, which
+// and delete, role creation, role password reset and rotation-role setup
+// (rotation_roles.go). Connection URIs, which
 // embed role passwords, flow only from bounded, wiped response buffers into
 // lifecycle.SecretSink records. They never appear in return values, errors,
 // String output or logs.
@@ -114,6 +115,9 @@ type Adapter struct {
 
 	pollInterval     time.Duration
 	operationTimeout time.Duration
+	// sqlConnect opens Postgres sessions for rotation-role setup; nil means
+	// connectNeonPostgres. Tests substitute a fake.
+	sqlConnect sqlConnector
 }
 
 func New(controlKey []byte, options Options) (*Adapter, error) {
