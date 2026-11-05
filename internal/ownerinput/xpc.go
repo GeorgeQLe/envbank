@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -20,24 +21,14 @@ const (
 	ServiceIdentifier = "dev.georgele.chromux.owner-input"
 )
 
-type xpcMessage struct {
-	strings map[string]string
-	ints    map[string]int64
-	bools   map[string]bool
+// xpcRawReply is a reply on the agent connection: its flattened fields and,
+// separately, the `value` data (copied into Go memory; the C copy is zeroed).
+// A value appears in Fields only as an empty 'X' record.
+type xpcRawReply struct {
+	Fields   []xpcField
+	Value    []byte
+	HasValue bool
 }
-
-type xpcReply struct {
-	Version       string
-	Nonce         string
-	Outcome       string
-	ServiceCDHash string
-	Value         []byte
-	HasValue      bool
-	UnknownKeys   bool
-}
-
-// xpcSend is the transport; tests replace it.
-var xpcSend = xpcRequest
 
 var cdhashRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
@@ -68,26 +59,6 @@ func (p *XPCProvider) Requirement() (string, error) {
 	return req, nil
 }
 
-func (p *XPCProvider) exchange(ctx context.Context, msg xpcMessage, nonce string, expires time.Time) (xpcReply, error) {
-	if ctx.Err() != nil {
-		return xpcReply{}, ctx.Err()
-	}
-	req, err := p.Requirement()
-	if err != nil {
-		return xpcReply{}, err
-	}
-	timeout := time.Until(expires) + responseWaitExtra
-	r, err := xpcSend(p.Service, req, msg, timeout)
-	if err != nil {
-		return xpcReply{}, err
-	}
-	if r.Version != XPCVersion || r.Nonce != nonce || r.UnknownKeys {
-		wipe(r.Value)
-		return xpcReply{}, errors.New(CodeProtocol)
-	}
-	return r, nil
-}
-
 // OutcomeConfirmed is the only pairing outcome that pairs: the service shows
 // the code in Chromux and replies "confirmed" only after the owner confirmed
 // it there with Touch ID. ("displayed" no longer pairs.)
@@ -116,13 +87,17 @@ func (p *XPCProvider) pairOn(ctx context.Context, conn agentConn, confirm func(i
 	}
 	code := fmt.Sprintf("%06d", n.Int64())
 	expires := time.Now().Add(requestTTL).UTC()
-	fields, err := conn.Request([]xpcField{{'S', "v", XPCVersion}, {'S', "kind", "pairing"}, {'S', "nonce", nonce},
+	r, err := conn.Request([]xpcField{{'S', "v", XPCVersion}, {'S', "kind", "pairing"}, {'S', "nonce", nonce},
 		{'S', "pairing_code", code}, {'S', "expires_at", expires.Format(time.RFC3339)}}, time.Until(expires)+responseWaitExtra)
 	if err != nil {
 		return err
 	}
+	if r.HasValue {
+		wipe(r.Value)
+		return errors.New(CodeProtocol)
+	}
 	got := map[string]string{}
-	for _, f := range fields {
+	for _, f := range r.Fields {
 		want, ok := pairingReplyKeys[f.Key]
 		if _, dup := got[f.Key]; !ok || want != f.Type || dup {
 			return errors.New(CodeProtocol) // unknown keys, wrong types or a value
@@ -151,16 +126,27 @@ func (p *XPCProvider) pairOn(ctx context.Context, conn agentConn, confirm func(i
 	return nil
 }
 
-// Entry implements the same contract as Provider.Entry over XPC.
-func (p *XPCProvider) Entry(ctx context.Context, purpose, title, detail, subject string, minBytes, maxBytes int, confirm bool, onCode func(string)) ([]byte, string, error) {
-	p.mu.Lock()
-	paired := p.cdhash != ""
-	p.mu.Unlock()
-	if !paired {
-		return nil, "", errors.New(CodeNotPaired)
-	}
+// entryReplyKeys are the keys an entry reply may carry ('X' is the `value`
+// data, which is delivered separately).
+var entryReplyKeys = map[string]byte{"v": 'S', "nonce": 'S', "outcome": 'S', "service_cdhash": 'S', "provider": 'D', "value": 'X'}
+
+// Entry asks the owner for a value in Chromux's secure window. It is sent
+// only on the agent channel's long-lived connection, and only while that
+// connection holds a host-confirmed pairing (the service refuses entry on any
+// other broker connection). Without one it fails fast (OWNER_INPUT_NOT_PAIRED)
+// and the caller falls back to the terminal. outcome is entered, declined,
+// cancelled, expired, busy or unavailable; the value is non-nil only on
+// entered and must be wiped by the caller.
+func (a *AgentChannel) Entry(ctx context.Context, purpose, title, detail, subject string, minBytes, maxBytes int, confirm bool, onCode func(string)) ([]byte, string, error) {
 	if minBytes < 1 || maxBytes > maxValue || minBytes > maxBytes {
 		return nil, "", errors.New(CodeProtocol)
+	}
+	conn, ok := a.pairedConn()
+	if !ok || a.Provider == nil || !a.Provider.Pinned() {
+		return nil, "", errors.New(CodeNotPaired)
+	}
+	if ctx.Err() != nil {
+		return nil, "", ctx.Err()
 	}
 	nonce, err := newNonce()
 	if err != nil {
@@ -170,31 +156,56 @@ func (p *XPCProvider) Entry(ctx context.Context, purpose, title, detail, subject
 	if onCode != nil {
 		onCode(RequestCode(nonce))
 	}
-	msg := xpcMessage{
-		strings: map[string]string{"v": XPCVersion, "kind": "entry", "nonce": nonce, "purpose": purpose, "title": clipRunes(title, 80),
-			"detail": clipRunes(detail, 300), "subject": clipRunes(subject, 128), "expires_at": expires.Format(time.RFC3339)},
-		ints:  map[string]int64{"min_bytes": int64(minBytes), "max_bytes": int64(maxBytes)},
-		bools: map[string]bool{"confirm": confirm},
+	confirmFlag := "0"
+	if confirm {
+		confirmFlag = "1"
 	}
-	r, err := p.exchange(ctx, msg, nonce, expires)
+	r, err := conn.Request([]xpcField{
+		{'S', "v", XPCVersion}, {'S', "kind", "entry"}, {'S', "nonce", nonce}, {'S', "purpose", purpose},
+		{'S', "title", clipRunes(title, 80)}, {'S', "detail", clipRunes(detail, 300)}, {'S', "subject", clipRunes(subject, 128)},
+		{'I', "min_bytes", strconv.Itoa(minBytes)}, {'I', "max_bytes", strconv.Itoa(maxBytes)}, {'B', "confirm", confirmFlag},
+		{'S', "expires_at", expires.Format(time.RFC3339)},
+	}, time.Until(expires)+responseWaitExtra)
 	if err != nil {
 		return nil, "", err
 	}
-	switch r.Outcome {
+	fail := func() ([]byte, string, error) {
+		wipe(r.Value)
+		return nil, "", errors.New(CodeProtocol)
+	}
+	got := map[string]string{}
+	for _, f := range r.Fields {
+		want, known := entryReplyKeys[f.Key]
+		if _, dup := got[f.Key]; !known || want != f.Type || dup {
+			return fail()
+		}
+		got[f.Key] = f.Value
+	}
+	_, valueField := got["value"]
+	if got["v"] != XPCVersion || got["nonce"] != nonce || valueField != r.HasValue || time.Now().After(expires.Add(responseWaitExtra)) {
+		return fail()
+	}
+	if cd, ok := got["service_cdhash"]; ok && cd != a.Provider.pinned() {
+		return fail()
+	}
+	switch got["outcome"] {
 	case "entered":
-		if !r.HasValue || len(r.Value) < minBytes || len(r.Value) > maxBytes {
-			wipe(r.Value)
-			return nil, "", errors.New(CodeProtocol)
+		if !r.HasValue || len(r.Value) < minBytes || len(r.Value) > maxBytes || ctx.Err() != nil {
+			return fail()
 		}
 		return r.Value, "entered", nil
 	case "declined", "cancelled", "expired", "busy", "unavailable":
 		if r.HasValue {
-			wipe(r.Value)
-			return nil, "", errors.New(CodeProtocol)
+			return fail()
 		}
-		return nil, r.Outcome, nil
+		return nil, got["outcome"], nil
 	default:
-		wipe(r.Value)
-		return nil, "", errors.New(CodeProtocol)
+		return fail()
 	}
+}
+
+func (p *XPCProvider) pinned() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cdhash
 }

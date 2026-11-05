@@ -36,76 +36,107 @@ func openWith(t *testing.T, conn *fakeConn, confirm func(Identity, string) bool)
 	return p, ch, ch.Open(context.Background())
 }
 
-func fakeXPC(t *testing.T, handle func(req string, msg xpcMessage) xpcReply) *[]string {
-	t.Helper()
-	var reqs []string
-	old := xpcSend
-	xpcSend = func(_ string, req string, msg xpcMessage, _ time.Duration) (xpcReply, error) {
-		reqs = append(reqs, req)
-		return handle(req, msg), nil
+// entryReply builds a reply to an entry message.
+func entryReply(m map[string]string, outcome string, value []byte, extra ...xpcField) xpcRawReply {
+	r := xpcRawReply{Fields: []xpcField{{'S', "v", XPCVersion}, {'S', "nonce", m["nonce"]}, {'S', "outcome", outcome},
+		{'S', "service_cdhash", strings.Repeat("ab", 20)}}}
+	if value != nil {
+		r.Fields = append(r.Fields, xpcField{'X', "value", ""})
+		r.Value, r.HasValue = append([]byte(nil), value...), true
 	}
-	t.Cleanup(func() { xpcSend = old })
-	return &reqs
+	r.Fields = append(r.Fields, extra...)
+	return r
 }
 
-func TestXPCPairPinsCDHashIntoRequirementAndValidatesReplies(t *testing.T) {
-	cd := strings.Repeat("ab", 20)
+// Entry goes only over the paired agent-channel connection (never a fresh
+// one), only while it holds a confirmed pairing, and every reply is checked
+// strictly.
+func TestEntryUsesOnlyThePairedConnectionAndChecksReplies(t *testing.T) {
 	secret := []byte("owner typed passphrase")
 	mode := "ok"
-	reqs := fakeXPC(t, func(req string, msg xpcMessage) xpcReply {
-		r := xpcReply{Version: XPCVersion, Nonce: msg.strings["nonce"]}
+	conn := newFakeConn()
+	conn.entry = func(m map[string]string) xpcRawReply {
 		switch mode {
 		case "ok":
-			r.Outcome, r.Value, r.HasValue = "entered", append([]byte(nil), secret...), true
+			return entryReply(m, "entered", secret)
 		case "nonce":
-			r.Outcome, r.Nonce, r.Value, r.HasValue = "entered", strings.Repeat("0", 32), secret, true
+			m["nonce"] = strings.Repeat("0", 32)
+			return entryReply(m, "entered", secret)
 		case "version":
-			r.Version, r.Outcome = "other", "entered"
+			r := entryReply(m, "entered", secret)
+			r.Fields[0].Value = "other"
+			return r
 		case "unknown":
-			r.Outcome, r.UnknownKeys = "cancelled", true
+			return entryReply(m, "cancelled", nil, xpcField{'S', "route_id", "1"})
 		case "value-on-decline":
-			r.Outcome, r.Value, r.HasValue = "declined", secret, true
+			return entryReply(m, "declined", secret)
+		case "value-not-flagged":
+			r := entryReply(m, "entered", nil)
+			r.Value, r.HasValue = secret, true
+			return r
 		case "short":
-			r.Outcome, r.Value, r.HasValue = "entered", []byte("short"), true
+			return entryReply(m, "entered", []byte("short"))
+		case "other-build":
+			r := entryReply(m, "entered", secret)
+			r.Fields[3].Value = strings.Repeat("cd", 20)
+			return r
 		case "cancelled":
-			r.Outcome = "cancelled"
+			return entryReply(m, "cancelled", nil)
 		}
-		return r
-	})
-	unpaired := &XPCProvider{Service: BrokerServiceName, TeamID: "NC56VXK48K", Identifier: ServiceIdentifier}
-	if _, _, err := unpaired.Entry(context.Background(), PurposeNewVault, "t", "d", "", 12, 1024, true, nil); err == nil {
-		t.Fatal("entry before pairing")
+		return entryReply(m, "bogus", nil)
 	}
-	base, _ := unpaired.Requirement()
+	var dials int
+	old := agentDial
+	agentDial = func(string, string) (agentConn, error) { dials++; return conn, nil }
+	t.Cleanup(func() { agentDial = old })
+	p := &XPCProvider{Service: BrokerServiceName, TeamID: "NC56VXK48K", Identifier: ServiceIdentifier}
+	ch := &AgentChannel{Provider: p, Confirm: func(Identity, string) bool { return true }}
+	if _, _, err := ch.Entry(context.Background(), PurposeNewVault, "t", "d", "", 12, 1024, true, nil); err == nil || err.Error() != CodeNotPaired || len(conn.entries) != 0 {
+		t.Fatalf("entry before pairing: %v", err)
+	}
+	base, _ := p.Requirement()
 	for _, want := range []string{`leaf[subject.OU] = "NC56VXK48K"`, `identifier "dev.georgele.chromux.owner-input"`, "1.2.840.113635.100.6.1.13", `get-task-allow"] exists)`} {
 		if !strings.Contains(base, want) {
 			t.Fatalf("requirement missing %q: %s", want, base)
 		}
 	}
-	var shown string
-	conn := newFakeConn()
-	conn.cdhash = cd
-	p, _, err := openWith(t, conn, func(id Identity, code string) bool { shown = code; return id.CDHash == cd })
-	if err != nil || len(shown) != 6 || conn.pairings[0]["pairing_code"] != shown || conn.pairings[0]["kind"] != "pairing" {
+	if err := ch.Open(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	pinned, _ := p.Requirement()
-	if !strings.HasSuffix(pinned, ` and cdhash H"`+cd+`"`) {
+	if pinned, _ := p.Requirement(); !strings.HasSuffix(pinned, ` and cdhash H"`+strings.Repeat("ab", 20)+`"`) {
 		t.Fatalf("cdhash not pinned into the requirement: %s", pinned)
 	}
-	v, outcome, err := p.Entry(context.Background(), PurposeNewVault, "t", "d", "", 12, 1024, true, nil)
-	if err != nil || outcome != "entered" || string(v) != string(secret) || !strings.Contains((*reqs)[len(*reqs)-1], `cdhash H"`) {
-		t.Fatalf("entry: %v %q", err, outcome)
+	var code string
+	v, outcome, err := ch.Entry(context.Background(), PurposeNewVault, "t\u202e", "d", "", 12, 1024, true, func(c string) { code = c })
+	if err != nil || outcome != "entered" || string(v) != string(secret) || dials != 1 || len(code) != 9 {
+		t.Fatalf("entry: %v %q dials=%d", err, outcome, dials)
 	}
-	for _, m := range []string{"nonce", "version", "unknown", "value-on-decline", "short"} {
+	sent := map[string]xpcField{}
+	for _, f := range conn.entries[0] {
+		sent[f.Key] = f
+	}
+	if sent["kind"].Value != "entry" || sent["min_bytes"] != (xpcField{'I', "min_bytes", "12"}) || sent["confirm"] != (xpcField{'B', "confirm", "1"}) || strings.ContainsRune(sent["title"].Value, '\u202e') {
+		t.Fatalf("entry message %+v", sent)
+	}
+	for _, m := range []string{"nonce", "version", "unknown", "value-on-decline", "value-not-flagged", "short", "other-build", "bogus"} {
 		mode = m
-		if v, _, err := p.Entry(context.Background(), PurposeNewVault, "t", "d", "", 12, 1024, true, nil); err == nil || v != nil {
+		if v, _, err := ch.Entry(context.Background(), PurposeNewVault, "t", "d", "", 12, 1024, true, nil); err == nil || v != nil {
 			t.Fatalf("%s accepted", m)
 		}
 	}
 	mode = "cancelled"
-	if v, outcome, err := p.Entry(context.Background(), PurposeNewVault, "t", "d", "", 12, 1024, true, nil); err != nil || outcome != "cancelled" || v != nil {
+	if v, outcome, err := ch.Entry(context.Background(), PurposeNewVault, "t", "d", "", 12, 1024, true, nil); err != nil || outcome != "cancelled" || v != nil {
 		t.Fatal("cancel not reported as cancel")
+	}
+	// A pairing lost (service restart) or a closed connection: fail fast.
+	ch.setConn(conn, false)
+	n := len(conn.entries)
+	if _, _, err := ch.Entry(context.Background(), PurposeNewVault, "t", "d", "", 12, 1024, true, nil); err == nil || len(conn.entries) != n {
+		t.Fatal("entry sent on a connection without a confirmed pairing")
+	}
+	ch.setConn(nil, false)
+	if _, _, err := ch.Entry(context.Background(), PurposeNewVault, "t", "d", "", 12, 1024, true, nil); err == nil || dials != 1 {
+		t.Fatal("entry without a connection, or a fresh connection dialled")
 	}
 }
 
@@ -158,11 +189,11 @@ func TestXPCPairingNeedsHostConfirmationAndOwnerTouchID(t *testing.T) {
 
 type nonceSwap struct{ *fakeConn }
 
-func (n nonceSwap) Request(f []xpcField, d time.Duration) ([]xpcField, error) {
+func (n nonceSwap) Request(f []xpcField, d time.Duration) (xpcRawReply, error) {
 	r, err := n.fakeConn.Request(f, d)
-	for i := range r {
-		if r[i].Key == "nonce" {
-			r[i].Value = strings.Repeat("0", 32)
+	for i := range r.Fields {
+		if r.Fields[i].Key == "nonce" {
+			r.Fields[i].Value = strings.Repeat("0", 32)
 		}
 	}
 	return r, err

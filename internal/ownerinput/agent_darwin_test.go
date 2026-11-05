@@ -85,3 +85,19 @@ func TestRealAgentDialToMissingServiceFailsClosed(t *testing.T) {
 		t.Fatal("message from an absent service")
 	}
 }
+
+// The C glue copies an entry's `value` data exactly (embedded NULs
+// included) and refuses a value that is not data or is too long.
+func TestCValueExtraction(t *testing.T) {
+	if v, rc := valueSelfTest(1); rc != 2 || string(v) != "pass\x00word" {
+		t.Fatalf("data: %q %d", v, rc)
+	}
+	if v, rc := valueSelfTest(0); rc != 1 || v != nil {
+		t.Fatalf("none: %q %d", v, rc)
+	}
+	for _, kind := range []int{2, 3} {
+		if v, rc := valueSelfTest(kind); rc != 0 || v != nil {
+			t.Fatalf("kind %d accepted: %d", kind, rc)
+		}
+	}
+}

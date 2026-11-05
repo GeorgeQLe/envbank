@@ -192,7 +192,46 @@ static int ae_hello(ae_chan *c, const char *version, int64_t timeout_ms, char *o
 // the long-lived connection and waits at most timeout_ms for its reply. On
 // AE_MESSAGE *reply_out holds the reply dictionary (the caller releases it).
 static int ae_build(xpc_object_t root, const char **types, const char **keys, const char **vals, int n);
+static void ae_ref(ae_chan *c) {
+	pthread_mutex_lock(&c->mu);
+	c->refs++;
+	pthread_mutex_unlock(&c->mu);
+}
+
+// ae_request holds its own reference: a concurrent ae_close cannot free c
+// while a request (an entry waiting for the owner) is outstanding.
+static int ae_request_locked(ae_chan *c, const char **types, const char **keys, const char **vals, int n, int64_t timeout_ms, xpc_object_t *reply_out);
 static int ae_request(ae_chan *c, const char **types, const char **keys, const char **vals, int n, int64_t timeout_ms, xpc_object_t *reply_out) {
+	ae_ref(c);
+	int rc = ae_request_locked(c, types, keys, vals, n, timeout_ms, reply_out);
+	ae_unref(c);
+	return rc;
+}
+
+// ae_value copies the reply's top-level `value` data into a malloc'd buffer
+// (the caller zeroes and frees it). It returns 1 with no value, 2 with a
+// value, and 0 if `value` is present but not data or longer than 4096 bytes.
+static int ae_value(xpc_object_t reply, uint8_t **out, size_t *len) {
+	*out = NULL;
+	*len = 0;
+	xpc_object_t v = xpc_dictionary_get_value(reply, "value");
+	if (!v) return 1;
+	if (xpc_get_type(v) != XPC_TYPE_DATA || xpc_data_get_length(v) > 4096) return 0;
+	*len = xpc_data_get_length(v);
+	*out = malloc(*len ? *len : 1);
+	if (!*out) return 0;
+	memcpy(*out, xpc_data_get_bytes_ptr(v), *len);
+	return 2;
+}
+
+static void ae_wipe_free(uint8_t *p, size_t n) {
+	if (!p) return;
+	volatile uint8_t *v = p;
+	for (size_t i = 0; i < n; i++) v[i] = 0;
+	free(p);
+}
+
+static int ae_request_locked(ae_chan *c, const char **types, const char **keys, const char **vals, int n, int64_t timeout_ms, xpc_object_t *reply_out) {
 	*reply_out = NULL;
 	xpc_object_t msg = xpc_dictionary_create(NULL, NULL, 0);
 	if (!ae_build(msg, types, keys, vals, n)) {
@@ -365,6 +404,18 @@ static void ae_reply(xpc_object_t msg, const char **types, const char **keys, co
 
 static void ae_release(xpc_object_t msg) { if (msg) xpc_release(msg); }
 
+// ae_selftest_value builds {value: <kind>} (0 none, 1 data "pass\0word",
+// 2 a string, 3 5000 bytes of data) for the value-extraction test. It sends
+// nothing.
+static xpc_object_t ae_selftest_value(int kind) {
+	xpc_object_t m = xpc_dictionary_create(NULL, NULL, 0);
+	static uint8_t big[5000];
+	if (kind == 1) xpc_dictionary_set_data(m, "value", "pass\0word", 9);
+	if (kind == 2) xpc_dictionary_set_string(m, "value", "x");
+	if (kind == 3) xpc_dictionary_set_data(m, "value", big, sizeof big);
+	return m;
+}
+
 // ae_selftest_message builds an agent_request-shaped dictionary (plus an
 // int64, a bool and a top-level data value) for the flatten test. It sends
 // nothing.
@@ -423,6 +474,9 @@ type xpcAgentConn struct {
 	c       *C.ae_chan
 	once    sync.Once
 	version *C.char
+
+	mu     sync.Mutex
+	closed bool // Request refuses after Close (entries run beside serve)
 }
 
 func dialAgentXPC(service, requirement string) (agentConn, error) {
@@ -449,20 +503,39 @@ func (x *xpcAgentConn) Hello(timeout time.Duration) (string, error) {
 	}
 }
 
-func (x *xpcAgentConn) Request(fields []xpcField, timeout time.Duration) ([]xpcField, error) {
+func (x *xpcAgentConn) Request(fields []xpcField, timeout time.Duration) (xpcRawReply, error) {
+	x.mu.Lock()
+	if x.closed {
+		x.mu.Unlock()
+		return xpcRawReply{}, errors.New(CodeUnavailable)
+	}
+	C.ae_ref(x.c) // released below; keeps c alive across a concurrent Close
+	x.mu.Unlock()
+	defer C.ae_unref(x.c)
 	types, keys, vals, free := cFields(fields)
 	defer free()
 	var reply C.xpc_object_t
 	switch C.ae_request(x.c, &types[0], &keys[0], &vals[0], C.int(len(fields)), C.int64_t(timeout.Milliseconds()), &reply) {
 	case C.AE_MESSAGE:
 	case C.AE_TIMEOUT:
-		return nil, errors.New(CodeUnavailable)
+		return xpcRawReply{}, errors.New(CodeUnavailable)
 	case C.AE_INVALID:
-		return nil, errors.New(CodeProtocol)
+		return xpcRawReply{}, errors.New(CodeProtocol)
 	default:
-		return nil, errors.New(CodePeerUnverified)
+		return xpcRawReply{}, errors.New(CodePeerUnverified)
 	}
 	defer C.ae_release(reply)
+	var out xpcRawReply
+	var vbuf *C.uint8_t
+	var vlen C.size_t
+	switch C.ae_value(reply, &vbuf, &vlen) {
+	case 2:
+		out.Value, out.HasValue = C.GoBytes(unsafe.Pointer(vbuf), C.int(vlen)), true
+		C.ae_wipe_free(vbuf, vlen)
+	case 1:
+	default:
+		return xpcRawReply{}, errors.New(CodeProtocol)
+	}
 	var n C.size_t
 	var overflow C.int
 	buf := C.ae_flatten(reply, &n, &overflow)
@@ -470,10 +543,12 @@ func (x *xpcAgentConn) Request(fields []xpcField, timeout time.Duration) ([]xpcF
 		if buf != nil {
 			C.free(unsafe.Pointer(buf))
 		}
-		return nil, errors.New(CodeProtocol)
+		wipe(out.Value)
+		return xpcRawReply{}, errors.New(CodeProtocol)
 	}
 	defer C.free(unsafe.Pointer(buf))
-	return parseFlat(C.GoBytes(unsafe.Pointer(buf), C.int(n))), nil
+	out.Fields = parseFlat(C.GoBytes(unsafe.Pointer(buf), C.int(n)))
+	return out, nil
 }
 
 func (x *xpcAgentConn) Next(timeout time.Duration) agentEvent {
@@ -588,7 +663,25 @@ func flattenSelfTest() ([]xpcField, bool) {
 	return parseFlat(C.GoBytes(unsafe.Pointer(buf), C.int(n))), overflow != 0
 }
 
+// valueSelfTest runs ae_value on ae_selftest_value(kind) (tests only).
+func valueSelfTest(kind int) ([]byte, int) {
+	m := C.ae_selftest_value(C.int(kind))
+	defer C.ae_release(m)
+	var buf *C.uint8_t
+	var n C.size_t
+	rc := int(C.ae_value(m, &buf, &n))
+	var out []byte
+	if buf != nil {
+		out = C.GoBytes(unsafe.Pointer(buf), C.int(n))
+		C.ae_wipe_free(buf, n)
+	}
+	return out, rc
+}
+
 func (x *xpcAgentConn) Close() {
+	x.mu.Lock()
+	x.closed = true
+	x.mu.Unlock()
 	x.once.Do(func() {
 		C.ae_close(x.c)
 		C.free(unsafe.Pointer(x.version))

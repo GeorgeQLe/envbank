@@ -142,6 +142,9 @@ pairing on that connection. The service must:
   connection that completed a host-confirmed pairing, and forget that
   pairing when the connection closes or the service restarts (the broker
   then pairs again before saying hello again);
+- accept `entry` only on that same paired connection, and refuse it on any
+  other broker connection (an unpaired broker must never be able to open a
+  secure-input window and receive what the owner types);
 - warn the owner in Chromux whenever the registered broker connection
   changes (a new broker, or the same broker after a reconnect), before
   routing anything to it.
@@ -179,8 +182,18 @@ pairing on that connection. The service must:
   it paired with by appending `and cdhash H"<service cdhash>"` to its peer
   requirement. macOS then enforces the same build on every later message;
   the broker does not trust a self-reported hash alone.
-- **Values.** The broker accepts `value` only on `entered`, for the
-  outstanding nonce, within bounds, and zeroes it after use.
+- **Entry connection (Unreleased).** The broker sends `entry` only on its
+  long-lived agent-channel connection, and only while that connection holds
+  a host-confirmed pairing; it opens no per-request connections. Without a
+  confirmed pairing (before pairing, after the connection closed, or after a
+  service restart until pairing is confirmed again) entry fails fast with
+  `OWNER_INPUT_NOT_PAIRED` and the broker falls back to the terminal.
+- **Values.** The broker accepts `value` (data, at most 4096 bytes) only on
+  `entered`, for the outstanding nonce, within bounds, from the pinned build
+  (`service_cdhash`, when present, must match). A reply with an unknown key,
+  a wrongly typed key or a `value` on any other outcome is a protocol error.
+  The C copy is zeroed and freed at once, and the caller zeroes the Go copy
+  after use.
 - **Fallback.** If the service is unavailable or fails the requirement, the
   broker falls back to the terminal and says so. A decline in Chromux is a
   decline, never a silent fallback.

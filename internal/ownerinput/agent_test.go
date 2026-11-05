@@ -225,6 +225,8 @@ type fakeConn struct {
 	pairings      []map[string]string
 	order         []string
 	paired        bool // a confirmed pairing happened on this connection
+	entry         func(m map[string]string) xpcRawReply
+	entries       [][]xpcField
 	helloUnpaired bool
 }
 
@@ -233,19 +235,30 @@ func newFakeConn() *fakeConn {
 		pairOutcome: OutcomeConfirmed, cdhash: strings.Repeat("ab", 20)}
 }
 
-func (f *fakeConn) Request(fields []xpcField, _ time.Duration) ([]xpcField, error) {
+func (f *fakeConn) Request(fields []xpcField, _ time.Duration) (xpcRawReply, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	m := map[string]string{}
 	for _, x := range fields {
 		m[x.Key] = x.Value
 	}
+	if m["kind"] == "entry" {
+		f.order = append(f.order, "entry")
+		f.entries = append(f.entries, fields)
+		if f.closed {
+			return xpcRawReply{}, errors.New(CodeUnavailable)
+		}
+		if f.entry == nil {
+			return xpcRawReply{Fields: []xpcField{{'S', "v", XPCVersion}, {'S', "nonce", m["nonce"]}, {'S', "outcome", "unavailable"}}}, nil
+		}
+		return f.entry(m), nil
+	}
 	f.pairings = append(f.pairings, m)
 	f.order = append(f.order, "pair")
 	f.paired = f.pairOutcome == OutcomeConfirmed
 	r := []xpcField{{'S', "v", XPCVersion}, {'S', "nonce", m["nonce"]}, {'S', "outcome", f.pairOutcome}, {'S', "service_cdhash", f.cdhash},
 		{'D', "provider", `{"name":"Chromux"}`}}
-	return append(r, f.extra...), nil
+	return xpcRawReply{Fields: append(r, f.extra...)}, nil
 }
 
 func (f *fakeConn) Hello(time.Duration) (string, error) {

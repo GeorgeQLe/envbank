@@ -173,7 +173,7 @@ func agentBrokerCommand(args []string) error {
 		if err != nil {
 			fmt.Fprintf(os.Stdout, "Chromux secure input not paired (%v); secrets will be typed in this terminal.\n", err)
 		} else {
-			prompter.provider = p
+			prompter.provider = ch // entry only on the paired agent-channel connection
 			channel = ch
 			fmt.Println("Chromux secure input paired for this session (UNQUALIFIED: installed-build no-leak qualification pending).")
 		}

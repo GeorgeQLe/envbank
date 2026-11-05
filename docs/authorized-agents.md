@@ -45,7 +45,9 @@ anything: the broker runs the biometric check itself.
   only then sends `{v, kind:"broker_hello"}` on it. Only the broker
   connection that completed a host-confirmed pairing may register; the
   service keeps it as the agent-request target and warns the owner in
-  Chromux whenever the registered broker connection changes.
+  Chromux whenever the registered broker connection changes. Secret entry
+  (`kind:"entry"`) also goes only over this paired connection; the service
+  refuses entry on any other broker connection.
 - **Forwarding.** Chromux sends `{v, kind:"agent_request", session, request}`
   on its `.ui` connection. The service forwards it, with a `route_id`, to the
   registered broker as a message expecting a reply. The broker's reply goes
@@ -118,7 +120,9 @@ The reply is the agent broker response (value-free, fixed codes) plus `route_id`
   terminal shows the same details for reference, but typing there approves
   nothing. "Always" approvals stay scoped to the grant and end with it.
 - **Secret entry.** Values are still typed in the host's secure window
-  (owner-input), never in the terminal.
+  (owner-input), never in the terminal. The broker sends entry requests only
+  on its host-confirmed paired agent-channel connection; without a confirmed
+  pairing it fails fast and uses the terminal instead.
 - **Biometrics unavailable.** If no biometry is enrolled, or the hardware is
   unavailable, the broker refuses every approval (`APPROVAL_UNAVAILABLE`).
   There is no silent fallback.

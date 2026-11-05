@@ -64,8 +64,9 @@ const (
 // darwin implementation is thin C glue; tests use a fake.
 type agentConn interface {
 	// Request sends one message built from instructions and returns the
-	// flattened reply (pairing).
-	Request(fields []xpcField, timeout time.Duration) ([]xpcField, error)
+	// reply (pairing and entry). It may run beside Next/Reply and must fail,
+	// not crash, after Close.
+	Request(fields []xpcField, timeout time.Duration) (xpcRawReply, error)
 	// Hello sends broker_hello and returns the reply's outcome.
 	Hello(timeout time.Duration) (string, error)
 	// Next waits for the next event (evTimeout when none arrived in time).
@@ -103,8 +104,23 @@ type AgentChannel struct {
 	Notify      func(string) // owner terminal status lines (no values)
 	Activity    func()       // called on every request (idle lock)
 
-	mu   sync.Mutex
-	conn agentConn // paired by Open, not yet registered
+	mu     sync.Mutex
+	conn   agentConn // the current connection (paired by Open, or by Run)
+	paired bool      // conn holds a host-confirmed pairing right now
+}
+
+func (a *AgentChannel) setConn(conn agentConn, paired bool) {
+	a.mu.Lock()
+	a.conn, a.paired = conn, paired && conn != nil
+	a.mu.Unlock()
+}
+
+// pairedConn returns the connection entries may use: only one that holds a
+// host-confirmed pairing.
+func (a *AgentChannel) pairedConn() (agentConn, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.conn, a.paired && a.conn != nil
 }
 
 // maxPairRefusals is how many pairings in a row may be declined (in Chromux
@@ -124,11 +140,12 @@ func (a *AgentChannel) Open(ctx context.Context) error {
 		return err
 	}
 	a.mu.Lock()
-	if a.conn != nil {
-		a.conn.Close()
-	}
-	a.conn = conn
+	old := a.conn
+	a.conn, a.paired = conn, true
 	a.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
 	return nil
 }
 
@@ -179,9 +196,9 @@ func (a *AgentChannel) Run(ctx context.Context) error {
 	refusals := 0
 	a.mu.Lock()
 	conn := a.conn
-	a.conn = nil
 	a.mu.Unlock()
 	defer func() {
+		a.setConn(nil, false)
 		if conn != nil {
 			conn.Close()
 		}
@@ -189,7 +206,9 @@ func (a *AgentChannel) Run(ctx context.Context) error {
 	for ctx.Err() == nil {
 		var err error
 		if conn == nil {
-			conn, err = a.connect(ctx)
+			if conn, err = a.connect(ctx); err == nil {
+				a.setConn(conn, true)
+			}
 		}
 		if err == nil {
 			err = register(conn)
@@ -201,7 +220,9 @@ func (a *AgentChannel) Run(ctx context.Context) error {
 				// The service restarted and lost the pairing: pair again on
 				// this connection before saying hello on it.
 				a.notify("Chromux owner-input service restarted; pair again to continue")
+				a.setConn(conn, false) // no entries until the pairing is confirmed again
 				if err = a.Provider.pairOn(ctx, conn, a.Confirm); err == nil {
+					a.setConn(conn, true)
 					continue
 				}
 			} else {
@@ -209,6 +230,7 @@ func (a *AgentChannel) Run(ctx context.Context) error {
 			}
 		}
 		if conn != nil {
+			a.setConn(nil, false)
 			conn.Close()
 			conn = nil
 		}
