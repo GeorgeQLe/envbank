@@ -2,6 +2,7 @@ package stripe
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -77,5 +78,30 @@ func TestWebhookCreateRequiresStableIdempotencyKey(t *testing.T) {
 	_, err := adapter.Create(context.Background(), lifecycle.CredentialRequest{ProviderIdentity: "acct_123", CredentialType: "webhook-signing-secret", DestinationRecord: "TOKEN", Parameters: map[string][]string{"url": {"https://example.test/webhook"}, "enabled_events": {"*"}}}, sink)
 	if err == nil || called {
 		t.Fatal("non-idempotent creation reached Stripe")
+	}
+}
+
+func TestNewRefusesLiveModeControlKeys(t *testing.T) {
+	for _, key := range []string{"sk_live_unique_live_sentinel", "rk_live_unique_live_sentinel"} {
+		adapter, err := New([]byte(key), Options{Endpoint: "http://localhost"})
+		if err == nil || adapter != nil {
+			t.Fatalf("live-mode key accepted")
+		}
+		if strings.Contains(err.Error(), "sentinel") || strings.Contains(err.Error(), "live_unique") {
+			t.Fatalf("error echoed the key: %v", err)
+		}
+	}
+	for _, key := range []string{"sk_test_control", "rk_test_control"} {
+		adapter, err := New([]byte(key), Options{Endpoint: "http://localhost"})
+		if err != nil {
+			t.Fatalf("test-mode key refused: %v", err)
+		}
+		if formatted := fmt.Sprintf("%v %+v %s %#v", adapter, adapter, adapter, adapter); strings.Contains(formatted, "control") {
+			t.Fatalf("adapter formatting leaked the key: %s", formatted)
+		}
+		adapter.Close()
+	}
+	if !LiveModeKey([]byte("sk_live_x")) || !LiveModeKey([]byte("rk_live_x")) || LiveModeKey([]byte("sk_test_x")) || LiveModeKey([]byte("pk_live_x")) {
+		t.Fatal("live-mode classification is wrong")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -33,6 +34,10 @@ func New(controlCredential []byte, options Options) (*Adapter, error) {
 	if len(controlCredential) == 0 || len(controlCredential) > 16<<10 || bytes.IndexFunc(controlCredential, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
 		return nil, errors.New("Stripe control credential is invalid")
 	}
+	if LiveModeKey(controlCredential) {
+		// v1 automates test mode and sandboxes only (docs/provider-actions.md).
+		return nil, errors.New("Stripe live-mode control credentials are refused")
+	}
 	endpoint := options.Endpoint
 	if endpoint == "" {
 		endpoint = DefaultEndpoint
@@ -52,6 +57,19 @@ func New(controlCredential []byte, options Options) (*Adapter, error) {
 	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Adapter{endpoint: endpoint, client: &copy, control: append([]byte(nil), controlCredential...)}, nil
 }
+
+// LiveModeKey reports whether credential is a Stripe live-mode secret or
+// restricted key. It inspects only the fixed prefix and never echoes the key.
+func LiveModeKey(credential []byte) bool {
+	return bytes.HasPrefix(credential, []byte("sk_live_")) || bytes.HasPrefix(credential, []byte("rk_live_"))
+}
+
+// String and Format never render the retained control credential.
+func (*Adapter) String() string { return "Stripe adapter [credential REDACTED]" }
+func (*Adapter) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, "Stripe adapter [credential REDACTED]")
+}
+
 func (adapter *Adapter) Close() {
 	if adapter != nil {
 		for i := range adapter.control {
