@@ -345,7 +345,24 @@ type Providers struct {
 	Pushed    map[string]string // env key → value read from the vault
 	Issued    []string          // every secret the fakes created
 	Endpoints map[string]provideraction.StripeWebhook
-	next      int
+	// Closed counts port Close calls (each port must be closed once, when
+	// its operation ends).
+	Closed int
+	next   int
+}
+
+// Closes returns how many ports were closed so far.
+func (p *Providers) Closes() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Closed
+}
+
+func (p *Providers) close() error {
+	p.mu.Lock()
+	p.Closed++
+	p.mu.Unlock()
+	return nil
 }
 
 // NewProviders returns a fake factory.
@@ -416,6 +433,8 @@ func (p *Providers) Stripe(cred []byte) (provideraction.StripePort, error) {
 
 type neon struct{ p *Providers }
 
+func (n neon) Close() error { return n.p.close() }
+
 func (n neon) uris(ctx context.Context, role, db string, pooled, direct *lifecycle.SecretSink) error {
 	pw := n.p.issue("npg_")
 	if _, err := pooled.StoreBytes(ctx, []byte("postgresql://"+role+":"+pw+"@ep-x-pooler.neon.tech/"+db)); err != nil {
@@ -466,6 +485,8 @@ func (n neon) ResetRolePassword(ctx context.Context, _, _, role, db string, pool
 
 type vercel struct{ p *Providers }
 
+func (v vercel) Close() error { return v.p.close() }
+
 func (v vercel) CreateProject(ctx context.Context, _, name, _, _ string) (string, error) {
 	if err := v.p.call(ctx, "vercel.create_project "+name); err != nil {
 		return "", err
@@ -515,6 +536,8 @@ func (v vercel) CheckHealth(ctx context.Context, _, path string) error {
 }
 
 type stripe struct{ p *Providers }
+
+func (s stripe) Close() error { return s.p.close() }
 
 func (s stripe) CreateWebhook(ctx context.Context, url string, events []string, secret *lifecycle.SecretSink) (string, error) {
 	if err := s.p.call(ctx, "stripe.create"); err != nil {

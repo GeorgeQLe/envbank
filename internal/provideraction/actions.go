@@ -160,6 +160,8 @@ type plan interface {
 	controls() []string
 	// precheck refuses, before any prompt, what cannot succeed (code "" ok).
 	precheck(ctx context.Context, v Vault) string
+	// resources are the lock keys of what the action changes (locks.go).
+	resources(ctx context.Context, v Vault) []string
 	execute(r *run) error
 }
 

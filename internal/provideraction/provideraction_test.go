@@ -594,15 +594,15 @@ func TestConcurrencyAndJournalBounds(t *testing.T) {
 	params := js(t, map[string]any{"project_id": "abc"})
 	ctx := context.Background()
 	var ids []string
-	for i := 0; i < 2; i++ {
-		prep, code := e.svc.Prepare(ctx, pa.ActionNeonProjectDelete, params)
+	for _, project := range []string{"abc", "abd"} { // distinct resources: no RESOURCE_BUSY
+		prep, code := e.svc.Prepare(ctx, pa.ActionNeonProjectDelete, js(t, map[string]any{"project_id": project}))
 		if code != "" {
 			t.Fatal(code)
 		}
 		id, _ := e.svc.Start(prep, owner, scope, nil)
 		ids = append(ids, id)
 	}
-	if _, code := e.svc.Prepare(ctx, pa.ActionNeonProjectDelete, params); code != agentbroker.CodeBusy {
+	if _, code := e.svc.Prepare(ctx, pa.ActionNeonProjectDelete, js(t, map[string]any{"project_id": "abe"})); code != agentbroker.CodeBusy {
 		t.Fatalf("third concurrent action: %q", code)
 	}
 	close(e.fake.Block)

@@ -127,11 +127,20 @@ func (s *Service) Prepare(ctx context.Context, action string, params json.RawMes
 			return nil, CodeControlMissing
 		}
 	}
-	if code := pl.precheck(ctx, s.vault); code != "" {
+	// The resources this action changes are locked before the record
+	// prechecks, so what they found still holds when the operation runs, and
+	// a second operation on the same resource is refused before its prompt.
+	l, code := s.exec.lock(pl.resources(ctx, s.vault))
+	if code != "" {
 		return nil, code
 	}
-	sl, code := s.exec.reserve()
+	if code := pl.precheck(ctx, s.vault); code != "" {
+		l.release()
+		return nil, code
+	}
+	sl, code := s.exec.reserve(l)
 	if code != "" {
+		l.release()
 		return nil, code
 	}
 	return &Prepared{action: action, plan: pl, slot: sl}, ""
@@ -152,6 +161,14 @@ func (s *Service) Start(p *Prepared, owner, scope string, valid func() bool) (st
 		return "", agentbroker.CodeInvalidRequest
 	}
 	return s.exec.start(p.slot, p.action, owner, scope, func(ctx context.Context, h *opHandle) (Result, error) {
+		// Provider mutations are authorized only inside this approved
+		// operation, re-checked immediately before each is sent.
+		ctx = withOperationAuthority(ctx, func(c context.Context) error {
+			if valid != nil && !valid() {
+				return errNotAuthorized
+			}
+			return c.Err()
+		})
 		r := &run{ctx: ctx, svc: s, vault: s.vault, h: h, valid: valid}
 		err := s.execute(r, p.plan)
 		return *r.res0(), err
@@ -181,12 +198,24 @@ func (s *Service) Close() {
 }
 
 // execute reads the control credentials, builds the ports and runs the
-// action. The credential buffers are wiped when it returns.
+// action. When it returns, every port is closed (its adapters wipe their
+// credential copies) and then the credential buffers are wiped.
 func (s *Service) execute(r *run, pl plan) error {
 	var bufs [][]byte
 	defer func() {
 		for _, b := range bufs {
 			wipe(b)
+		}
+	}()
+	defer func() {
+		if r.neon != nil {
+			_ = r.neon.Close()
+		}
+		if r.vercel != nil {
+			_ = r.vercel.Close()
+		}
+		if r.stripe != nil {
+			_ = r.stripe.Close()
 		}
 	}()
 	if err := r.step(StepControl, CodeControlRefused, func() error {
@@ -208,16 +237,27 @@ func (s *Service) execute(r *run, pl plan) error {
 			}
 			var err error
 			switch name {
+			// A port is kept only when the factory succeeded, so a nil
+			// interface (never a typed nil) is what the closer skips.
 			case ControlNeon:
-				r.neon, err = s.factory.Neon(cred)
+				var p NeonPort
+				if p, err = s.factory.Neon(cred); err == nil && p != nil {
+					r.neon = p
+				}
 			case ControlVercel:
-				r.vercel, err = s.factory.Vercel(cred)
+				var p VercelPort
+				if p, err = s.factory.Vercel(cred); err == nil && p != nil {
+					r.vercel = p
+				}
 			case ControlStripe:
 				// v1 refuses live-mode Stripe keys.
 				if !bytes.HasPrefix(cred, []byte("sk_test_")) && !bytes.HasPrefix(cred, []byte("rk_test_")) {
 					return fail(CodeControlRefused)
 				}
-				r.stripe, err = s.factory.Stripe(cred)
+				var p StripePort
+				if p, err = s.factory.Stripe(cred); err == nil && p != nil {
+					r.stripe = p
+				}
 			}
 			if err != nil {
 				return fail(CodeControlRefused)
@@ -303,6 +343,9 @@ func (r *run) checkHealth(deploymentURL, path string) error {
 	n := 0
 	for {
 		if err := r.vercel.CheckHealth(r.ctx, deploymentURL, path); err != nil {
+			if errors.Is(err, ErrHealthProtected) {
+				return fail(CodeHealthProtected)
+			}
 			return fail(CodeHealthFailed)
 		}
 		now := r.svc.clock.Now()

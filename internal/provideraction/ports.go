@@ -15,6 +15,7 @@ package provideraction
 import (
 	"context"
 	"errors"
+	"io"
 
 	"github.com/GeorgeQLe/envbank/internal/lifecycle"
 )
@@ -49,8 +50,12 @@ type NeonProject struct {
 	Database  string
 }
 
-// NeonPort is the Neon control-plane surface the actions need.
+// NeonPort is the Neon control-plane surface the actions need. Close ends
+// the port's use of its credential: the service calls it when the operation
+// ends, before it wipes the credential buffer, and the port must wipe every
+// copy it made.
 type NeonPort interface {
+	io.Closer
 	// CreateProject creates a project and writes its owner role's pooled and
 	// direct connection URIs to the sinks. The broker passes discarding sinks:
 	// owner credentials are never persisted.
@@ -82,8 +87,10 @@ type VercelEnv struct {
 	GitBranch string // preview only; empty for all preview branches
 }
 
-// VercelPort is the Vercel API surface the actions need.
+// VercelPort is the Vercel API surface the actions need. Close as for
+// NeonPort.
 type VercelPort interface {
+	io.Closer
 	CreateProject(ctx context.Context, teamID, name, gitRepo, framework string) (projectID string, err error)
 	DeleteProject(ctx context.Context, teamID, projectID string) error
 	// UpsertSensitiveEnv creates or replaces key as a sensitive env var,
@@ -95,7 +102,9 @@ type VercelPort interface {
 	// base URL.
 	WaitReady(ctx context.Context, teamID, deploymentID string) (deploymentURL string, err error)
 	// CheckHealth makes one health request to deploymentURL+path and
-	// returns nil only for a healthy (2xx) answer.
+	// returns nil only for a healthy (2xx) answer. An answer showing the
+	// deployment is behind Vercel deployment protection is ErrHealthProtected
+	// (never bypassed).
 	CheckHealth(ctx context.Context, deploymentURL, path string) error
 }
 
@@ -106,7 +115,9 @@ type StripeWebhook struct {
 }
 
 // StripePort is the Stripe API surface the actions need (test mode only).
+// Close as for NeonPort.
 type StripePort interface {
+	io.Closer
 	// CreateWebhook creates an endpoint and stores its whsec_ signing secret
 	// through secret before returning.
 	CreateWebhook(ctx context.Context, url string, events []string, secret *lifecycle.SecretSink) (endpointID string, err error)
@@ -147,3 +158,39 @@ type Vault interface {
 // ErrMissing is returned by Vault.Latest for an absent record, and by the
 // BindingStore loads for an absent object.
 var ErrMissing = errors.New("record not found")
+
+// ErrHealthProtected is returned by VercelPort.CheckHealth when the
+// deployment answered as protected (Vercel deployment protection, HTTP 401).
+// The health step then fails with CodeHealthProtected; protection is never
+// bypassed.
+var ErrHealthProtected = errors.New("deployment is protected")
+
+// CodeHealthProtected: the health check reached a deployment behind Vercel
+// deployment protection (401). Nothing was invalidated; the owner either
+// disables protection for the throwaway project or names a health path the
+// deployment serves unprotected.
+const CodeHealthProtected = "HEALTH_PROTECTED"
+
+type authorityKey struct{}
+
+var errNotAuthorized = errors.New("operation not authorized")
+
+func withOperationAuthority(ctx context.Context, check func(context.Context) error) context.Context {
+	return context.WithValue(ctx, authorityKey{}, check)
+}
+
+// OperationAuthority reports whether ctx belongs to a running, approved
+// provider operation whose grant is still valid. Ports call it immediately
+// before each provider mutation they send (for example through Vercel's
+// WithMutationAuthorization): outside an operation started by the service
+// it always fails.
+func OperationAuthority(ctx context.Context) error {
+	if ctx == nil {
+		return errNotAuthorized
+	}
+	check, ok := ctx.Value(authorityKey{}).(func(context.Context) error)
+	if !ok || check == nil {
+		return errNotAuthorized
+	}
+	return check(ctx)
+}

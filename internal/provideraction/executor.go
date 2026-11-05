@@ -62,9 +62,10 @@ type operation struct {
 // slot is a reserved place to run one operation (taken before the owner
 // is prompted, so an approved action never finds the executor full).
 type slot struct {
-	e    *Executor
-	used bool
-	once sync.Once
+	e     *Executor
+	used  bool
+	once  sync.Once
+	lease *lease // resource keys, held until the operation ends
 }
 
 // Executor runs operations asynchronously with bounded concurrency and a
@@ -76,7 +77,8 @@ type Executor struct {
 	mu      sync.Mutex
 	running int // reserved or running
 	ops     map[string]*operation
-	order   []*operation // oldest first, for eviction
+	order   []*operation    // oldest first, for eviction
+	locks   map[string]bool // resource keys held by reserved or running operations
 	closed  bool
 	base    context.Context
 	stop    context.CancelCauseFunc
@@ -95,11 +97,13 @@ func NewExecutor(maxRunning, maxJournal int, timeout time.Duration) *Executor {
 		timeout = DefaultOperationTimeout
 	}
 	base, stop := context.WithCancelCause(context.Background())
-	return &Executor{maxRunning: maxRunning, maxJournal: maxJournal, timeout: timeout, ops: map[string]*operation{}, base: base, stop: stop}
+	return &Executor{maxRunning: maxRunning, maxJournal: maxJournal, timeout: timeout, ops: map[string]*operation{}, locks: map[string]bool{}, base: base, stop: stop}
 }
 
-// reserve takes a run slot, or returns a fixed refusal code.
-func (e *Executor) reserve() (*slot, string) {
+// reserve takes a run slot, or returns a fixed refusal code. The slot owns
+// l (which may be nil) from then on: it is released with the slot, or when
+// the started operation finishes.
+func (e *Executor) reserve(l *lease) (*slot, string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -109,7 +113,7 @@ func (e *Executor) reserve() (*slot, string) {
 		return nil, agentbroker.CodeBusy
 	}
 	e.running++
-	return &slot{e: e}, ""
+	return &slot{e: e, lease: l}, ""
 }
 
 // release frees an unused slot (the owner declined, or the start failed).
@@ -123,6 +127,7 @@ func (s *slot) release() {
 		}
 		s.e.mu.Lock()
 		s.e.running--
+		s.lease.releaseLocked()
 		s.e.mu.Unlock()
 	})
 }
@@ -181,14 +186,15 @@ func (e *Executor) start(s *slot, action, owner, scope string, fn func(ctx conte
 		h := &opHandle{e: e, op: op}
 		h.set(func(op *operation) { op.state = StateRunning })
 		res, err := fn(tctx, h)
-		e.finish(op, res, err, tctx)
+		e.finish(op, s.lease, res, err, tctx)
 	}()
 	return id, ""
 }
 
-func (e *Executor) finish(op *operation, res Result, err error, ctx context.Context) {
+func (e *Executor) finish(op *operation, l *lease, res Result, err error, ctx context.Context) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	l.releaseLocked()
 	op.result = res.clone()
 	op.finished = true
 	e.running--
