@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/GeorgeQLe/envbank/internal/agentbroker"
+	"github.com/GeorgeQLe/envbank/internal/approval"
 	"github.com/GeorgeQLe/envbank/internal/ownerinput"
 )
 
@@ -15,13 +16,36 @@ type secretSource interface {
 }
 
 // ownerSurface routes owner SECRET entry to a verified desktop provider when
-// one is paired, and everything else (plan confirmation, run approvals,
-// status) to the broker terminal. If the provider is unavailable or fails
-// verification, it falls back to the terminal and says so there; an explicit
+// one is paired, displays requests and status in the broker terminal, and
+// sends every approval to the biometric approver (typing in the terminal
+// approves nothing). If the provider is unavailable or fails verification,
+// secret entry falls back to the terminal and says so there; an explicit
 // decline in the provider is a decline, never a silent fallback.
 type ownerSurface struct {
 	*agentbroker.TerminalPrompter
+	approver approval.Approver
 	provider secretSource // nil ⇒ terminal only
+}
+
+// Confirm implements setupOwner: the plan is shown in the terminal for
+// reference and decided with Touch ID.
+func (o *ownerSurface) Confirm(ctx context.Context, title string, lines []string, reason string) approval.Outcome {
+	o.ShowPlan(title, lines)
+	return confirmWith(ctx, o.approver, o, reason)
+}
+
+// confirmWith runs one approval and reports it in the terminal.
+func confirmWith(ctx context.Context, a approval.Approver, n interface{ Notify(string) }, reason string) approval.Outcome {
+	if a == nil || !a.Available() {
+		n.Notify("Touch ID is unavailable on this Mac: refused (nothing typed here can approve)")
+		return approval.Unavailable
+	}
+	n.Notify("waiting for Touch ID (typing in this terminal approves nothing)")
+	out := a.Approve(ctx, reason)
+	if out != approval.Approved {
+		n.Notify("not approved (" + out.String() + ")")
+	}
+	return out
 }
 
 func (o *ownerSurface) entry(ctx context.Context, purpose, title, detail, subject string, minBytes int, confirm bool) ([]byte, bool, bool) {
@@ -66,15 +90,9 @@ func (o *ownerSurface) NewPassphrase(ctx context.Context, title string, minBytes
 	return nil, false, nil
 }
 
-// ReadSecret implements agentbroker.Prompter for agent-requested ingest.
+// ReadSecret implements agentbroker.Prompter for agent-requested ingest. A
+// replacement was already approved with Touch ID by the broker.
 func (o *ownerSurface) ReadSecret(ctx context.Context, req agentbroker.Ingest) ([]byte, bool, error) {
-	if o.provider != nil && req.Replaces {
-		// Replacing an existing secret needs an explicit yes in the terminal first.
-		ok, err := o.ConfirmPlan(ctx, "Replace "+req.Name+"?", []string{req.Name + " already exists; an agent asked to replace it.", "reason: " + req.Reason})
-		if err != nil || !ok {
-			return nil, false, err
-		}
-	}
 	v, ok, handled := o.entry(ctx, ownerinput.PurposeSecretVal, "Store "+req.Name, req.Reason, req.Name, agentbroker.Limits.MinValueBytes, true)
 	if !handled {
 		return o.TerminalPrompter.ReadSecret(ctx, req)
@@ -86,15 +104,18 @@ type pairer interface {
 	Pair(ctx context.Context, confirm func(id ownerinput.Identity, code string) bool) error
 }
 
-// pairProvider pairs a desktop provider for this broker session in the terminal.
-func pairProvider(ctx context.Context, p pairer, t *agentbroker.TerminalPrompter) error {
+// pairProvider pairs a desktop provider for this broker session. The details
+// are shown in the terminal; the owner confirms the code with Touch ID.
+func pairProvider(ctx context.Context, p pairer, t *agentbroker.TerminalPrompter, a approval.Approver) error {
 	return p.Pair(ctx, func(id ownerinput.Identity, code string) bool {
-		ok, err := t.ConfirmPlan(ctx, "Pair Chromux secure input", []string{
+		t.ShowPlan("Pair Chromux secure input", []string{
 			fmt.Sprintf("service signed by team %s (Developer ID), identifier %s; verified by macOS on every message", id.TeamID, id.Identifier),
 			"service build cdhash " + id.CDHash + " (pinned for this session)",
 			"Chromux should now show pairing code " + code + ".",
-			"Answer yes only if the Chromux window shows exactly this code.",
+			"Touch ID only if the Chromux window shows exactly this code.",
 		})
-		return err == nil && ok
+		reason := approval.Reason("pair with Chromux secure input showing code %s (team %s, %s, build %.12s)",
+			code, approval.Clean(id.TeamID, 16), approval.Clean(id.Identifier, 64), approval.Clean(id.CDHash, 64))
+		return confirmWith(ctx, a, t, reason) == approval.Approved
 	})
 }

@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/GeorgeQLe/envbank/internal/approval"
 )
 
 // Vault is the owner-unlocked store. Implementations never log values.
@@ -20,15 +23,6 @@ type Vault interface {
 // ErrMissing is returned by Vault.Values when a named secret does not exist.
 var ErrMissing = errors.New("secret not found")
 
-// Decision is the owner's answer to a run request.
-type Decision int
-
-const (
-	Deny Decision = iota
-	AllowOnce
-	AllowAlways
-)
-
 // Ingest describes a value the agent asked the owner to enter.
 type Ingest struct {
 	Name     string
@@ -36,14 +30,45 @@ type Ingest struct {
 	Replaces bool
 }
 
-// Prompter is the owner channel (the broker terminal). Calls are serialized by
-// the broker; implementations need not be concurrency-safe.
+// Prompter is the owner's display and secret-entry channel (the broker
+// terminal, with secret entry optionally routed to a verified desktop host).
+// It approves nothing: every approval goes to the Approver. Calls are
+// serialized by the broker; implementations need not be concurrency-safe.
 type Prompter interface {
-	ApproveRun(ctx context.Context, cmd Command) (Decision, error)
+	// ShowRun displays a run request in full for reference while the owner
+	// decides with Touch ID. It reads no input.
+	ShowRun(cmd Command, who string, always bool)
 	// ReadSecret returns the entered value, or ok=false when the owner declined.
 	ReadSecret(ctx context.Context, req Ingest) (value []byte, ok bool, err error)
 	// Notify shows a one-line status (no values) in the owner terminal.
 	Notify(line string)
+}
+
+// Caller identifies who a request is for. The authorization layer builds it
+// from a verified host session and an active grant; the development socket
+// uses LegacyCaller.
+type Caller struct {
+	// Who is an owner-visible, already-bounded description for prompts.
+	Who string
+	// Scope namespaces "always" approvals (a grant id): they end with it.
+	Scope string
+	// Valid, when set, is re-checked after every approval and before acting,
+	// so a revoked or expired grant stops a request in flight.
+	Valid func() bool
+}
+
+// LegacyCaller is the unauthenticated development socket's caller.
+var LegacyCaller = Caller{Who: "an unauthenticated local client (development socket)", Scope: "legacy-socket"}
+
+func (c Caller) valid() bool { return c.Valid == nil || c.Valid() }
+
+type callerKey struct{}
+
+// CallerFrom returns the caller a request is being handled for (for owner
+// prompts in the setup applier).
+func CallerFrom(ctx context.Context) (Caller, bool) {
+	c, ok := ctx.Value(callerKey{}).(Caller)
+	return c, ok
 }
 
 // Runner executes an approved command with exactly the given environment.
@@ -67,13 +92,14 @@ type Broker struct {
 	vault    Vault // nil in setup mode (no vault on this device yet)
 	setup    Setup
 	prompter Prompter
+	approver approval.Approver
 	runner   Runner
 	path     string   // broker's own PATH for resolution
 	baseEnv  []string // minimal non-secret environment for children
 
-	promptMu sync.Mutex
-	queued   chan struct{}
-	runs     chan struct{}
+	prompt chan struct{} // the owner channel: one holder at a time
+	queued chan struct{}
+	runs   chan struct{}
 
 	mu     sync.Mutex
 	always map[string]bool
@@ -93,6 +119,8 @@ type Options struct {
 	Vault    Vault
 	Setup    Setup
 	Prompter Prompter
+	// Approver decides every approval (Touch ID in production).
+	Approver approval.Approver
 	Runner   Runner
 	Path     string
 	BaseEnv  []string
@@ -100,12 +128,12 @@ type Options struct {
 
 // New returns a broker. Every dependency is required.
 func New(o Options) (*Broker, error) {
-	if (o.Vault == nil && o.Setup == nil) || o.Prompter == nil || o.Runner == nil {
-		return nil, errors.New("agentbroker: a vault (or setup), prompter and runner are required")
+	if (o.Vault == nil && o.Setup == nil) || o.Prompter == nil || o.Runner == nil || o.Approver == nil {
+		return nil, errors.New("agentbroker: a vault (or setup), prompter, approver and runner are required")
 	}
 	return &Broker{
-		vault: o.Vault, setup: o.Setup, prompter: o.Prompter, runner: o.Runner, path: o.Path, baseEnv: append([]string(nil), o.BaseEnv...),
-		queued: make(chan struct{}, Limits.QueuedPrompts), runs: make(chan struct{}, Limits.ConcurrentRuns), always: map[string]bool{},
+		vault: o.Vault, setup: o.Setup, prompter: o.Prompter, approver: o.Approver, runner: o.Runner, path: o.Path, baseEnv: append([]string(nil), o.BaseEnv...),
+		prompt: make(chan struct{}, 1), queued: make(chan struct{}, Limits.QueuedPrompts), runs: make(chan struct{}, Limits.ConcurrentRuns), always: map[string]bool{},
 	}, nil
 }
 
@@ -119,8 +147,53 @@ func (b *Broker) Close() {
 
 func refuse(code string) Response { return Response{V: ProtocolVersion, Code: code} }
 
-// Handle processes one request. It never returns a secret value.
+// ForgetAlways drops every "always" approval made under scope (a grant that
+// was revoked or expired).
+func (b *Broker) ForgetAlways(scope string) {
+	prefix := scope + "\x00"
+	b.mu.Lock()
+	for k := range b.always {
+		if strings.HasPrefix(k, prefix) {
+			delete(b.always, k)
+		}
+	}
+	b.mu.Unlock()
+}
+
+// Approve asks the owner (through the Approver) and maps the outcome to a
+// response: ok, DENIED_BY_OWNER or APPROVAL_UNAVAILABLE. Callers hold the
+// owner channel (WithOwnerPrompt).
+func (b *Broker) Approve(ctx context.Context, reason string) Response {
+	if !b.approver.Available() {
+		b.prompter.Notify("Touch ID is unavailable on this Mac: approval refused (nothing typed here can approve)")
+		return refuse(CodeApprovalUnavailable)
+	}
+	b.prompter.Notify("waiting for Touch ID (typing in this terminal approves nothing)")
+	switch b.approver.Approve(ctx, reason) {
+	case approval.Approved:
+		if ctx.Err() != nil {
+			return refuse(CodeDenied)
+		}
+		return Response{V: ProtocolVersion, OK: true}
+	case approval.Unavailable:
+		b.prompter.Notify("Touch ID is unavailable: approval refused")
+		return refuse(CodeApprovalUnavailable)
+	default:
+		b.prompter.Notify("not approved")
+		return refuse(CodeDenied)
+	}
+}
+
+// Handle processes one request for the development socket. It never returns
+// a secret value.
 func (b *Broker) Handle(ctx context.Context, req Request) Response {
+	return b.HandleFor(ctx, LegacyCaller, req)
+}
+
+// HandleFor processes one request for caller, which the authorization layer
+// has already checked against an active grant. It never returns a value.
+func (b *Broker) HandleFor(ctx context.Context, caller Caller, req Request) Response {
+	ctx = context.WithValue(ctx, callerKey{}, caller)
 	b.mu.Lock()
 	closed := b.closed
 	b.mu.Unlock()
@@ -147,15 +220,20 @@ func (b *Broker) Handle(ctx context.Context, req Request) Response {
 		}
 		return Response{V: ProtocolVersion, OK: true, Names: names}
 	case OpRequest:
-		return b.ingest(ctx, req)
+		return b.ingest(ctx, caller, req)
 	case OpRun:
-		return b.run(ctx, req)
+		return b.run(ctx, caller, req)
 	default:
 		return refuse(CodeInvalidRequest)
 	}
 }
 
-// withPrompt serializes the owner channel; a bounded queue waits, the rest are busy.
+// WithOwnerPrompt serializes the owner channel (prompts, Touch ID and secret
+// entry); a bounded queue waits, the rest are busy.
+func (b *Broker) WithOwnerPrompt(ctx context.Context, fn func() Response) Response {
+	return b.withPrompt(ctx, fn)
+}
+
 func (b *Broker) withPrompt(ctx context.Context, fn func() Response) Response {
 	select {
 	case b.queued <- struct{}{}:
@@ -163,16 +241,22 @@ func (b *Broker) withPrompt(ctx context.Context, fn func() Response) Response {
 		return refuse(CodeBusy)
 	}
 	defer func() { <-b.queued }()
-	b.promptMu.Lock()
-	defer b.promptMu.Unlock()
+	// Waiting is bounded by the request's own context (the host gives up on
+	// an agent request after 150 s), so a queued request never hangs.
+	select {
+	case b.prompt <- struct{}{}:
+	case <-ctx.Done():
+		return refuse(CodeDenied)
+	}
+	defer func() { <-b.prompt }()
 	if ctx.Err() != nil {
 		return refuse(CodeDenied) // the agent went away while queued: never prompt for it
 	}
 	return fn()
 }
 
-func (b *Broker) ingest(ctx context.Context, req Request) Response {
-	if !ValidName(req.Name) || len(req.Secrets) != 0 || len(req.Argv) != 0 || req.Dir != "" || req.TimeoutSeconds != 0 ||
+func (b *Broker) ingest(ctx context.Context, caller Caller, req Request) Response {
+	if !ValidName(req.Name) || len(req.Secrets) != 0 || len(req.Argv) != 0 || req.Dir != "" || req.TimeoutSeconds != 0 || req.Always ||
 		len(req.Reason) > Limits.ReasonBytes || !utf8.ValidString(req.Reason) {
 		return refuse(CodeInvalidRequest)
 	}
@@ -181,10 +265,30 @@ func (b *Broker) ingest(ctx context.Context, req Request) Response {
 		return refuse(CodeVaultFailed)
 	}
 	return b.withPrompt(ctx, func() Response {
+		if !caller.valid() {
+			return refuse(CodeNotAuthorized)
+		}
+		if exists {
+			// Replacing a value is an approval: Touch ID with the exact action.
+			b.prompter.Notify(req.Name + " already exists; " + caller.Who + " asked to replace it (reason: " + Sanitize(req.Reason, Limits.ReasonBytes) + ")")
+			reason := approval.Reason("replace the existing EnvBank secret %s for %s", req.Name, caller.Who)
+			if r := b.Approve(ctx, reason); !r.OK {
+				if r.Code == CodeApprovalUnavailable {
+					return r
+				}
+				return Response{V: ProtocolVersion, OK: true, State: StateDenied}
+			}
+			if !caller.valid() {
+				return refuse(CodeNotAuthorized)
+			}
+		}
 		value, ok, err := b.prompter.ReadSecret(ctx, Ingest{Name: req.Name, Reason: req.Reason, Replaces: exists})
 		defer wipe(value)
 		if err != nil || !ok || ctx.Err() != nil { // never act on a request the agent cancelled
 			return Response{V: ProtocolVersion, OK: true, State: StateDenied}
+		}
+		if !caller.valid() {
+			return refuse(CodeNotAuthorized)
 		}
 		if len(value) < Limits.MinValueBytes || len(value) > Limits.MaxValueBytes {
 			b.prompter.Notify("value rejected: length must be 8 bytes to 64 KiB; nothing stored")
@@ -199,7 +303,7 @@ func (b *Broker) ingest(ctx context.Context, req Request) Response {
 	})
 }
 
-func (b *Broker) run(ctx context.Context, req Request) Response {
+func (b *Broker) run(ctx context.Context, caller Caller, req Request) Response {
 	if req.Name != "" || req.Reason != "" || req.TimeoutSeconds < 0 {
 		return refuse(CodeInvalidRequest)
 	}
@@ -224,32 +328,39 @@ func (b *Broker) run(ctx context.Context, req Request) Response {
 			return refuse(CodeValueTooShort)
 		}
 	}
-	key := cmd.ApprovalKey()
+	key := caller.Scope + "\x00" + cmd.ApprovalKey()
 	b.mu.Lock()
 	approved := b.always[key]
 	b.mu.Unlock()
 	if !approved {
+		always := req.Always && cmd.AlwaysAllowed
 		resp := b.withPrompt(ctx, func() Response {
-			decision, err := b.prompter.ApproveRun(ctx, cmd)
-			if err != nil || decision == Deny || ctx.Err() != nil {
-				return refuse(CodeDenied)
+			if !caller.valid() {
+				return refuse(CodeNotAuthorized)
 			}
-			if decision == AllowAlways && !cmd.AlwaysAllowed {
-				b.prompter.Notify("approved once (always is not available for commands that run project code)")
-				decision = AllowOnce
+			if req.Always && !cmd.AlwaysAllowed {
+				b.prompter.Notify("always is not available for commands that run project code; asking for this run only")
 			}
-			if decision == AllowAlways {
+			b.prompter.ShowRun(cmd, caller.Who, always)
+			r := b.Approve(ctx, runReason(cmd, caller.Who, always))
+			if !r.OK {
+				return r
+			}
+			if always {
 				b.mu.Lock()
-				if !b.closed {
+				if !b.closed && caller.valid() {
 					b.always[key] = true
 				}
 				b.mu.Unlock()
 			}
-			return Response{OK: true}
+			return r
 		})
 		if !resp.OK {
 			return resp
 		}
+	}
+	if !caller.valid() {
+		return refuse(CodeNotAuthorized)
 	}
 	select {
 	case b.runs <- struct{}{}:
@@ -304,7 +415,7 @@ func (b *Broker) currentVault() Vault {
 
 // applySetup runs only in setup mode, one at a time, through the owner channel.
 func (b *Broker) applySetup(ctx context.Context, req Request) Response {
-	if req.Name != "" || req.Reason != "" || len(req.Secrets) != 0 || len(req.Argv) != 0 || req.Dir != "" || req.TimeoutSeconds != 0 || len(req.Setup) == 0 {
+	if req.Name != "" || req.Reason != "" || len(req.Secrets) != 0 || len(req.Argv) != 0 || req.Dir != "" || req.TimeoutSeconds != 0 || req.Always || len(req.Setup) == 0 {
 		return refuse(CodeInvalidRequest)
 	}
 	if b.currentVault() != nil || b.setup == nil {
@@ -333,6 +444,30 @@ func (b *Broker) applySetup(ctx context.Context, req Request) Response {
 		b.prompter.Notify("setup complete; vault unlocked for agent use")
 		return Response{V: ProtocolVersion, OK: true, State: StateApplied, Steps: done}
 	})
+}
+
+// runReason is the Touch ID text for a run: the exact action, bounded. The
+// broker terminal shows every argument and hash in full.
+func runReason(cmd Command, who string, always bool) string {
+	mode := "once"
+	if always {
+		mode = "always (this exact command, until the grant ends)"
+	}
+	args := make([]string, 0, len(cmd.Args))
+	for _, a := range cmd.Args {
+		args = append(args, quoteArg(a))
+	}
+	line := strings.TrimSpace(quoteArg(cmd.Executable) + " " + strings.Join(args, " "))
+	const room = 260
+	if len(line) > room {
+		cut := room
+		for cut > 0 && !utf8.RuneStart(line[cut]) {
+			cut--
+		}
+		line = line[:cut] + "… (full command in the broker terminal)"
+	}
+	return approval.Reason("run %s with %s in %s for %s, %s (exe sha256 %.12s)",
+		line, strings.Join(cmd.Secrets, ", "), quoteArg(cmd.Dir), who, mode, cmd.ExecutableSHA256)
 }
 
 func clip(b []byte) ([]byte, bool) {

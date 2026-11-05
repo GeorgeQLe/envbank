@@ -21,8 +21,10 @@ const (
 	ToolSetupApply = "envbank_device_setup_apply"
 )
 
-// MCPExtension forwards the agent tools to an owner-run broker. It holds no
-// vault access itself: the MCP process can run inside the agent sandbox.
+// MCPExtension forwards the agent tools to an owner-run broker over the
+// development Unix socket. It holds no vault access itself. It reaches only
+// brokers started with --legacy-socket (development only, unqualified):
+// authorized agents use the desktop host's tools instead.
 type MCPExtension struct {
 	Socket string
 }
@@ -38,8 +40,8 @@ func (MCPExtension) Tools() []mcpserver.ToolDefinition {
 		{Name: ToolNames, Description: "List the NAMES of secrets in the owner's EnvBank vault. Never returns values.", Schema: obj(map[string]any{})},
 		{Name: ToolRequest, Description: "Ask the owner to store a secret under NAME. The owner types the value into the EnvBank broker terminal; you receive only 'stored' or 'denied', never the value. Explain why in `reason`.",
 			Schema: obj(map[string]any{"name": str, "reason": str}, "name", "reason")},
-		{Name: ToolRun, Description: "Run a command with the named secrets set as environment variables. The broker (not you) spawns it after the owner approves this exact command (absolute working directory required; no shell -c / inline interpreter code). stdout/stderr come back with secret values redacted. Use this instead of reading secrets.",
-			Schema: obj(map[string]any{"secrets": strs, "argv": strs, "dir": str, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": int(Limits.MaxTimeout.Seconds())}}, "secrets", "argv", "dir")},
+		{Name: ToolRun, Description: "Run a command with the named secrets set as environment variables. The broker (not you) spawns it after the owner approves this exact command with Touch ID (absolute working directory required; no shell -c / inline interpreter code). Set `always` to ask for approval of this exact command until the broker locks (fixed programs only). stdout/stderr come back with secret values redacted. Use this instead of reading secrets.",
+			Schema: obj(map[string]any{"secrets": strs, "argv": strs, "dir": str, "always": map[string]any{"type": "boolean"}, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": int(Limits.MaxTimeout.Seconds())}}, "secrets", "argv", "dir")},
 		{Name: ToolSetupPlan, Description: "Validate a proposed EnvBank device setup (sync mode, vault/backup directories, identity path) against this machine's real volumes. Read-only: changes nothing.", Schema: setupSchema(obj)},
 		{Name: ToolSetupApply, Description: "Ask the owner-held broker (setup mode) to apply a device setup. The broker re-plans it, shows it to the owner, and the owner types every passphrase there; you receive only the outcome and completed step ids.", Schema: setupSchema(obj)},
 	}
@@ -69,11 +71,12 @@ func (e MCPExtension) Call(ctx context.Context, name string, raw json.RawMessage
 			Argv           []string `json:"argv"`
 			Dir            string   `json:"dir"`
 			TimeoutSeconds int      `json:"timeout_seconds"`
+			Always         bool     `json:"always"`
 		}
 		if !strictDecode(raw, &args) {
 			return nil, errors.New(CodeInvalidRequest)
 		}
-		req = Request{Op: OpRun, Secrets: args.Secrets, Argv: args.Argv, Dir: args.Dir, TimeoutSeconds: args.TimeoutSeconds}
+		req = Request{Op: OpRun, Secrets: args.Secrets, Argv: args.Argv, Dir: args.Dir, TimeoutSeconds: args.TimeoutSeconds, Always: args.Always}
 	case ToolSetupPlan, ToolSetupApply:
 		var args setup.Request
 		if !strictDecode(raw, &args) {
@@ -96,7 +99,7 @@ func (e MCPExtension) Call(ctx context.Context, name string, raw json.RawMessage
 	}
 	resp, err := Call(ctx, e.Socket, req)
 	if err != nil {
-		return nil, errors.New(CodeBrokerDown + ": start `envbank agent-broker` in your own terminal")
+		return nil, errors.New(CodeBrokerDown + ": no development-socket broker (the owner must start `envbank agent-broker --legacy-socket`; authorized agents use the desktop host's EnvBank tools)")
 	}
 	return resp, nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/GeorgeQLe/envbank/internal/agentbroker"
+	"github.com/GeorgeQLe/envbank/internal/approval"
+	"github.com/GeorgeQLe/envbank/internal/authz"
 	"github.com/GeorgeQLe/envbank/internal/client"
 	"github.com/GeorgeQLe/envbank/internal/mcpserver"
 	"github.com/GeorgeQLe/envbank/internal/ownerinput"
@@ -101,7 +104,10 @@ func (v *brokerVault) wipe() {
 // agentBrokerCommand runs the owner-held broker in the owner's terminal.
 func agentBrokerCommand(args []string) error {
 	fs := flag.NewFlagSet("agent-broker", flag.ContinueOnError)
-	socket := fs.String("socket", agentbroker.DefaultSocketPath(), "Unix socket agents connect to")
+	legacySocket := fs.Bool("legacy-socket", false, "DEVELOPMENT ONLY, unqualified: also serve the unauthenticated Unix-socket agent API (envbank agent, envbank mcp serve)")
+	socket := fs.String("socket", agentbroker.DefaultSocketPath(), "Unix socket for --legacy-socket")
+	allowPassword := fs.Bool("allow-password-fallback", false, "let approvals fall back to the login password when Touch ID fails (default: biometrics only)")
+	testApprover := registerTestApprover(fs)
 	idle := fs.Duration("idle-lock", 30*time.Minute, "lock (exit) after this long without requests")
 	lifetime := fs.Duration("max-lifetime", 12*time.Hour, "lock (exit) after this long regardless of activity")
 	setupMode := fs.Bool("setup", false, "allow agent-proposed setup when this device has no vault yet")
@@ -116,13 +122,26 @@ func agentBrokerCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 || *idle < time.Minute || *lifetime < *idle {
-		return errors.New("usage: envbank agent-broker [--socket PATH] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]")
+		return errors.New("usage: envbank agent-broker [--owner-input chromux --owner-input-unqualified] [--legacy-socket [--socket PATH]] [--allow-password-fallback] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]")
 	}
 	terminal, err := agentbroker.NewTerminalPrompter(os.Stdin, os.Stdout)
 	if err != nil {
 		return err
 	}
-	prompter := &ownerSurface{TerminalPrompter: terminal}
+	// Every grant and approval is a Touch ID check; typing in this terminal
+	// approves nothing.
+	var approver approval.Approver = approval.LocalAuth{AllowPasscode: *allowPassword}
+	if t := testApprover(); t != nil {
+		approver = t
+	}
+	if *allowPassword {
+		fmt.Println("WARNING: --allow-password-fallback: an approval can also be made with the login password, which a process that has seen you type it could enter.")
+	}
+	if !approver.Available() {
+		fmt.Println("WARNING: Touch ID is unavailable on this Mac (no enrolled biometry or no sensor): every grant and approval will be refused (APPROVAL_UNAVAILABLE).")
+	}
+	prompter := &ownerSurface{TerminalPrompter: terminal, approver: approver}
+	var paired *ownerinput.XPCProvider
 	switch *ownerInput {
 	case "terminal":
 	case "chromux":
@@ -135,16 +154,20 @@ func agentBrokerCommand(args []string) error {
 		p := &ownerinput.XPCProvider{Service: *oiService, TeamID: *oiTeam, Identifier: *oiIdent}
 		// The owner compares the code in Chromux with this terminal; allow time to do it.
 		pctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		err := pairProvider(pctx, p, terminal)
+		err := pairProvider(pctx, p, terminal, approver)
 		cancel()
 		if err != nil {
 			fmt.Fprintf(os.Stdout, "Chromux secure input not paired (%v); secrets will be typed in this terminal.\n", err)
 		} else {
 			prompter.provider = p
+			paired = p
 			fmt.Println("Chromux secure input paired for this session (UNQUALIFIED: installed-build no-leak qualification pending).")
 		}
 	default:
 		return errors.New("--owner-input must be terminal or chromux")
+	}
+	if paired == nil && !*legacySocket {
+		return errors.New("no agent channel: authorized agents reach the broker only through a paired Chromux (--owner-input chromux --owner-input-unqualified); --legacy-socket is for development only")
 	}
 	state, err := term.GetState(int(os.Stdin.Fd()))
 	if err != nil {
@@ -177,7 +200,7 @@ func agentBrokerCommand(args []string) error {
 			return err
 		}
 		applier := &setupApplier{allowExistingServer: *useExisting, owner: prompter, inspector: setup.SystemInspector{}, service: launchdService{executable: exe, home: home, uid: os.Getuid()}, now: time.Now}
-		if broker, err = agentbroker.New(agentbroker.Options{Setup: applier, Prompter: prompter, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()}); err != nil {
+		if broker, err = agentbroker.New(agentbroker.Options{Setup: applier, Prompter: prompter, Approver: approver, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()}); err != nil {
 			return err
 		}
 		defer func() {
@@ -211,22 +234,27 @@ func agentBrokerCommand(args []string) error {
 		if _, err := vault.Names(context.Background()); err != nil {
 			return fmt.Errorf("vault check failed: %w", err)
 		}
-		if broker, err = agentbroker.New(agentbroker.Options{Vault: vault, Prompter: prompter, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()}); err != nil {
+		if broker, err = agentbroker.New(agentbroker.Options{Vault: vault, Prompter: prompter, Approver: approver, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()}); err != nil {
 			return err
 		}
 	}
 	defer broker.Close()
-	listener, err := agentbroker.Listen(*socket)
-	if err != nil {
-		return err
+	gate := authz.NewGate(broker, prompter, nil)
+	defer gate.Close() // grants are memory-only and end when the broker locks
+	var listener net.Listener
+	if *legacySocket {
+		if listener, err = agentbroker.Listen(*socket); err != nil {
+			return err
+		}
+		defer os.Remove(*socket)
 	}
-	defer os.Remove(*socket)
 	ctx, stop := shutdownSignalContext()
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, *lifetime)
 	defer cancel()
 	var last atomic.Int64
 	last.Store(time.Now().UnixNano())
+	activity := func() { last.Store(time.Now().UnixNano()) }
 	go func() {
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
@@ -243,11 +271,35 @@ func agentBrokerCommand(args []string) error {
 			}
 		}
 	}()
-	fmt.Printf("EnvBank agent broker unlocked. Agents connect via %s\n", *socket)
-	fmt.Println("Approvals and secret entry happen here. Keep this terminal to yourself; Ctrl-C locks.")
-	err = agentbroker.Serve(ctx, listener, broker, func() { last.Store(time.Now().UnixNano()) })
+	var wg sync.WaitGroup
+	var serveErr error
+	if paired != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ch := &ownerinput.AgentChannel{Provider: paired, Handler: gate, Notify: prompter.Notify, Activity: activity}
+			if err := ch.Run(ctx); err != nil {
+				prompter.Notify("authorized-agent channel stopped: " + err.Error())
+			}
+		}()
+		fmt.Println("EnvBank agent broker unlocked. Authorized agents reach it through Chromux; each needs a grant you approve with Touch ID.")
+	}
+	if listener != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			serveErr = agentbroker.Serve(ctx, listener, broker, activity)
+			if serveErr != nil {
+				cancel()
+			}
+		}()
+		fmt.Printf("WARNING: --legacy-socket (DEVELOPMENT ONLY, UNQUALIFIED): any process running as you can make requests via %s, without a grant. Approvals still need Touch ID.\n", *socket)
+	}
+	fmt.Println("Approvals and grants need Touch ID; typing in this terminal approves nothing. Secret entry happens in Chromux or here. Ctrl-C locks.")
+	<-ctx.Done()
+	wg.Wait()
 	fmt.Println("EnvBank agent broker locked.")
-	return err
+	return serveErr
 }
 
 // brokerPassphrase prefers typing the passphrase into the broker terminal: a
@@ -293,6 +345,7 @@ func agentCommand(args []string) error {
 	case "run":
 		var secrets stringList
 		fs.Var(&secrets, "secret", "secret NAME to inject (repeatable)")
+		always := fs.Bool("always", false, "ask the owner to approve this exact command until the broker locks (fixed programs only)")
 		dir := fs.String("dir", "", "absolute working directory (default: current directory)")
 		timeout := fs.Int("timeout", 0, "seconds (default 120, max 1800)")
 		if err := fs.Parse(args[1:]); err != nil {
@@ -312,13 +365,13 @@ func agentCommand(args []string) error {
 			}
 			*dir = wd
 		}
-		req = agentbroker.Request{Op: agentbroker.OpRun, Secrets: secrets, Argv: argv, Dir: *dir, TimeoutSeconds: *timeout}
+		req = agentbroker.Request{Op: agentbroker.OpRun, Secrets: secrets, Argv: argv, Dir: *dir, TimeoutSeconds: *timeout, Always: *always}
 	default:
 		return fmt.Errorf("unknown agent subcommand %q (supported: names, request, run)", args[0])
 	}
 	resp, err := agentbroker.Call(ctx, *socket, req)
 	if err != nil {
-		return fmt.Errorf("%v: start `envbank agent-broker` in your own terminal", err)
+		return fmt.Errorf("%v: `envbank agent` reaches only a development broker started with --legacy-socket (authorized agents use the desktop host's EnvBank tools)", err)
 	}
 	if !resp.OK {
 		return errors.New(resp.Code)
@@ -358,7 +411,7 @@ func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 // mcpServe serves MCP on stdio with the agent secret tools forwarded to the broker.
 func mcpServe(args []string) error {
 	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
-	socket := fs.String("agent-broker-socket", agentbroker.DefaultSocketPath(), "agent broker socket for the envbank_secret_* tools")
+	socket := fs.String("agent-broker-socket", agentbroker.DefaultSocketPath(), "development broker socket (--legacy-socket brokers only) for the envbank_secret_* tools")
 	disable := fs.Bool("no-agent-broker", false, "omit the envbank_secret_* tools")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return errors.New("usage: envbank mcp serve [--agent-broker-socket PATH] [--no-agent-broker]")

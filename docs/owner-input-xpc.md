@@ -146,7 +146,8 @@ self-report) and `service_cdhash` (string).
 ## Broker behavior
 
 - **Pairing.** Pair once per session, using the 6-digit code shown in
-  Chromux and confirmed in the broker terminal. The broker prints the
+  Chromux. The code is shown in the broker terminal and confirmed with
+  Touch ID; the reason names the code (Unreleased; previously a typed yes). The broker prints the
   service's team, identifier and cdhash prefix.
 - **Pinning.** For the rest of the session the broker pins the service build
   it paired with by appending `and cdhash H"<service cdhash>"` to its peer

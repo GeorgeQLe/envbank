@@ -78,6 +78,9 @@ type Request struct {
 	Argv           []string `json:"argv,omitempty"`
 	Dir            string   `json:"dir,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+	// Always asks the owner to approve this exact command for the rest of the
+	// grant (offered only for fixed programs). The Touch ID reason says so.
+	Always bool `json:"always,omitempty"`
 	// Setup is a setup.Request (setup mode only). Re-planned by the broker.
 	Setup json.RawMessage `json:"setup,omitempty"`
 }
@@ -96,6 +99,17 @@ type Response struct {
 	Truncated  bool     `json:"truncated,omitempty"`
 	Redactions int      `json:"redactions,omitempty"`
 	Steps      []string `json:"steps,omitempty"`
+	// Grants lists the calling session's active grants (grant ops only).
+	Grants []GrantInfo `json:"grants,omitempty"`
+}
+
+// GrantInfo describes one active grant to the session that holds it. It
+// carries names, never values.
+type GrantInfo struct {
+	Secrets   []string `json:"secrets"` // empty for setup and relay grants
+	Scope     string   `json:"scope"`
+	GrantedAt string   `json:"granted_at"`
+	ExpiresAt string   `json:"expires_at"`
 }
 
 // Fixed refusal codes. Nothing caller-supplied or value-derived is ever echoed.
@@ -113,6 +127,13 @@ const (
 	CodeNotSetUp       = "VAULT_NOT_SET_UP"
 	CodeAlreadySetUp   = "ALREADY_SET_UP"
 	CodeSetupFailed    = "SETUP_FAILED"
+	// CodeNotAuthorized: no active grant of this session covers the request.
+	// The owner was not prompted.
+	CodeNotAuthorized = "NOT_AUTHORIZED"
+	// CodeApprovalUnavailable: biometric approval is not possible here.
+	CodeApprovalUnavailable = "APPROVAL_UNAVAILABLE"
+	// CodeNotSupported: a granted operation this broker build does not offer.
+	CodeNotSupported = "NOT_SUPPORTED"
 )
 
 // States for an ingest request.
@@ -120,4 +141,7 @@ const (
 	StateStored  = "stored"
 	StateDenied  = "denied"
 	StateApplied = "applied"
+	StateGranted = "granted"
+	StateRevoked = "revoked"
+	StateListed  = "listed"
 )

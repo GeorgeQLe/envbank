@@ -88,10 +88,12 @@ func quoteArg(a string) string {
 
 func (p *TerminalPrompter) bell() { fmt.Fprint(p.Out, "\a") }
 
-// ApproveRun implements Prompter.
-func (p *TerminalPrompter) ApproveRun(ctx context.Context, cmd Command) (Decision, error) {
+// ShowRun implements Prompter: the full request, for reference. It reads no
+// input; the owner decides with Touch ID.
+func (p *TerminalPrompter) ShowRun(cmd Command, who string, always bool) {
 	p.bell()
 	fmt.Fprintf(p.Out, "\n── EnvBank agent request: run a command with secrets ──\n")
+	fmt.Fprintf(p.Out, "  from:       %s\n", Sanitize(who, 300))
 	fmt.Fprintf(p.Out, "  executable: %s\n", quoteArg(cmd.Executable))
 	fmt.Fprintf(p.Out, "              sha256 %s\n", cmd.ExecutableSHA256)
 	if cmd.Interpreter != "" {
@@ -110,26 +112,12 @@ func (p *TerminalPrompter) ApproveRun(ctx context.Context, cmd Command) (Decisio
 		fmt.Fprintf(p.Out, "  WARNING:    %s\n", w)
 	}
 	fmt.Fprintf(p.Out, "  Output returned to the agent is redacted, but the command itself receives the values.\n")
-	question := "Allow? [o]nce / [a]lways for this exact command / [N]o: "
-	if !cmd.AlwaysAllowed {
-		question = "Allow? [o]nce / [N]o (always is not offered for project code): "
+	if always {
+		fmt.Fprintf(p.Out, "  Requested: ALWAYS for this exact command until the grant ends.\n")
+	} else {
+		fmt.Fprintf(p.Out, "  Requested: this run only.\n")
 	}
-	answer, err := p.ask(ctx, question)
-	if err != nil {
-		return Deny, err
-	}
-	switch strings.ToLower(answer) {
-	case "o", "once":
-		return AllowOnce, nil
-	case "a", "always":
-		if !cmd.AlwaysAllowed {
-			return AllowOnce, nil
-		}
-		return AllowAlways, nil
-	default:
-		fmt.Fprintln(p.Out, "  denied")
-		return Deny, nil
-	}
+	fmt.Fprintf(p.Out, "  Approve with Touch ID, or cancel the Touch ID prompt to deny. Typing here approves nothing.\n")
 }
 
 // ReadSecret implements Prompter: entered twice, never echoed.
@@ -140,11 +128,8 @@ func (p *TerminalPrompter) ReadSecret(ctx context.Context, req Ingest) ([]byte, 
 	fmt.Fprintf(p.Out, "  reason: %s\n", Sanitize(req.Reason, Limits.ReasonBytes))
 	fmt.Fprintf(p.Out, "  The agent will learn only whether a value was stored, never the value.\n")
 	if req.Replaces {
-		answer, err := p.ask(ctx, "  "+req.Name+" already exists. Replace it? [y/N]: ")
-		if err != nil || (strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes") {
-			fmt.Fprintln(p.Out, "  denied")
-			return nil, false, err
-		}
+		// The broker already obtained Touch ID approval for the replacement.
+		fmt.Fprintf(p.Out, "  Replaces the existing value (approved with Touch ID).\n")
 	}
 	first, err := p.hidden("  Enter value (hidden; empty to deny): ")
 	fmt.Fprintln(p.Out)
@@ -205,22 +190,15 @@ func (p *TerminalPrompter) hidden(prompt string) ([]byte, error) {
 	return ReadHidden(p.In, p.Out, prompt)
 }
 
-// ConfirmPlan shows lines (each sanitized) and asks for an explicit yes.
-func (p *TerminalPrompter) ConfirmPlan(ctx context.Context, title string, lines []string) (bool, error) {
+// ShowPlan shows lines (each sanitized) for reference while the owner
+// decides with Touch ID. It reads no input: typing here approves nothing.
+func (p *TerminalPrompter) ShowPlan(title string, lines []string) {
 	p.bell()
 	fmt.Fprintf(p.Out, "\n── %s ──\n", Sanitize(title, 120))
 	for _, l := range lines {
 		fmt.Fprintf(p.Out, "  %s\n", Sanitize(l, 1<<12))
 	}
-	answer, err := p.ask(ctx, "Apply? [y/N]: ")
-	if err != nil {
-		return false, err
-	}
-	ok := strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes")
-	if !ok {
-		fmt.Fprintln(p.Out, "  declined")
-	}
-	return ok, nil
+	fmt.Fprintf(p.Out, "  Approve with Touch ID, or cancel the Touch ID prompt to decline. Typing here approves nothing.\n")
 }
 
 // NewPassphrase collects a new passphrase twice, never echoed. differentFrom,

@@ -179,12 +179,13 @@ Usage:
   envbank get NAME [auth flags]
   envbank due [--notify] [auth flags]
   envbank run [auth flags] -- COMMAND [ARGS...]
-  envbank agent-broker [--socket PATH] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]  # owner terminal
+  envbank agent-broker --owner-input chromux --owner-input-unqualified [--allow-password-fallback] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]  # owner terminal; grants and approvals need Touch ID
+  envbank agent-broker --legacy-socket [--socket PATH] [...]  # DEVELOPMENT ONLY, unqualified: unauthenticated socket for envbank agent / mcp serve
   envbank setup plan --sync local_server|hosted --device-name NAME --backup-dir DIR [--vault-dir DIR] [--server URL]  # read-only
   envbank setup status [--config PATH] [--socket PATH]                                                              # read-only
-  envbank agent names [--socket PATH]
+  envbank agent names [--socket PATH]                     # --legacy-socket brokers only
   envbank agent request --reason TEXT [--socket PATH] NAME
-  envbank agent run --secret NAME [--secret NAME] [--dir DIR] [--timeout S] [--socket PATH] -- COMMAND [ARGS...]
+  envbank agent run --secret NAME [--secret NAME] [--dir DIR] [--timeout S] [--always] [--socket PATH] -- COMMAND [ARGS...]
   envbank browser-allow [auth flags] NAME ORIGIN
   envbank browser-deny [auth flags] NAME ORIGIN
   envbank browser-origins [auth flags] NAME
@@ -218,7 +219,7 @@ Usage:
   envbank railway apply --plan PLAN_ID [auth flags]
   envbank railway resume --operation OPERATION_ID [auth flags]
   envbank railway verify --bundle BUNDLE [auth flags]
-  envbank mcp serve [--agent-broker-socket PATH] [--no-agent-broker]  # local stdio; workflow tools + value-free envbank_secret_* tools
+  envbank mcp serve [--agent-broker-socket PATH] [--no-agent-broker]  # local stdio; workflow tools + value-free envbank_secret_* tools (--legacy-socket brokers only)
 
 Auth flags:
   --config PATH           encrypted device config

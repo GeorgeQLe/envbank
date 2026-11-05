@@ -6,6 +6,21 @@ with an owner's real vault.** Mode: owner-approved commands with output
 redaction. The placeholder egress proxy, the planned stronger mode for HTTP
 API keys, is not built yet.
 
+**Changed (Unreleased, [authorized agents](authorized-agents.md)):**
+
+- **Touch ID approvals.** Every approval is now a Touch ID check: run
+  (once or always), replacing an existing secret, setup plans and pairing.
+  The broker terminal still shows every detail, but typing there approves
+  nothing.
+- **Socket off by default.** The Unix-socket agent API below is off unless
+  the broker is started with `--legacy-socket`, which is development only
+  and unqualified. `envbank agent …` and `envbank mcp serve` work only with
+  such a broker.
+- **Agent sessions.** Authorized agent sessions reach the broker through the
+  desktop host instead, and only within grants the owner made with Touch ID.
+
+The end-to-end results below predate these changes.
+
 Coding agents (Claude Code, Codex and similar) need to *use* API keys, for
 example to deploy or call a provider. They should never *read* them. The
 ordinary CLI cannot be handed to an agent: `envbank get` prints values, and
@@ -26,9 +41,11 @@ operation that returns a value.
 ```
 
 The owner starts `envbank agent-broker` in their own terminal and types the
-vault passphrase there. The broker listens on
+vault passphrase there. With `--legacy-socket` (development only), the broker
+listens on
 `~/.envbank/agent-broker/broker.sock`, in a 0700 directory, with a 0600 socket
-and a peer-uid check. It locks (exits and wipes the vault key) after 30 minutes
+and a peer-uid check. Socket clients have no grants: any same-user process can
+make requests, though every approval still needs Touch ID. It locks (exits and wipes the vault key) after 30 minutes
 idle or 12 hours total, or on Ctrl-C.
 
 Agents get three operations, through `envbank mcp serve` or the
@@ -37,8 +54,8 @@ Agents get three operations, through `envbank mcp serve` or the
 | MCP tool / CLI | What the agent gets |
 | --- | --- |
 | `envbank_secret_names` / `envbank agent names` | Secret **names** only. |
-| `envbank_secret_request` / `envbank agent request --reason TEXT NAME` | The owner is prompted in the broker terminal. The owner types the value twice, with no echo (replacing an existing secret needs a separate yes). The agent receives `stored` or `denied`. |
-| `envbank_secret_run` / `envbank agent run --secret NAME -- CMD ARGS` | The owner approves the exact command: **once**, **always for this exact command**, or **no**. The broker spawns it with only the named secrets plus a minimal environment. The agent receives exit code, stdout and stderr with values redacted. |
+| `envbank_secret_request` / `envbank agent request --reason TEXT NAME` | The request is shown in the broker terminal. The owner types the value twice, with no echo, in the desktop host's secure window or the terminal. Replacing an existing secret first needs Touch ID. The agent receives `stored` or `denied`. |
+| `envbank_secret_run` / `envbank agent run [--always] --secret NAME -- CMD ARGS` | The owner approves the exact command with Touch ID: **once**, or, when the agent set `always` and the command is a fixed program, **always for this exact command** (until the grant ends or the broker locks). Cancelling Touch ID denies. The broker spawns the command with only the named secrets plus a minimal environment. The agent receives exit code, stdout and stderr with values redacted. |
 
 There is no get, set, export or raw tool.
 
@@ -139,11 +156,13 @@ There is no get, set, export or raw tool.
   inspect broker memory. Keep developer-mode debugging restricted.
 - **Computer-use agents can drive the broker terminal.** An agent with
   screen and keyboard control (computer use, Accessibility) can read the
-  broker terminal and **type into it**: approve a run, or answer a setup
-  prompt with a passphrase it chose. While the broker is running, do not
-  give agents computer use or Accessibility access, or keep the broker on a
-  display or Space they are not driving. Setup mode is opt-in
-  (`--setup`) for this reason.
+  broker terminal and **type into it**. Approvals no longer accept typed
+  answers (they need Touch ID). But a passphrase or value typed **in the
+  terminal** (the fallback when the desktop host's secure window is not
+  paired) can still be supplied by such an agent. While the broker is
+  running, do not give agents computer use or Accessibility access, or keep
+  the broker on a display or Space they are not driving. Setup mode is
+  opt-in (`--setup`) for this reason.
 - **Passphrase custody.** If the agent can read a passphrase file or
   `ENVBANK_PASSPHRASE`, it can unlock the vault itself and bypass the broker.
   The broker prompts for the passphrase when neither is set; do not keep a
@@ -154,10 +173,14 @@ There is no get, set, export or raw tool.
 
 ## Setup
 
+Authorized agents (the default) are set up through the desktop host; see
+[authorized agents](authorized-agents.md). The steps below are for the
+**development socket** only:
+
 1. In **your own terminal** (not the agent's):
 
    ```sh
-   envbank agent-broker            # prompts for the vault passphrase
+   envbank agent-broker --legacy-socket   # prompts for the vault passphrase; unqualified
    ```
 
 2. Give the agent the MCP server, which needs no passphrase. For Claude Code:
@@ -170,9 +193,12 @@ There is no get, set, export or raw tool.
    `command = "envbank"` and `args = ["mcp", "serve"]`. Or let the agent use
    the CLI: `envbank agent names`, `envbank agent run --secret VERCEL_TOKEN -- vercel deploy`.
 
-3. Approve or deny requests as they appear in the broker terminal. Long
-   approvals can exceed an MCP client's tool timeout; raise it, for example
-   with `MCP_TOOL_TIMEOUT` in Claude Code.
+3. Approve requests with Touch ID as they appear (the broker terminal shows
+   the details); cancel the Touch ID prompt to deny. On a Mac without usable
+   biometry every approval is refused (`APPROVAL_UNAVAILABLE`) unless the
+   broker was started with `--allow-password-fallback`. Long approvals can
+   exceed an MCP client's tool timeout; raise it, for example with
+   `MCP_TOOL_TIMEOUT` in Claude Code.
 
 `envbank mcp serve --no-agent-broker` omits the secret tools.
 
@@ -193,5 +219,5 @@ There is no get, set, export or raw tool.
   - the agent fails closed afterwards.
 - Placeholder egress proxy mode (next).
 - Persistent approval policy, multi-line values through the broker prompt
-  (use `envbank set` with stdin for those), and non-terminal approval
-  channels (macOS dialog, phone approval).
+  (use `envbank set` with stdin for those), and phone approval. Touch ID
+  approvals are implemented (see [authorized agents](authorized-agents.md)).

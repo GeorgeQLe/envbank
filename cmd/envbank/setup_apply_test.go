@@ -11,19 +11,29 @@ import (
 	"time"
 
 	"github.com/GeorgeQLe/envbank/internal/agentbroker"
+	"github.com/GeorgeQLe/envbank/internal/approval"
 	"github.com/GeorgeQLe/envbank/internal/setup"
 )
 
 type fakeSetupOwner struct {
-	visible  string
-	confirm  bool
-	prompted int
-	notes    []string
+	visible     string
+	confirm     bool
+	unavailable bool
+	prompted    int
+	reasons     []string
+	notes       []string
 }
 
-func (o *fakeSetupOwner) ConfirmPlan(context.Context, string, []string) (bool, error) {
+func (o *fakeSetupOwner) Confirm(_ context.Context, _ string, _ []string, reason string) approval.Outcome {
 	o.prompted++
-	return o.confirm, nil
+	o.reasons = append(o.reasons, reason)
+	switch {
+	case o.unavailable:
+		return approval.Unavailable
+	case o.confirm:
+		return approval.Approved
+	}
+	return approval.Denied
 }
 func (o *fakeSetupOwner) NewPassphrase(context.Context, string, int, []byte) ([]byte, bool, error) {
 	return nil, false, errors.New("must not be reached")
@@ -84,6 +94,16 @@ func TestSetupApplyDeniedOrSwappedVolumeChangesNothing(t *testing.T) {
 	if _, err := os.Stat(req.VaultDir); err == nil || svc.installed != 0 {
 		t.Fatal("a denied plan touched the filesystem or installed a service")
 	}
+	if !strings.Contains(owner.reasons[0], "local_server") || !strings.Contains(owner.reasons[0], req.BackupDir) {
+		t.Fatalf("setup Touch ID reason lacks the plan: %s", owner.reasons[0])
+	}
+	// Touch ID unavailable: refused with a fixed code, nothing changed.
+	owner.unavailable = true
+	var ru setupRefusal
+	if _, done, err := a.Apply(context.Background(), raw); !errors.As(err, &ru) || ru.code != agentbroker.CodeApprovalUnavailable || len(done) != 0 {
+		t.Fatalf("unavailable: %v %v", done, err)
+	}
+	owner.unavailable = false
 	owner.confirm = true
 	a.inspector = &swapInspector{vols: vols}
 	_, done, err := a.Apply(context.Background(), raw)
@@ -110,7 +130,7 @@ func TestLaunchdPlistIsLoopbackAndEscaped(t *testing.T) {
 }
 
 func TestBrokerSetupModeGatesOperations(t *testing.T) {
-	b, err := agentbroker.New(agentbroker.Options{Setup: &setupApplier{}, Prompter: &noopPrompter{}, Runner: agentbroker.ExecRunner{}})
+	b, err := agentbroker.New(agentbroker.Options{Setup: &setupApplier{}, Prompter: &noopPrompter{}, Approver: denyApprover{}, Runner: agentbroker.ExecRunner{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,9 +146,12 @@ func TestBrokerSetupModeGatesOperations(t *testing.T) {
 
 type noopPrompter struct{}
 
-func (noopPrompter) ApproveRun(context.Context, agentbroker.Command) (agentbroker.Decision, error) {
-	return agentbroker.Deny, nil
-}
+func (noopPrompter) ShowRun(agentbroker.Command, string, bool) {}
+
+type denyApprover struct{}
+
+func (denyApprover) Available() bool                                  { return true }
+func (denyApprover) Approve(context.Context, string) approval.Outcome { return approval.Denied }
 func (noopPrompter) ReadSecret(context.Context, agentbroker.Ingest) ([]byte, bool, error) {
 	return nil, false, nil
 }

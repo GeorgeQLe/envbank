@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GeorgeQLe/envbank/internal/approval"
 )
 
 // randomValue is a process-local sentinel; it must never appear in any response.
@@ -74,29 +76,38 @@ func (v *fakeVault) Store(_ context.Context, name, value string) error {
 	return nil
 }
 
+// fakePrompter is the terminal display and, for tests, the Touch ID approver.
 type fakePrompter struct {
-	mu       sync.Mutex
-	decision Decision
-	secret   []byte
-	ok       bool
-	runs     []Command
-	ingests  []Ingest
-	block    chan struct{}
-	notes    []string
+	mu          sync.Mutex
+	decision    approval.Outcome
+	unavailable bool
+	reasons     []string
+	secret      []byte
+	ok          bool
+	runs        []Command
+	ingests     []Ingest
+	block       chan struct{}
+	notes       []string
 }
 
-func (p *fakePrompter) ApproveRun(ctx context.Context, cmd Command) (Decision, error) {
+func (p *fakePrompter) ShowRun(cmd Command, _ string, _ bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.runs = append(p.runs, cmd)
+}
+func (p *fakePrompter) Available() bool { return !p.unavailable }
+func (p *fakePrompter) Approve(ctx context.Context, reason string) approval.Outcome {
 	if p.block != nil {
 		select {
 		case <-p.block:
 		case <-ctx.Done():
-			return Deny, ctx.Err()
+			return approval.Denied
 		}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.runs = append(p.runs, cmd)
-	return p.decision, nil
+	p.reasons = append(p.reasons, reason)
+	return p.decision
 }
 func (p *fakePrompter) ReadSecret(_ context.Context, req Ingest) ([]byte, bool, error) {
 	p.mu.Lock()
@@ -125,7 +136,7 @@ func script(t *testing.T, body string) (dir, path string) {
 
 func newBroker(t *testing.T, vault Vault, p Prompter) *Broker {
 	t.Helper()
-	b, err := New(Options{Vault: vault, Prompter: p, Runner: ExecRunner{}, Path: "/usr/bin:/bin", BaseEnv: []string{"PATH=/usr/bin:/bin", "TERM=dumb"}})
+	b, err := New(Options{Vault: vault, Prompter: p, Approver: p.(approval.Approver), Runner: ExecRunner{}, Path: "/usr/bin:/bin", BaseEnv: []string{"PATH=/usr/bin:/bin", "TERM=dumb"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +250,7 @@ echo "other:$OTHER agent:$AGENT_ONLY pass:$ENVBANK_PASSPHRASE" >&2
 exit 7
 `)
 	vault := &fakeVault{values: map[string]string{"TOKEN": value, "OTHER": other}}
-	p := &fakePrompter{decision: AllowOnce}
+	p := &fakePrompter{decision: approval.Approved}
 	b := newBroker(t, vault, p)
 	resp := b.Handle(context.Background(), Request{V: 1, Op: OpRun, Secrets: []string{"TOKEN"}, Argv: []string{tool}, Dir: dir})
 	if !resp.OK || resp.ExitCode == nil || *resp.ExitCode != 7 || p.prompts() != 1 {
@@ -259,16 +270,16 @@ func TestApprovalOnceAlwaysDenyAndNoPromptForUnusableRequests(t *testing.T) {
 	value := randomValue(t)
 	dir, tool := script(t, "echo ok\n")
 	vault := &fakeVault{values: map[string]string{"TOKEN": value, "SHORT": "abc"}}
-	p := &fakePrompter{decision: Deny}
+	p := &fakePrompter{decision: approval.Denied}
 	b := newBroker(t, vault, p)
 	// A fixed system binary outside the working directory may be approved "always".
 	run := func(args ...string) Response {
-		return b.Handle(context.Background(), Request{V: 1, Op: OpRun, Secrets: []string{"TOKEN"}, Argv: append([]string{"/bin/echo"}, args...), Dir: dir})
+		return b.Handle(context.Background(), Request{V: 1, Op: OpRun, Secrets: []string{"TOKEN"}, Argv: append([]string{"/bin/echo"}, args...), Dir: dir, Always: true})
 	}
 	if r := run(); r.OK || r.Code != CodeDenied {
 		t.Fatalf("deny: %+v", r)
 	}
-	p.decision = AllowAlways
+	p.decision = approval.Approved
 	if r := run(); !r.OK {
 		t.Fatalf("always: %+v", r)
 	}
@@ -303,7 +314,7 @@ func TestApprovalOnceAlwaysDenyAndNoPromptForUnusableRequests(t *testing.T) {
 func TestIngestStoresOnlyWhatTheOwnerTypes(t *testing.T) {
 	vault := &fakeVault{values: map[string]string{"EXISTING": randomValue(t)}}
 	value := randomValue(t)
-	p := &fakePrompter{secret: []byte(value), ok: true}
+	p := &fakePrompter{secret: []byte(value), ok: true, decision: approval.Approved}
 	b := newBroker(t, vault, p)
 	resp := b.Handle(context.Background(), Request{V: 1, Op: OpRequest, Name: "NEW_KEY", Reason: "deploy preview \x1b[2J"})
 	if !resp.OK || resp.State != StateStored || vault.values["NEW_KEY"] != value {
@@ -341,7 +352,7 @@ func TestIngestStoresOnlyWhatTheOwnerTypes(t *testing.T) {
 
 func TestTimeoutKillsTheWholeProcessGroup(t *testing.T) {
 	dir, tool := script(t, "sleep 30 &\nsleep 30\n")
-	b := newBroker(t, &fakeVault{values: map[string]string{"TOKEN": randomValue(t)}}, &fakePrompter{decision: AllowOnce})
+	b := newBroker(t, &fakeVault{values: map[string]string{"TOKEN": randomValue(t)}}, &fakePrompter{decision: approval.Approved})
 	start := time.Now()
 	resp := b.Handle(context.Background(), Request{V: 1, Op: OpRun, Secrets: []string{"TOKEN"}, Argv: []string{tool}, Dir: dir, TimeoutSeconds: 1})
 	if !resp.OK || !resp.TimedOut || time.Since(start) > 10*time.Second {
@@ -351,7 +362,7 @@ func TestTimeoutKillsTheWholeProcessGroup(t *testing.T) {
 
 func TestPromptQueueIsBoundedAndCancelledRequestsNeverPrompt(t *testing.T) {
 	dir, tool := script(t, "echo ok\n")
-	p := &fakePrompter{decision: AllowOnce, block: make(chan struct{})}
+	p := &fakePrompter{decision: approval.Approved, block: make(chan struct{})}
 	b := newBroker(t, &fakeVault{values: map[string]string{"TOKEN": randomValue(t)}}, p)
 	var wg sync.WaitGroup
 	results := make(chan Response, 16)
@@ -461,14 +472,14 @@ func TestValuesShortenedOrScriptsEditedAfterApprovalAreRefused(t *testing.T) {
 	dir := t.TempDir()
 	dir, _ = filepath.EvalSymlinks(dir)
 	v := &swapVault{fakeVault: fakeVault{values: map[string]string{"TOKEN": randomValue(t)}}, later: map[string]string{"TOKEN": "abc"}}
-	b := newBroker(t, v, &fakePrompter{decision: AllowOnce})
+	b := newBroker(t, v, &fakePrompter{decision: approval.Approved})
 	if r := b.Handle(context.Background(), Request{V: 1, Op: OpRun, Secrets: []string{"TOKEN"}, Argv: []string{"/bin/echo", "x"}, Dir: dir}); r.OK || r.Code != CodeValueTooShort {
 		t.Fatalf("shortened value at execution: %+v", r)
 	}
 	// Edit the script while the owner is looking at the prompt.
 	deploy := filepath.Join(dir, "deploy.sh")
 	_ = os.WriteFile(deploy, []byte("echo v1\n"), 0o600)
-	edit := &editingPrompter{fakePrompter: fakePrompter{decision: AllowOnce}, edit: func() { _ = os.WriteFile(deploy, []byte("printenv\n"), 0o600) }}
+	edit := &editingPrompter{fakePrompter: fakePrompter{decision: approval.Approved}, edit: func() { _ = os.WriteFile(deploy, []byte("printenv\n"), 0o600) }}
 	b2 := newBroker(t, &fakeVault{values: map[string]string{"TOKEN": randomValue(t)}}, edit)
 	if r := b2.Handle(context.Background(), Request{V: 1, Op: OpRun, Secrets: []string{"TOKEN"}, Argv: []string{"/bin/sh", "deploy.sh"}, Dir: dir}); r.OK || r.Code != CodeCommandRefused {
 		t.Fatalf("script edited after approval still ran: %+v", r)
@@ -480,9 +491,9 @@ type editingPrompter struct {
 	edit func()
 }
 
-func (p *editingPrompter) ApproveRun(ctx context.Context, cmd Command) (Decision, error) {
+func (p *editingPrompter) Approve(ctx context.Context, reason string) approval.Outcome {
 	p.edit()
-	return p.fakePrompter.ApproveRun(ctx, cmd)
+	return p.fakePrompter.Approve(ctx, reason)
 }
 
 func TestRedactionHandlesMultilineOverlapAndAnyCutFragment(t *testing.T) {

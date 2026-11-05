@@ -15,15 +15,18 @@ import (
 	"time"
 
 	"github.com/GeorgeQLe/envbank/internal/agentbroker"
+	"github.com/GeorgeQLe/envbank/internal/approval"
 	"github.com/GeorgeQLe/envbank/internal/client"
 	"github.com/GeorgeQLe/envbank/internal/recovery"
 	"github.com/GeorgeQLe/envbank/internal/setup"
 )
 
-// setupOwner is the owner surface for setup (the broker terminal, or a
-// qualified desktop-host provider).
+// setupOwner is the owner surface for setup (the broker terminal for display,
+// Touch ID for every confirmation, and the desktop host or terminal for
+// secret entry).
 type setupOwner interface {
-	ConfirmPlan(ctx context.Context, title string, lines []string) (bool, error)
+	// Confirm shows lines for reference and asks for Touch ID with reason.
+	Confirm(ctx context.Context, title string, lines []string, reason string) approval.Outcome
 	AskVisible(ctx context.Context, prompt string) (string, error)
 	NewPassphrase(ctx context.Context, title string, minBytes int, differentFrom []byte) ([]byte, bool, error)
 	Notify(line string)
@@ -93,8 +96,20 @@ func (a *setupApplier) Apply(ctx context.Context, raw json.RawMessage) (agentbro
 	for _, w := range plan.Warnings {
 		lines = append(lines, "WARNING: "+w)
 	}
-	ok, err := a.owner.ConfirmPlan(ctx, "EnvBank setup request", lines)
-	if err != nil || !ok || ctx.Err() != nil {
+	who := "an agent"
+	if c, ok := agentbroker.CallerFrom(ctx); ok {
+		who = c.Who
+	}
+	where := plan.Layout.VaultDir
+	if where == "" {
+		where = plan.Layout.ServerURL
+	}
+	reason := approval.Reason("apply an EnvBank %s setup for %s: vault %s, identity %s, backups %s (%d steps; full plan in the broker terminal)",
+		plan.Layout.Sync, who, where, plan.Layout.ConfigPath, plan.Layout.BackupDir, len(plan.Steps))
+	if out := a.owner.Confirm(ctx, "EnvBank setup request", lines, reason); out != approval.Approved || ctx.Err() != nil {
+		if out == approval.Unavailable {
+			return nil, nil, setupRefusal{agentbroker.CodeApprovalUnavailable}
+		}
 		return nil, nil, setupRefusal{CodeDeniedSetup}
 	}
 	l := plan.Layout
@@ -171,8 +186,12 @@ func (a *setupApplier) Apply(ctx context.Context, raw json.RawMessage) (agentbro
 					a.owner.Notify("refused: something already answers at " + l.ServerURL + " (restart the broker with --use-existing-server to reuse a server you started)")
 					return setupRefusal{"SETUP_PORT_IN_USE"}
 				}
-				ok, err := a.owner.ConfirmPlan(ctx, "Reuse running EnvBank server", []string{"A server already answers at " + l.ServerURL + ".", "Reuse it only if YOU started it. The vault will be stored wherever that server keeps its database, not necessarily in the vault directory above."})
-				if err != nil || !ok {
+				out := a.owner.Confirm(ctx, "Reuse running EnvBank server", []string{"A server already answers at " + l.ServerURL + ".", "Reuse it only if YOU started it. The vault will be stored wherever that server keeps its database, not necessarily in the vault directory above."},
+					approval.Reason("reuse the EnvBank server already running at %s (only if you started it)", l.ServerURL))
+				if out == approval.Unavailable {
+					return setupRefusal{agentbroker.CodeApprovalUnavailable}
+				}
+				if out != approval.Approved {
 					return setupRefusal{CodeDeniedSetup}
 				}
 				return nil

@@ -15,6 +15,13 @@ Status (November 4, 2026):
 - **Not built yet:** the desktop-host input provider (in progress; see the
   [owner-input protocol](owner-input-protocol.md)), `local_only` mode, and
   the relay.
+- **Changed (Unreleased).** Confirmations now use Touch ID: the setup plan,
+  reusing a running server, and pairing (see
+  [authorized agents](authorized-agents.md)). The broker terminal shows the
+  full plan, but typing there confirms nothing. An authorized agent session
+  needs a `setup` grant before it can propose a setup. The `envbank setup
+  apply` CLI and MCP tools reach only a `--legacy-socket` (development)
+  broker. Secret entry is unchanged.
 
 Goal: an agent can install, set up, store and sync EnvBank end to end, while
 every secret (vault passphrase, recovery passphrase, values) is typed by the
@@ -52,7 +59,7 @@ cannot choose it, because anything (even a fake server) could be answering
 on the port. Immediately before writing, every path is re-validated against
 the approved plan's volume UUID. The identity directory and every directory
 created are checked too, and no symlinks are allowed anywhere. Agents propose plans; the broker shows each plan to the owner,
-performs it, and then unlocks the vault it just created without asking for the
+who approves it with Touch ID; the broker then performs it and unlocks the vault it just created without asking for the
 passphrase again. Secret entry never happens in the agent's terminal: a
 prompt there would be agent-observable.
 

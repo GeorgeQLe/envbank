@@ -3,10 +3,15 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GeorgeQLe/envbank/internal/agentbroker"
+	"github.com/GeorgeQLe/envbank/internal/approval"
+	"github.com/GeorgeQLe/envbank/internal/ownerinput"
 )
 
 type fakeSource struct {
@@ -64,4 +69,61 @@ func TestOwnerSurfaceRouting(t *testing.T) {
 	if v, ok, _ := s.NewPassphrase(ctx, "t", 12, []byte("same-passphrase-x")); !ok || string(v) != "different-passphrase" || src.requests != 2 {
 		t.Fatalf("recovery reuse: %q %v %d", v, ok, src.requests)
 	}
+}
+
+type recordingApprover struct {
+	outcome     approval.Outcome
+	unavailable bool
+	reasons     []string
+}
+
+func (a *recordingApprover) Available() bool { return !a.unavailable }
+func (a *recordingApprover) Approve(_ context.Context, reason string) approval.Outcome {
+	a.reasons = append(a.reasons, reason)
+	return a.outcome
+}
+
+// Typing "y" in the broker terminal confirms nothing: setup plans and
+// pairing are decided by the approver alone, and the typed bytes stay unread.
+func TestTerminalTypingCannotConfirmSetupOrPairing(t *testing.T) {
+	r, w, _ := os.Pipe()
+	t.Cleanup(func() { r.Close(); w.Close() })
+	typed := "y\nyes\n"
+	_, _ = w.Write([]byte(typed))
+	tp := agentbroker.NewTestTerminalPrompter(r, &discard{}, nil)
+	deny := &recordingApprover{outcome: approval.Denied}
+	s := &ownerSurface{TerminalPrompter: tp, approver: deny}
+	if out := s.Confirm(context.Background(), "EnvBank setup request", []string{"plan"}, "apply a setup"); out != approval.Denied || len(deny.reasons) != 1 {
+		t.Fatalf("setup confirmed without Touch ID: %v", out)
+	}
+	if out := (&ownerSurface{TerminalPrompter: tp}).Confirm(context.Background(), "t", nil, "x"); out != approval.Unavailable {
+		t.Fatal("no approver must be unavailable")
+	}
+	if out := (&ownerSurface{TerminalPrompter: tp, approver: &recordingApprover{unavailable: true, outcome: approval.Approved}}).Confirm(context.Background(), "t", nil, "x"); out != approval.Unavailable {
+		t.Fatal("unavailable biometry approved")
+	}
+	p := &fakePairer{}
+	if err := pairProvider(context.Background(), p, tp, deny); err == nil || p.confirmed {
+		t.Fatal("paired without Touch ID")
+	}
+	ok := &recordingApprover{outcome: approval.Approved}
+	if err := pairProvider(context.Background(), p, tp, ok); err != nil || !p.confirmed || !strings.Contains(ok.reasons[0], "code 123456") {
+		t.Fatalf("pairing: %v %v", err, ok.reasons)
+	}
+	_ = r.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	buf := make([]byte, 64)
+	n, _ := io.ReadAtLeast(r, buf, len(typed))
+	if string(buf[:n]) != typed {
+		t.Fatalf("typed input consumed: %q", buf[:n])
+	}
+}
+
+type fakePairer struct{ confirmed bool }
+
+func (f *fakePairer) Pair(_ context.Context, confirm func(ownerinput.Identity, string) bool) error {
+	f.confirmed = confirm(ownerinput.Identity{TeamID: "NC56VXK48K", Identifier: ownerinput.ServiceIdentifier, CDHash: strings.Repeat("ab", 20)}, "123456")
+	if !f.confirmed {
+		return errors.New(ownerinput.CodeNotPaired)
+	}
+	return nil
 }
