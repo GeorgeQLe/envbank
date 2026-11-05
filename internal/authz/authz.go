@@ -38,14 +38,19 @@ const (
 	ScopeRequest = "request"
 	ScopeSetup   = "setup"
 	ScopeRelay   = "relay"
+	// ScopeProvider allows the listed provider action IDs
+	// (docs/provider-actions.md); every action still needs Touch ID.
+	ScopeProvider = "provider"
 )
 
 // Agent operations beyond the agent broker's own.
 const (
-	OpGrantRequest = "grant_request"
-	OpGrantStatus  = "grant_status"
-	OpGrantRevoke  = "grant_revoke"
-	OpRelayRequest = "relay_request"
+	OpGrantRequest   = "grant_request"
+	OpGrantStatus    = "grant_status"
+	OpGrantRevoke    = "grant_revoke"
+	OpRelayRequest   = "relay_request"
+	OpProviderAction = agentbroker.OpProviderAction
+	OpProviderStatus = agentbroker.OpProviderStatus
 )
 
 // Limits.
@@ -130,6 +135,7 @@ type Grant struct {
 	id        string
 	session   tuple
 	Secrets   []string
+	Actions   []string // provider grants only
 	Scope     string
 	GrantedAt time.Time
 	ExpiresAt time.Time
@@ -138,7 +144,11 @@ type Grant struct {
 
 // Info is the value-free description returned to the session.
 func (g Grant) Info() agentbroker.GrantInfo {
-	return agentbroker.GrantInfo{Secrets: append([]string{}, g.Secrets...), Scope: g.Scope,
+	var actions []string
+	if len(g.Actions) > 0 {
+		actions = append([]string{}, g.Actions...)
+	}
+	return agentbroker.GrantInfo{Secrets: append([]string{}, g.Secrets...), Actions: actions, Scope: g.Scope,
 		GrantedAt: g.GrantedAt.UTC().Format(time.RFC3339), ExpiresAt: g.ExpiresAt.UTC().Format(time.RFC3339)}
 }
 
@@ -191,6 +201,15 @@ var errClosed = errors.New("store closed")
 
 // Add records a grant. It is called only after the owner's Touch ID.
 func (st *Store) Add(s Session, scope string, secrets []string, d time.Duration) (Grant, error) {
+	return st.add(s, scope, secrets, nil, d)
+}
+
+// AddProvider records a provider grant for actions (after Touch ID).
+func (st *Store) AddProvider(s Session, actions []string, d time.Duration) (Grant, error) {
+	return st.add(s, ScopeProvider, nil, actions, d)
+}
+
+func (st *Store) add(s Session, scope string, secrets, actions []string, d time.Duration) (Grant, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return Grant{}, err
@@ -212,7 +231,7 @@ func (st *Store) Add(s Session, scope string, secrets []string, d time.Duration)
 		return Grant{}, ErrFull
 	}
 	now := st.now()
-	g := &Grant{id: hex.EncodeToString(raw[:]), session: s.key(), Secrets: append([]string(nil), secrets...), Scope: scope, GrantedAt: now, ExpiresAt: now.Add(d)}
+	g := &Grant{id: hex.EncodeToString(raw[:]), session: s.key(), Secrets: append([]string(nil), secrets...), Actions: append([]string(nil), actions...), Scope: scope, GrantedAt: now, ExpiresAt: now.Add(d)}
 	st.grants[g.id] = g
 	return *g, nil
 }
@@ -270,7 +289,30 @@ func (st *Store) Covering(s Session, scope string, secrets []string) (Grant, boo
 	return best, found
 }
 
+// CoveringAction returns the longest-lasting active provider grant of s
+// that lists action.
+func (st *Store) CoveringAction(s Session, action string) (Grant, bool) {
+	var best Grant
+	found := false
+	for _, g := range st.Active(s) {
+		if g.Scope != ScopeProvider || action == "" {
+			continue
+		}
+		listed := false
+		for _, a := range g.Actions {
+			listed = listed || a == action
+		}
+		if listed && (!found || g.ExpiresAt.After(best.ExpiresAt)) {
+			best, found = g, true
+		}
+	}
+	return best, found
+}
+
 func covers(granted, wanted []string, scope string) bool {
+	if scope == ScopeProvider {
+		return false // provider grants cover actions, never secrets (CoveringAction)
+	}
 	if scope == ScopeSetup || scope == ScopeRelay {
 		return len(wanted) == 0
 	}

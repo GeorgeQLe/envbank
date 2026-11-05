@@ -20,6 +20,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/mcpserver"
 	"github.com/GeorgeQLe/envbank/internal/ownerinput"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
+	"github.com/GeorgeQLe/envbank/internal/provideraction"
 	"github.com/GeorgeQLe/envbank/internal/setup"
 	"golang.org/x/term"
 )
@@ -91,6 +92,84 @@ func (v *brokerVault) Store(_ context.Context, name, value string) error {
 	defer v.mu.Unlock()
 	_, err := putSecretValue(v.api, v.vaultKey, name, value, -1)
 	return err
+}
+
+// StoreSecret implements provideraction.Vault (lifecycle.RecordWriter): it
+// durably stores the value fill supplies and returns the new revision.
+func (v *brokerVault) StoreSecret(_ context.Context, name string, fill func(func([]byte) error) error) (int64, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	var revision int64
+	err := fill(func(value []byte) error {
+		record, err := putSecretValue(v.api, v.vaultKey, name, string(value), -1)
+		if err != nil {
+			return err
+		}
+		revision = record.Revision
+		return nil
+	})
+	if err != nil || revision < 1 {
+		return 0, errors.New("record could not be stored")
+	}
+	return revision, nil
+}
+
+// latest returns a copy of name's current value and revision.
+func (v *brokerVault) latest(name string) ([]byte, int64, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	records, err := v.records()
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, r := range records {
+		if r.Name == name {
+			return []byte(r.Value), r.Revision, nil
+		}
+	}
+	return nil, 0, provideraction.ErrMissing
+}
+
+// Latest implements provideraction.Vault: consume sees the current value
+// (outside the vault lock); the copy is wiped afterwards.
+func (v *brokerVault) Latest(_ context.Context, name string, consume func([]byte) error) (int64, error) {
+	value, revision, err := v.latest(name)
+	if err != nil {
+		return 0, err
+	}
+	defer wipeBytes(value)
+	if err := consume(value); err != nil {
+		return 0, err
+	}
+	return revision, nil
+}
+
+// ReadSecret implements lifecycle.RecordReader: only the exact revision.
+func (v *brokerVault) ReadSecret(_ context.Context, name string, revision int64, consume func([]byte) error) error {
+	value, current, err := v.latest(name)
+	if err != nil {
+		return err
+	}
+	defer wipeBytes(value)
+	if current != revision {
+		return errors.New("record revision changed")
+	}
+	return consume(value)
+}
+
+// providerActionFactory is the seam where the concrete Neon, Vercel and
+// Stripe adapters plug in (docs/provider-actions.md). It returns nil in this
+// build, so every provider_action answers PROVIDER_UNAVAILABLE.
+var providerActionFactory = func() provideraction.Factory { return nil }
+
+// newProviderService builds the broker's provider-action service. vault is
+// nil in setup mode (no vault unlocked): actions are then unavailable.
+func newProviderService(vault *brokerVault, factory provideraction.Factory) *provideraction.Service {
+	opts := provideraction.Options{Factory: factory}
+	if vault != nil {
+		opts.Vault = vault
+	}
+	return provideraction.New(opts)
 }
 
 func (v *brokerVault) wipe() {
@@ -264,7 +343,10 @@ func agentBrokerCommand(args []string) error {
 	defer broker.Close()
 	ownerChannel.Store(broker)
 	gate := authz.NewGate(broker, prompter, nil)
-	defer gate.Close() // grants are memory-only and end when the broker locks
+	// Provider actions run only on the host channel, behind a provider grant;
+	// with no factory configured they answer PROVIDER_UNAVAILABLE.
+	gate.Provider = newProviderService(vault, providerActionFactory())
+	defer gate.Close() // grants and provider operations are memory-only and end when the broker locks
 	var listener net.Listener
 	if *legacySocket {
 		if listener, err = agentbroker.Listen(*socket); err != nil {

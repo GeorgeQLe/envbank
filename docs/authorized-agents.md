@@ -88,6 +88,11 @@ responses, plus:
 - `grant_request {secrets:[NAME…], scope:"names"|"run"|"request", duration_s}`:
   ask the owner to grant this session; duration at most 12 h.
 - `grant_status {}`: this session's active grants (names, scopes, expiry).
+- `grant_request {scope:"provider", actions:[ACTION…], duration_s}`, then
+  `provider_action {action, params, reason}` and `provider_status
+  {operation_id}`: broker-run provider actions, each with its own Touch ID
+  approval showing the exact plan (no "always"); see
+  [provider actions](provider-actions.md).
 
 The reply is the agent broker response (value-free, fixed codes) plus `route_id`.
 
@@ -209,10 +214,15 @@ What `envbank agent-broker` does today (`internal/authz`,
   - broker fields: `op`, `name`, `reason`, `secrets` (array of strings),
     `argv` (array of strings), `dir`, `timeout_seconds`, `always`, `setup`
     (dictionary);
-  - grant fields: `scope` and `duration_s` (`grant_request` only).
+  - grant fields: `scope` and `duration_s` (`grant_request` only), plus
+    `actions` (array of strings, provider grants only);
+  - provider fields: `action` and `params` (dictionary) for
+    `provider_action`, `operation_id` for `provider_status`. Any other op
+    carrying them is refused.
 
   Operations:
   - `names`, `run`, `request`, `setup`, `relay_request`;
+  - `provider_action` and `provider_status` (host channel only);
   - `grant_request {secrets, scope, duration_s[, reason]}`;
   - `grant_status {}` and `grant_revoke {}`. Revoke takes no fields, needs
     no Touch ID, and ends every grant of the calling session. There is no
@@ -250,6 +260,11 @@ What `envbank agent-broker` does today (`internal/authz`,
 - **Scopes.**
   - `names`, `run` and `request` take 1 to 16 secret names.
   - `setup` and `relay` take none.
+  - `provider` takes 1 to 10 action IDs in `actions` and no secrets; it
+    covers `provider_action` for those actions only.
+  - `CONTROL_*` records are reserved: `names` and `run` grants naming them
+    are refused (`RESERVED_NAME`), `names` never lists them and `run` never
+    injects them; `request` may name them so the owner can seed them.
   - `names` lists the secrets in any of the session's `names`, `run` or
     `request` grants.
   - `run` needs a single grant that covers every secret named.
