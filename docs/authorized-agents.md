@@ -57,6 +57,13 @@ anything: the broker runs the biometric check itself.
   `envbank agent …` and `envbank mcp serve` therefore cannot reach a
   default broker.
 
+A `broker_hello` answered `busy` means the host already has a registered
+broker and holds this confirmed connection as a replacement candidate. The
+broker keeps the connection open and tells the owner to approve the
+replacement in the host (Settings → Replace EnvBank broker, with Touch ID).
+Agent requests start arriving once the owner approves. Any other non-`registered`
+answer is a protocol error.
+
 ## Messages
 
 `session` (string fields, all required):

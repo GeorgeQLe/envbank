@@ -21,6 +21,10 @@ const (
 	KindAgentRequest = "agent_request"
 
 	OutcomeRegistered = "registered"
+	// OutcomePending: another broker is registered; the host keeps this
+	// confirmed connection as a candidate until the owner approves the
+	// replacement in the host (Settings + Touch ID). Requests then arrive here.
+	OutcomePending = "busy"
 )
 
 // agentRequestTimeout is the end-to-end budget of one agent request. The
@@ -170,13 +174,22 @@ func (a *AgentChannel) connect(ctx context.Context) (agentConn, error) {
 	return conn, nil
 }
 
-// register says hello on a paired connection.
-func register(conn agentConn) error {
+// register says hello on a paired connection. pending reports that the host
+// already has a registered broker and holds this one as a replacement
+// candidate awaiting the owner's approval.
+func register(conn agentConn) (pending bool, err error) {
 	outcome, err := conn.Hello(10 * time.Second)
-	if err == nil && outcome != OutcomeRegistered {
-		err = errors.New(CodeProtocol)
+	if err != nil {
+		return false, err
 	}
-	return err
+	switch outcome {
+	case OutcomeRegistered:
+		return false, nil
+	case OutcomePending:
+		return true, nil
+	default:
+		return false, errors.New(CodeProtocol)
+	}
 }
 
 func (a *AgentChannel) notify(s string) {
@@ -214,12 +227,17 @@ func (a *AgentChannel) Run(ctx context.Context) error {
 				a.setConn(conn, true)
 			}
 		}
+		pending := false
 		if err == nil {
-			err = register(conn)
+			pending, err = register(conn)
 		}
 		if err == nil {
 			refusals, backoff = 0, time.Second
-			a.notify("authorized-agent channel registered with the Chromux owner-input service")
+			if pending {
+				a.notify("Chromux already has an EnvBank broker; approve the replacement in Chromux Settings (Replace EnvBank broker, Touch ID) to route agent requests here")
+			} else {
+				a.notify("authorized-agent channel registered with the Chromux owner-input service")
+			}
 			if a.serve(ctx, conn, sem) && ctx.Err() == nil {
 				// The service restarted and lost the pairing: pair again on
 				// this connection before saying hello on it.

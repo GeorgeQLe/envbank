@@ -641,3 +641,17 @@ func TestAgentReplyShape(t *testing.T) {
 		t.Fatalf("bad response JSON: %+v", r)
 	}
 }
+
+func TestHelloBusyIsPendingReplacementNotAnError(t *testing.T) {
+	for outcome, want := range map[string]struct {
+		pending bool
+		err     bool
+	}{OutcomeRegistered: {false, false}, OutcomePending: {true, false}, "unpaired": {false, true}, "declined": {false, true}, "": {false, true}} {
+		c := newFakeConn()
+		c.outcome = outcome
+		pending, err := register(c)
+		if pending != want.pending || (err != nil) != want.err {
+			t.Fatalf("%q: pending=%v err=%v", outcome, pending, err)
+		}
+	}
+}
