@@ -215,6 +215,21 @@ func RecordID(vaultKey []byte, name string) string {
 }
 
 func WrapVaultKey(vaultKey []byte, recipientPublic, vaultID, deviceID string) (WrappedKey, error) {
+	context := []byte("envbank.vault.wrap.v1\x00" + vaultID + "\x00" + deviceID)
+	return SealToDevice(recipientPublic, context, vaultKey)
+}
+
+func UnwrapVaultKey(envelope WrappedKey, privateKey, vaultID, deviceID string) ([]byte, error) {
+	context := []byte("envbank.vault.wrap.v1\x00" + vaultID + "\x00" + deviceID)
+	return OpenFromDevice(envelope, privateKey, context)
+}
+
+// SealToDevice is the device-wrapping construction used for vault-key
+// enrollment envelopes: a fresh ephemeral X25519 key agreement with the
+// recipient's wrapping key, HKDF-SHA-256 with context as info, and AES-256-GCM
+// with context as additional authenticated data. Callers must use a distinct,
+// versioned context domain per purpose.
+func SealToDevice(recipientPublic string, context, plaintext []byte) (WrappedKey, error) {
 	pubBytes, err := decode(recipientPublic)
 	if err != nil {
 		return WrappedKey{}, errors.New("invalid wrapping public key")
@@ -231,19 +246,21 @@ func WrapVaultKey(vaultKey []byte, recipientPublic, vaultID, deviceID string) (W
 	if err != nil {
 		return WrappedKey{}, err
 	}
-	context := []byte("envbank.vault.wrap.v1\x00" + vaultID + "\x00" + deviceID)
+	defer wipe(shared)
 	key, err := expandKey(shared, context)
 	if err != nil {
 		return WrappedKey{}, err
 	}
-	blob, err := Seal(key, vaultKey, context)
+	defer wipe(key)
+	blob, err := Seal(key, plaintext, context)
 	if err != nil {
 		return WrappedKey{}, err
 	}
 	return WrappedKey{Version: formatVersion, EphemeralKey: encode(ephemeral.PublicKey().Bytes()), Blob: blob}, nil
 }
 
-func UnwrapVaultKey(envelope WrappedKey, privateKey, vaultID, deviceID string) ([]byte, error) {
+// OpenFromDevice reverses SealToDevice with the recipient's wrapping private key.
+func OpenFromDevice(envelope WrappedKey, privateKey string, context []byte) ([]byte, error) {
 	if envelope.Version != formatVersion {
 		return nil, fmt.Errorf("unsupported wrapped-key version %d", envelope.Version)
 	}
@@ -251,6 +268,7 @@ func UnwrapVaultKey(envelope WrappedKey, privateKey, vaultID, deviceID string) (
 	if err != nil {
 		return nil, errors.New("invalid local wrapping key")
 	}
+	defer wipe(privBytes)
 	ephemeralBytes, err := decode(envelope.EphemeralKey)
 	if err != nil {
 		return nil, errors.New("invalid ephemeral key")
@@ -267,12 +285,39 @@ func UnwrapVaultKey(envelope WrappedKey, privateKey, vaultID, deviceID string) (
 	if err != nil {
 		return nil, err
 	}
-	context := []byte("envbank.vault.wrap.v1\x00" + vaultID + "\x00" + deviceID)
+	defer wipe(shared)
 	key, err := expandKey(shared, context)
 	if err != nil {
 		return nil, err
 	}
+	defer wipe(key)
 	return Open(key, envelope.Blob, context)
+}
+
+// DeriveSubkey derives a 32-byte, domain-separated subkey from a 256-bit key
+// with HKDF-SHA-256 (nil salt, context as info), the same expansion used by
+// device wrapping.
+func DeriveSubkey(key, context []byte) ([]byte, error) {
+	if len(key) != 32 {
+		return nil, errors.New("invalid key length")
+	}
+	return expandKey(key, context)
+}
+
+// MAC returns HMAC-SHA-256(key, message).
+func MAC(key, message []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(message)
+	return mac.Sum(nil)
+}
+
+// Wipe zeroes a buffer (best effort; Go may have copied it).
+func Wipe(value []byte) { wipe(value) }
+
+func wipe(value []byte) {
+	for i := range value {
+		value[i] = 0
+	}
 }
 
 func Sign(privateKey string, message []byte) (string, error) {

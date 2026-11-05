@@ -9,6 +9,10 @@ versioning after the `v` prefix, while `0.x` releases remain unstable.
   `envbank_secret_*` MCP tools: owner-terminal secret ingest and
   owner-approved, redacted command injection for coding agents
   ([agent broker](docs/agent-broker.md)).
+- added the cross-device secret relay: `envbank agent relay-request` /
+  `envbank_secret_relay_request`, `envbank relay send`, and authenticated,
+  single-use, expiring `/relays` endpoints that store only sealed envelopes
+  (server schema version 7) ([cross-device relay](docs/cross-device-relay.md)).
 
 ## 0.2.0 - 2026-08-10
 

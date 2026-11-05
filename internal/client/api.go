@@ -175,6 +175,62 @@ func (a *API) ListAccessEvents(limit int, before string) (protocol.AccessEventPa
 	return response, err
 }
 
+// ServerError is a non-2xx service response.
+type ServerError struct {
+	Status  int
+	Message string
+}
+
+func (e *ServerError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("server returned %d: %s", e.Status, e.Message)
+	}
+	return fmt.Sprintf("server returned %d", e.Status)
+}
+
+// ErrRelayGone reports a relay request that expired, was cancelled or was
+// already consumed.
+var ErrRelayGone = errors.New("relay request expired or is no longer available")
+
+func relayError(err error) error {
+	var serverError *ServerError
+	if errors.As(err, &serverError) && serverError.Status == http.StatusGone {
+		return ErrRelayGone
+	}
+	return err
+}
+
+// CreateRelay stores a target-created relay request.
+func (a *API) CreateRelay(request protocol.RelayCreateRequest) (protocol.RelayRequest, error) {
+	var response protocol.RelayRequest
+	err := a.do(http.MethodPost, a.vaultPath()+"/relays", request, &response, true)
+	return response, err
+}
+
+// ListRelays lists pending relay requests this device sends or receives.
+func (a *API) ListRelays() ([]protocol.RelayRequest, error) {
+	var response []protocol.RelayRequest
+	err := a.do(http.MethodGet, a.vaultPath()+"/relays", nil, &response, true)
+	return response, err
+}
+
+// SealRelay posts the sender's sealed envelope.
+func (a *API) SealRelay(id string, request protocol.RelaySealRequest) error {
+	return relayError(a.do(http.MethodPost, a.vaultPath()+"/relays/"+url.PathEscape(id)+"/seal", request, nil, true))
+}
+
+// ConsumeRelay fetches (once) the envelope of the target's request.
+func (a *API) ConsumeRelay(id string) (protocol.RelayConsumeResponse, error) {
+	var response protocol.RelayConsumeResponse
+	err := a.do(http.MethodPost, a.vaultPath()+"/relays/"+url.PathEscape(id)+"/consume", nil, &response, true)
+	return response, relayError(err)
+}
+
+// CancelRelay withdraws the target's request.
+func (a *API) CancelRelay(id string) error {
+	return relayError(a.do(http.MethodDelete, a.vaultPath()+"/relays/"+url.PathEscape(id), nil, nil, true))
+}
+
 func (a *API) vaultPath() string {
 	return "/v1/vaults/" + url.PathEscape(a.Config.VaultID)
 }
@@ -262,9 +318,9 @@ func (a *API) do(method, path string, request any, response any, authenticated b
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(raw, &serverError) == nil && serverError.Error != "" {
-			return fmt.Errorf("server returned %d: %s", res.StatusCode, serverError.Error)
+			return &ServerError{Status: res.StatusCode, Message: serverError.Error}
 		}
-		return fmt.Errorf("server returned %d", res.StatusCode)
+		return &ServerError{Status: res.StatusCode}
 	}
 	if response != nil && len(raw) != 0 {
 		if err := json.Unmarshal(raw, response); err != nil {

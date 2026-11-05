@@ -765,8 +765,8 @@ PRAGMA user_version = 1;`
 	}
 	defer check.Close()
 	var version int
-	if err := check.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
-		t.Fatalf("schema version = %d, err %v; want 6", version, err)
+	if err := check.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 7 {
+		t.Fatalf("schema version = %d, err %v; want 7", version, err)
 	}
 }
 
@@ -1049,7 +1049,7 @@ func TestVersionFourNonceMigrationRemainsReplaySafe(t *testing.T) {
 		device_id = ? AND nonce = ?`, created.VaultID, created.DeviceID, nonce).Scan(&refreshed); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 || refreshed == "2000-01-01T00:00:00Z" {
+	if version != 7 || refreshed == "2000-01-01T00:00:00Z" {
 		t.Fatalf("migration version=%d refreshed=%q", version, refreshed)
 	}
 }

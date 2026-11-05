@@ -94,10 +94,12 @@ a passphrase would let the agent choose the vault passphrase.
 
   Until that passes, the terminal fallback is the supported path.
 
-## Cross-device secret relay (to build)
+## Cross-device secret relay
 
-To type a password on one device (for example a phone) and use it on another,
-the relay reuses EnvBank device keys. Each enrolled device already has an
+Implemented for the vault-ingest sink; see
+[cross-device relay](cross-device-relay.md) for the protocol, threat model and
+limits. To type a password on one device (for example a phone) and use it on
+another, the relay reuses EnvBank device keys. Each enrolled device already has an
 X25519 wrapping key, verified by fingerprint at pairing.
 
 1. **Target.** The target's owner surface requests a value for one sink and
@@ -127,5 +129,7 @@ unsupported until a separately qualified input boundary exists.
 2. Hosted mode: Cloudflare Access credentials through the owner surface, and
    deployment via the existing Cloudflare commands with owner confirmations.
 3. Desktop-host provider protocol, authentication and no-leak qualification.
-4. Cross-device relay.
+4. Done for vault ingest: cross-device relay
+   ([cross-device relay](cross-device-relay.md)). Passphrase-prompt and
+   protected-browser-fill sinks remain.
 5. `local_only` through the desktop host's local-vault adapter.

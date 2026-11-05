@@ -27,7 +27,8 @@ CREATE TABLE access_events (
 		'invitation_creation', 'invitation_list', 'invitation_status',
 		'invitation_approval', 'invitation_rejection', 'invitation_cancellation',
 		'invitation_expiry', 'object_list', 'object_read', 'object_update',
-		'object_delete'
+		'object_delete', 'relay_creation', 'relay_list', 'relay_seal',
+		'relay_consume', 'relay_cancellation'
 	)),
 	outcome TEXT NOT NULL CHECK (outcome IN ('succeeded', 'rejected', 'denied')),
 	reason TEXT CHECK (reason IS NULL OR reason IN (
@@ -36,7 +37,7 @@ CREATE TABLE access_events (
 		'revision_conflict', 'already_revoked', 'already_approved',
 		'final_active_device', 'binding_mismatch', 'terminal_conflict',
 		'attempt_exhaustion', 'incorrect_actor', 'unsupported_version',
-		'expired'
+		'expired', 'rate_limited'
 	))
 );
 CREATE INDEX access_events_vault_sequence ON access_events(vault_id, sequence DESC);

@@ -120,7 +120,7 @@ func migrateSchema(db *sql.DB) error {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
 	}
-	if version > 6 {
+	if version > 7 {
 		return fmt.Errorf("unsupported server database version %d", version)
 	}
 	if version == 1 {
@@ -214,9 +214,23 @@ PRAGMA user_version = 5;`); err != nil {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit database migration: %w", err)
 		}
-		return nil
+		version = 6
 	}
 	if version == 6 {
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin database migration: %w", err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(relayMigrationSchema); err != nil {
+			return fmt.Errorf("migrate database schema to version 7: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit database migration: %w", err)
+		}
+		return nil
+	}
+	if version == 7 {
 		return nil
 	}
 	tx, err := db.Begin()
@@ -277,8 +291,8 @@ CREATE TABLE nonces (
 	PRIMARY KEY (vault_id, device_id, nonce)
 );
 CREATE INDEX nonces_created_at ON nonces(created_at);
-` + accessEventsSchema + invitationTableSchema + `
-PRAGMA user_version = 6;`
+` + accessEventsSchema + invitationTableSchema + relaysSchema + `
+PRAGMA user_version = 7;`
 	if _, err := tx.Exec(schema); err != nil {
 		return fmt.Errorf("create database schema: %w", err)
 	}
@@ -343,6 +357,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.deleteVaultObject(w, r, vaultID, parts[4])
 	case len(parts) == 4 && parts[3] == "access-events" && r.Method == http.MethodGet:
 		s.listAccessEvents(w, r, vaultID)
+	case len(parts) >= 4 && parts[3] == "relays" && s.routeRelay(w, r, vaultID, parts):
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}

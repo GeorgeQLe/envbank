@@ -16,6 +16,8 @@ const (
 	ToolNames   = "envbank_secret_names"
 	ToolRequest = "envbank_secret_request"
 	ToolRun     = "envbank_secret_run"
+	// ToolRelayRequest asks the owner to send a value from another device.
+	ToolRelayRequest = "envbank_secret_relay_request"
 	// Device setup (names avoid the workflow tool envbank_setup_plan).
 	ToolSetupPlan  = "envbank_device_setup_plan"
 	ToolSetupApply = "envbank_device_setup_apply"
@@ -37,6 +39,8 @@ func (MCPExtension) Tools() []mcpserver.ToolDefinition {
 	return []mcpserver.ToolDefinition{
 		{Name: ToolNames, Description: "List the NAMES of secrets in the owner's EnvBank vault. Never returns values.", Schema: obj(map[string]any{})},
 		{Name: ToolRequest, Description: "Ask the owner to store a secret under NAME. The owner types the value into the EnvBank broker terminal; you receive only 'stored' or 'denied', never the value. Explain why in `reason`.",
+			Schema: obj(map[string]any{"name": str, "reason": str}, "name", "reason")},
+		{Name: ToolRelayRequest, Description: "Ask the owner to send a secret from another of their enrolled EnvBank devices (for example a phone) and store it under NAME. The owner chooses the device, compares a code and types the value there; it arrives sealed to the broker. You receive only 'stored', 'denied' or 'expired', never the value. Explain why in `reason`.",
 			Schema: obj(map[string]any{"name": str, "reason": str}, "name", "reason")},
 		{Name: ToolRun, Description: "Run a command with the named secrets set as environment variables. The broker (not you) spawns it after the owner approves this exact command (absolute working directory required; no shell -c / inline interpreter code). stdout/stderr come back with secret values redacted. Use this instead of reading secrets.",
 			Schema: obj(map[string]any{"secrets": strs, "argv": strs, "dir": str, "timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": int(Limits.MaxTimeout.Seconds())}}, "secrets", "argv", "dir")},
@@ -63,6 +67,15 @@ func (e MCPExtension) Call(ctx context.Context, name string, raw json.RawMessage
 			return nil, errors.New(CodeInvalidRequest)
 		}
 		req = Request{Op: OpRequest, Name: args.Name, Reason: args.Reason}
+	case ToolRelayRequest:
+		var args struct {
+			Name   string `json:"name"`
+			Reason string `json:"reason"`
+		}
+		if !strictDecode(raw, &args) {
+			return nil, errors.New(CodeInvalidRequest)
+		}
+		req = Request{Op: OpRelayRequest, Name: args.Name, Reason: args.Reason}
 	case ToolRun:
 		var args struct {
 			Secrets        []string `json:"secrets"`

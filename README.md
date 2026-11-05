@@ -80,6 +80,11 @@ automation layer. See [private provider intake](docs/provider-intake.md).
 - An owner-held [agent broker](docs/agent-broker.md) that lets coding agents
   request secrets (the owner types them) and run owner-approved commands with
   named secrets injected and output redacted, without ever receiving a value
+- A [cross-device relay](docs/cross-device-relay.md): an agent or the owner asks
+  the broker for a secret, the owner compares a six-digit code and types the
+  value on another enrolled device, and it arrives sealed to the broker's
+  device key, single-use and expiring within five minutes; the sync service
+  stores only ciphertext
 - Exact-origin browser authorization stored inside each encrypted record
 - A macOS Keychain-gated native host (Brave by default) and dependency-free MV3 extension
 - A fail-closed protected-fill SDK and computer-use selection UI; real controller

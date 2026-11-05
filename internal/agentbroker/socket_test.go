@@ -115,7 +115,7 @@ func TestMCPToolsAreValueFreeAndForwardToTheBroker(t *testing.T) {
 			t.Fatalf("value-shaped tool %s", d.Name)
 		}
 	}
-	if strings.Join(names, ",") != "envbank_secret_names,envbank_secret_request,envbank_secret_run,envbank_device_setup_plan,envbank_device_setup_apply" {
+	if strings.Join(names, ",") != "envbank_secret_names,envbank_secret_request,envbank_secret_relay_request,envbank_secret_run,envbank_device_setup_plan,envbank_device_setup_apply" {
 		t.Fatalf("tools %v", names)
 	}
 	args, _ := json.Marshal(map[string]any{"secrets": []string{"DEPLOY_TOKEN"}, "argv": []string{tool}, "dir": dir})

@@ -31,13 +31,14 @@ vault passphrase there. The broker listens on
 and a peer-uid check. It locks (exits and wipes the vault key) after 30 minutes
 idle or 12 hours total, or on Ctrl-C.
 
-Agents get three operations, through `envbank mcp serve` or the
+Agents get four operations, through `envbank mcp serve` or the
 `envbank agent` CLI:
 
 | MCP tool / CLI | What the agent gets |
 | --- | --- |
 | `envbank_secret_names` / `envbank agent names` | Secret **names** only. |
 | `envbank_secret_request` / `envbank agent request --reason TEXT NAME` | The owner is prompted in the broker terminal. The owner types the value twice, with no echo (replacing an existing secret needs a separate yes). The agent receives `stored` or `denied`. |
+| `envbank_secret_relay_request` / `envbank agent relay-request --name NAME --reason TEXT` | The owner picks another enrolled device, compares a relay code and types the value there with `envbank relay send`; it arrives sealed to the broker ([cross-device relay](cross-device-relay.md)). The agent receives `stored`, `denied` or `expired`. |
 | `envbank_secret_run` / `envbank agent run --secret NAME -- CMD ARGS` | The owner approves the exact command: **once**, **always for this exact command**, or **no**. The broker spawns it with only the named secrets plus a minimal environment. The agent receives exit code, stdout and stderr with values redacted. |
 
 There is no get, set, export or raw tool.

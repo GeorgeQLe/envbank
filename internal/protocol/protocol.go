@@ -193,3 +193,60 @@ func ValidateNonce(value string) error {
 	}
 	return nil
 }
+
+// Cross-device relay. The sync service stores only these opaque objects: the
+// descriptor is encrypted under a vault-key-derived subkey and the envelope is
+// sealed to the target device's X25519 wrapping key.
+const (
+	RelayProtocolVersion = 1
+
+	RelayPending   = "pending"
+	RelaySealed    = "sealed"
+	RelayConsumed  = "consumed"
+	RelayCancelled = "cancelled"
+	RelayExpired   = "expired"
+
+	// RelayMaxTTL bounds every relay request; the server refuses longer ones.
+	RelayMaxTTL = 5 * time.Minute
+)
+
+type RelayCreateRequest struct {
+	Version        int         `json:"version"`
+	ID             string      `json:"id"`
+	SenderDeviceID string      `json:"sender_device_id"`
+	ExpiresAt      string      `json:"expires_at"`
+	Descriptor     secure.Blob `json:"descriptor"`
+}
+
+type RelayRequest struct {
+	Version        int         `json:"version"`
+	ID             string      `json:"id"`
+	TargetDeviceID string      `json:"target_device_id"`
+	SenderDeviceID string      `json:"sender_device_id"`
+	CreatedAt      string      `json:"created_at"`
+	ExpiresAt      string      `json:"expires_at"`
+	State          string      `json:"state"`
+	Descriptor     secure.Blob `json:"descriptor"`
+}
+
+type RelayEnvelope struct {
+	Version        int               `json:"version"`
+	RequestID      string            `json:"request_id"`
+	SenderDeviceID string            `json:"sender_device_id"`
+	Sealed         secure.WrappedKey `json:"sealed"`
+	Signature      string            `json:"signature"`
+	VaultMAC       string            `json:"vault_mac"`
+}
+
+type RelaySealRequest struct {
+	Version  int           `json:"version"`
+	Envelope RelayEnvelope `json:"envelope"`
+}
+
+// RelayConsumeResponse carries the envelope exactly once (state consumed);
+// while pending it carries only the state.
+type RelayConsumeResponse struct {
+	Version  int            `json:"version"`
+	State    string         `json:"state"`
+	Envelope *RelayEnvelope `json:"envelope,omitempty"`
+}

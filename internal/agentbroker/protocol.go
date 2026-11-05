@@ -66,6 +66,9 @@ const (
 	OpRequest = "request"
 	OpRun     = "run"
 	OpSetup   = "setup"
+	// OpRelayRequest asks the owner to send a value from another enrolled
+	// device; the broker receives it sealed and stores it under Name.
+	OpRelayRequest = "relay_request"
 )
 
 // Request is the only message an agent can send.
@@ -113,6 +116,8 @@ const (
 	CodeNotSetUp       = "VAULT_NOT_SET_UP"
 	CodeAlreadySetUp   = "ALREADY_SET_UP"
 	CodeSetupFailed    = "SETUP_FAILED"
+	CodeRelayDisabled  = "RELAY_UNAVAILABLE"
+	CodeRelayFailed    = "RELAY_FAILED"
 )
 
 // States for an ingest request.
@@ -120,4 +125,5 @@ const (
 	StateStored  = "stored"
 	StateDenied  = "denied"
 	StateApplied = "applied"
+	StateExpired = "expired"
 )

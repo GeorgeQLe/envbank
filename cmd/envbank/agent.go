@@ -199,7 +199,11 @@ func agentBrokerCommand(args []string) error {
 		if _, err := vault.Names(context.Background()); err != nil {
 			return fmt.Errorf("vault check failed: %w", err)
 		}
-		if broker, err = agentbroker.New(agentbroker.Options{Vault: vault, Prompter: prompter, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()}); err != nil {
+		relayer, err := newBrokerRelay(vault, cfg, secrets)
+		if err != nil {
+			return err
+		}
+		if broker, err = agentbroker.New(agentbroker.Options{Vault: vault, Relay: relayer, Prompter: prompter, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()}); err != nil {
 			return err
 		}
 	}
@@ -260,7 +264,7 @@ func brokerPassphrase(auth *authFlags) ([]byte, error) {
 // agentCommand is the agent-side client: no vault access, no passphrase.
 func agentCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("agent subcommand is required (supported: names, request, run)")
+		return errors.New("agent subcommand is required (supported: names, request, relay-request, run)")
 	}
 	fs := flag.NewFlagSet("agent "+args[0], flag.ContinueOnError)
 	socket := fs.String("socket", agentbroker.DefaultSocketPath(), "agent broker socket")
@@ -278,6 +282,13 @@ func agentCommand(args []string) error {
 			return errors.New("usage: envbank agent request --reason TEXT [--socket PATH] NAME")
 		}
 		req = agentbroker.Request{Op: agentbroker.OpRequest, Name: fs.Arg(0), Reason: *reason}
+	case "relay-request":
+		name := fs.String("name", "", "secret NAME to store on this device")
+		reason := fs.String("reason", "", "why the agent needs this secret (shown to the owner)")
+		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || *name == "" || *reason == "" {
+			return errors.New("usage: envbank agent relay-request --name NAME --reason TEXT [--socket PATH]")
+		}
+		req = agentbroker.Request{Op: agentbroker.OpRelayRequest, Name: *name, Reason: *reason}
 	case "run":
 		var secrets stringList
 		fs.Var(&secrets, "secret", "secret NAME to inject (repeatable)")
@@ -302,7 +313,7 @@ func agentCommand(args []string) error {
 		}
 		req = agentbroker.Request{Op: agentbroker.OpRun, Secrets: secrets, Argv: argv, Dir: *dir, TimeoutSeconds: *timeout}
 	default:
-		return fmt.Errorf("unknown agent subcommand %q (supported: names, request, run)", args[0])
+		return fmt.Errorf("unknown agent subcommand %q (supported: names, request, relay-request, run)", args[0])
 	}
 	resp, err := agentbroker.Call(ctx, *socket, req)
 	if err != nil {
@@ -316,7 +327,7 @@ func agentCommand(args []string) error {
 		for _, n := range resp.Names {
 			fmt.Println(n)
 		}
-	case agentbroker.OpRequest:
+	case agentbroker.OpRequest, agentbroker.OpRelayRequest:
 		fmt.Println(resp.State)
 		if resp.State != agentbroker.StateStored {
 			return exitCodeError{code: 3}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -66,6 +67,7 @@ type RunResult struct {
 type Broker struct {
 	vault    Vault // nil in setup mode (no vault on this device yet)
 	setup    Setup
+	relay    Relay // nil when cross-device relay is unavailable
 	prompter Prompter
 	runner   Runner
 	path     string   // broker's own PATH for resolution
@@ -90,8 +92,10 @@ type Setup interface {
 // Options configure a broker.
 type Options struct {
 	// Vault is nil to start in setup mode (then Setup is required).
-	Vault    Vault
-	Setup    Setup
+	Vault Vault
+	Setup Setup
+	// Relay enables OpRelayRequest; the Prompter must implement RelayPrompter.
+	Relay    Relay
 	Prompter Prompter
 	Runner   Runner
 	Path     string
@@ -104,7 +108,7 @@ func New(o Options) (*Broker, error) {
 		return nil, errors.New("agentbroker: a vault (or setup), prompter and runner are required")
 	}
 	return &Broker{
-		vault: o.Vault, setup: o.Setup, prompter: o.Prompter, runner: o.Runner, path: o.Path, baseEnv: append([]string(nil), o.BaseEnv...),
+		vault: o.Vault, setup: o.Setup, relay: o.Relay, prompter: o.Prompter, runner: o.Runner, path: o.Path, baseEnv: append([]string(nil), o.BaseEnv...),
 		queued: make(chan struct{}, Limits.QueuedPrompts), runs: make(chan struct{}, Limits.ConcurrentRuns), always: map[string]bool{},
 	}, nil
 }
@@ -150,6 +154,8 @@ func (b *Broker) Handle(ctx context.Context, req Request) Response {
 		return b.ingest(ctx, req)
 	case OpRun:
 		return b.run(ctx, req)
+	case OpRelayRequest:
+		return b.relayRequest(ctx, req)
 	default:
 		return refuse(CodeInvalidRequest)
 	}
@@ -346,4 +352,117 @@ func wipe(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
+}
+
+// RelayPeer is another enrolled, active device of the vault.
+type RelayPeer struct {
+	ID          string
+	Name        string // server-supplied; prompters must sanitize
+	Fingerprint string
+}
+
+// RelayPrompt is what the owner sees about a relay request. No values.
+type RelayPrompt struct {
+	Name     string
+	Reason   string // agent-supplied; sanitize before display
+	Replaces bool
+	Sender   RelayPeer
+	SAS      string
+	Expires  time.Time
+}
+
+// ErrRelayExpired is returned by RelaySession.Wait when the request expired.
+var ErrRelayExpired = errors.New("relay request expired")
+
+// Relay creates cross-device relay requests for this broker's device.
+type Relay interface {
+	Peers(ctx context.Context) ([]RelayPeer, error)
+	Begin(ctx context.Context, sender RelayPeer, name, reason string) (RelaySession, error)
+}
+
+// RelaySession is one outstanding request. Wait returns the verified,
+// decrypted value (the caller wipes it), ErrRelayExpired, or another error.
+type RelaySession interface {
+	SAS() string
+	Expires() time.Time
+	Wait(ctx context.Context) ([]byte, error)
+	Cancel()
+}
+
+// RelayPrompter is the owner-channel part of the relay flow.
+type RelayPrompter interface {
+	// ChooseRelaySender lets the owner approve the request by picking the
+	// sending device (index into peers), or decline (ok=false).
+	ChooseRelaySender(ctx context.Context, p RelayPrompt, peers []RelayPeer) (index int, ok bool, err error)
+	// ShowRelayCode shows the SAS the sending device must display.
+	ShowRelayCode(p RelayPrompt)
+	// ConfirmRelay asks the owner to store the received value.
+	ConfirmRelay(ctx context.Context, p RelayPrompt) (bool, error)
+}
+
+func (b *Broker) relayRequest(ctx context.Context, req Request) Response {
+	if !ValidName(req.Name) || len(req.Secrets) != 0 || len(req.Argv) != 0 || req.Dir != "" || req.TimeoutSeconds != 0 ||
+		len(req.Reason) > Limits.ReasonBytes || !utf8.ValidString(req.Reason) || len(req.Setup) != 0 {
+		return refuse(CodeInvalidRequest)
+	}
+	owner, ok := b.prompter.(RelayPrompter)
+	if b.relay == nil || !ok {
+		return refuse(CodeRelayDisabled)
+	}
+	exists, err := b.currentVault().Exists(ctx, req.Name)
+	if err != nil {
+		return refuse(CodeVaultFailed)
+	}
+	denied := Response{V: ProtocolVersion, OK: true, State: StateDenied}
+	return b.withPrompt(ctx, func() Response {
+		peers, err := b.relay.Peers(ctx)
+		if err != nil {
+			return refuse(CodeVaultFailed)
+		}
+		prompt := RelayPrompt{Name: req.Name, Reason: req.Reason, Replaces: exists}
+		if len(peers) == 0 {
+			b.prompter.Notify("relay request for " + req.Name + " refused: no other enrolled device in this vault")
+			return denied
+		}
+		index, ok, err := owner.ChooseRelaySender(ctx, prompt, peers)
+		if err != nil || !ok || index < 0 || index >= len(peers) || ctx.Err() != nil {
+			return denied
+		}
+		prompt.Sender = peers[index]
+		session, err := b.relay.Begin(ctx, prompt.Sender, req.Name, req.Reason)
+		if err != nil {
+			b.prompter.Notify("relay request could not be created; nothing was sent")
+			return refuse(CodeRelayFailed)
+		}
+		prompt.SAS, prompt.Expires = session.SAS(), session.Expires()
+		owner.ShowRelayCode(prompt)
+		value, err := session.Wait(ctx)
+		defer wipe(value)
+		switch {
+		case ctx.Err() != nil:
+			session.Cancel()
+			return denied
+		case errors.Is(err, ErrRelayExpired):
+			b.prompter.Notify("relay request for " + req.Name + " expired; nothing stored")
+			return Response{V: ProtocolVersion, OK: true, State: StateExpired}
+		case err != nil:
+			session.Cancel()
+			b.prompter.Notify("relay envelope rejected (verification failed); nothing stored")
+			return denied
+		}
+		if len(value) < Limits.MinValueBytes || len(value) > Limits.MaxValueBytes {
+			b.prompter.Notify("value rejected: length must be 8 bytes to 64 KiB; nothing stored")
+			return denied
+		}
+		confirmed, err := owner.ConfirmRelay(ctx, prompt)
+		if err != nil || !confirmed || ctx.Err() != nil {
+			return denied
+		}
+		if err := b.currentVault().Store(context.WithoutCancel(ctx), req.Name, string(value)); err != nil {
+			b.prompter.Notify("store failed; nothing was returned to the agent")
+			return refuse(CodeVaultFailed)
+		}
+		b.prompter.Notify("stored " + req.Name + " (relayed from " + prompt.Sender.Name + ")")
+		return Response{V: ProtocolVersion, OK: true, State: StateStored}
+	})
 }

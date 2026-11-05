@@ -147,6 +147,8 @@ func run(args []string) error {
 		return agentBrokerCommand(args[1:])
 	case "agent":
 		return agentCommand(args[1:])
+	case "relay":
+		return relayCommand(args[1:])
 	case "setup":
 		return setupCommand(args[1:])
 	case "help", "-h", "--help":
@@ -185,6 +187,8 @@ Usage:
   envbank agent names [--socket PATH]
   envbank agent request --reason TEXT [--socket PATH] NAME
   envbank agent run --secret NAME [--secret NAME] [--dir DIR] [--timeout S] [--socket PATH] -- COMMAND [ARGS...]
+  envbank agent relay-request --name NAME --reason TEXT [--socket PATH]  # value typed on another device
+  envbank relay send [auth flags]                                         # owner terminal on the sending device
   envbank browser-allow [auth flags] NAME ORIGIN
   envbank browser-deny [auth flags] NAME ORIGIN
   envbank browser-origins [auth flags] NAME
