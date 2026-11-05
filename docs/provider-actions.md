@@ -77,13 +77,13 @@ exact plan. There is no "always" for provider actions.
 | `neon.project.create` | `name`, `region_id?`, `pg_version?`, `roles?` (default `[app_a, app_b]`), `records:{pooled, direct}` | Create a project, prepare the rotation roles as its owner role (no adopt), then reset `roles[0]` and store its pooled and direct URIs in the two new records, bound to the project with no destination. Owner URIs are discarded, never stored | `project_id`, `branch_id`, `role` (owner), `database`, `active_role`, `prepared_roles`, `records:{name: revision}` |
 | `neon.roles.prepare` | `project_id`, `branch_id`, `database`, `owner_role`, `roles?` (default `[app_a, app_b]`), `adopt` | For an existing project: make the roles rotation-ready (see [Neon rotation roles](#neon-rotation-roles)). With `adopt`, existing public-schema objects change owner, and the approval text says so | `prepared_roles` |
 | `neon.project.delete` | `project_id` | Delete the project (throwaway cleanup) and revoke its records' bindings | `deleted`, `revoked_bindings` |
-| `neon.rotate` | `project_id`, `branch_id`, `roles:[A, B]` (A is the role the deployment uses now), `owner_role`, `database`, `records:{pooled, direct}`, `vercel:{team_id, project_id, target, deployment?}`, `health_path` | Check the roles are prepared (`NEON_ROLES_NOT_PREPARED` otherwise, with no side effects), then zero-downtime rotation: reset the inactive role's password, store its URIs, push them to Vercel, redeploy, check health, then reset the previously active role (invalidating its old password) | active role, record revisions, `deployment_id` |
+| `neon.rotate` | `project_id`, `branch_id`, `roles:[A, B]` (A is the role the deployment uses now), `owner_role`, `database`, `records:{pooled, direct}`, `vercel:{team_id, project_id, target, deployment?}`, `health_path` | Check the roles are prepared (`NEON_ROLES_NOT_PREPARED` otherwise, with no side effects), then zero-downtime rotation: reset the inactive role's password, store its URIs, push them to Vercel, redeploy, check health, then reset the previously active role (invalidating its old password). Production targets run a [production release](#production-releases) first | active role, record revisions, `deployment_id` (production: release fields) |
 | `vercel.project.create` | `team_id`, `name`, `git_repo?` (`owner/repo`), `framework?` | Create a project and record its provenance (allows no record) | `team_id`, `project_id` |
 | `vercel.project.delete` | `team_id`, `project_id` | Delete a project (throwaway cleanup) | `deleted` |
 | `vercel.env.push` | `team_id`, `project_id`, `target` (`preview`\|`production`), `git_branch?`, `variables:{ENV_NAME: record}` | Upsert each variable as a `sensitive` env var; every record must be bound and allowed to the project | names and states |
-| `vercel.redeploy` | `team_id`, `project_id`, `target`, `deployment?` (source ID; default current), `health_path?` | Redeploy, wait until ready, check health (at least 3 checks over at least 30 s, as in `lifecycle.HealthEvidence`) | `deployment_id`, health |
+| `vercel.redeploy` | `team_id`, `project_id`, `target`, `deployment?` (source ID; default current), `health_path?` | Redeploy, wait until ready, check health (at least 3 checks over at least 30 s, as in `lifecycle.HealthEvidence`). Production: a [production release](#production-releases) | `deployment_id`, health (production: release fields) |
 | `stripe.webhook.create` | `url` (HTTPS), `events:[...]`, `record` | Create an endpoint and store `whsec_…` in the record, bound to the endpoint with no destination | `endpoint_id`, record revision |
-| `stripe.webhook.rotate` | `endpoint_id`, `record`, `previous_record`, `vercel:{…}`, `health_path` | Create a new endpoint with the same URL and events. Move the current secret to `previous_record`, store the new one in `record`, push both, redeploy, check health, then delete the old endpoint | new `endpoint_id`, revisions |
+| `stripe.webhook.rotate` | `endpoint_id`, `record`, `previous_record`, `vercel:{…}`, `health_path` | Create a new endpoint with the same URL and events. Move the current secret to `previous_record`, store the new one in `record`, push both, redeploy, check health, then delete the old endpoint. Production targets run a [production release](#production-releases) first | new `endpoint_id`, revisions (production: release fields) |
 | `stripe.webhook.delete` | `endpoint_id` | Delete an endpoint (cleanup) and revoke its bindings (its whole lineage, if it is the current endpoint) | `deleted`, `revoked_bindings` |
 | `binding.allow` | `records:[record...]` (1 to 16), `team_id`, `project_id` | Allow bound records to be deployed to a Vercel project (every target). The only way a destination is added | `team_id`, `project_id`, `records:{name: revision}` |
 
@@ -173,6 +173,77 @@ The broker builds the Touch ID reason from the validated plan only. Example:
     EnvBank: agent "<label>" (claude, 3f2a9c1e) wants to ROTATE Neon role
     app_b → active in project <id>, push DATABASE_URL, DATABASE_URL_UNPOOLED to
     Vercel prj_… preview, redeploy, then invalidate app_a.
+
+A production target (the destination already reads `PRODUCTION`) replaces
+"redeploy … check health at P" with `STAGED redeploy, check health at P,
+PROMOTE, verify production serves it and recheck, auto ROLL BACK on failure`
+(terse, so a rotation's plan fits the 600-byte prompt with realistic IDs).
+
+### Production releases
+
+Vercel creates a production redeploy STAGED (`autoAssignCustomDomains:
+false`): production traffic stays on the old deployment, which keeps using
+the old credential, until the new one is promoted. So `vercel.redeploy`,
+`neon.rotate` and `stripe.webhook.rotate` with a production target run:
+
+1. `vercel.current_deployment`: read the deployment serving production (the
+   rollback target, `previous_deployment_id`), before anything changes. It
+   must be alias-proven (every verified production domain aliased to one
+   READY, PROMOTED deployment, no alias job running), or the operation fails
+   with no side effects.
+2. Rotations: the new credential is created and stored, then pushed to
+   production env vars (`vercel.env_push`).
+3. `vercel.redeploy` (staged), `vercel.wait_ready`, `health` on the staged
+   deployment's URL.
+4. `vercel.promote`: production must still be on `previous_deployment_id`
+   (else `PRODUCTION_DEPLOYMENT_DRIFT`), then the promote request.
+5. `vercel.verify_production`: production alias reads (every 5 s, at most 60)
+   until it is proven to serve the new deployment (`PRODUCTION_NOT_SERVING`
+   otherwise; a third deployment is `PRODUCTION_DEPLOYMENT_DRIFT`).
+6. `health.production`: the full health policy again, on the promoted
+   deployment's URL.
+7. `vercel.confirm_production`: one more alias proof.
+8. Only then is the old credential invalidated (`neon.invalidate_old_role`)
+   or the old endpoint deleted (`stripe.delete_old_endpoint`).
+
+A failure before step 4's request leaves production untouched. A failure in
+steps 4 to 7 runs `vercel.rollback` (the operation still fails with the
+original step and code): it reads production, asks Vercel to roll back to
+`previous_deployment_id` if the new deployment serves it (up to 3 requests),
+and reads until production is proven back. The old credential is never
+invalidated, because the restored deployment still uses it. A failure of
+step 8 itself does not roll back: production serves the new deployment with
+the new credential.
+
+Release result fields (value-free): `previous_deployment_id`, `promoted`
+(the promote request was accepted), `production_verified`,
+`production_health {checks, window_s}` (`health` is the staged checks),
+`rolled_back` (a rollback was sent and production proven back), and
+`rollback`, set only after a failure at or after the promote:
+`rolled_back`, `not_needed` (production proven still on the previous
+deployment), `failed` (not proven, for example the operation was cancelled
+or the grant ended; both credentials stay valid) or `drift` (production
+serves a deployment the operation neither read nor created; left alone).
+
+Caveats:
+
+- **Env vars stay updated.** Variables pushed to production before a failure
+  (or a rollback) keep their new values: a Vercel rollback never restores
+  variable values (docs/vercel-integration-gaps.md). They hold credentials
+  that remain valid (the new Neon role, the new webhook secret), and the vault
+  keeps the new values; the restored deployment runs with the old ones.
+  Restoring the vault's previous values is not automated: the bindings
+  already follow the new revisions, so the owner reruns the action (a Neon
+  rotation can be repeated as is; a failed Stripe rotation leaves the new
+  endpoint, whose ID is in the result, beside the old one).
+- **Health host.** Health checks go only to the deployment's own
+  `*.vercel.app` URL, before and after the promote; production custom domains
+  are never contacted. Serving is proven through Vercel's alias records
+  instead. Standard Deployment Protection covers that URL, so it fails the
+  staged check with `HEALTH_PROTECTED` before the promote.
+- **Asynchronous promote.** A promote that Vercel accepts after the rollback
+  step proved production on the previous deployment could still land later;
+  the old credential is still valid then too.
 
 ## Implementation notes
 
@@ -267,17 +338,17 @@ details or deviates from the above:
   READY preview deployment of the project, of any branch, for preview (the
   port has no branch); name `deployment` when the push was branch-scoped. Redeploys are tagged with a random
   operation ID; `WaitReady` returns `https://<deployment>.vercel.app`.
-- **Production redeploy refused.** Vercel creates a production redeploy
-  staged (custom domains not assigned), so production traffic would keep the
-  old credentials and a rotation would then invalidate them under it. The
-  live port refuses it with `PRODUCTION_PROMOTION_UNSUPPORTED` at
-  `vercel.redeploy`, before creating a deployment and before anything is
-  invalidated. A promotion step (with its own approval wording) is needed
-  before production rotations work.
+- **Production mapping.** `Promote` and `Rollback` map to the adapter's
+  `Promote`/`Rollback` in the exact production scope, under
+  `WithMutationAuthorization` as above; the adapter re-checks project
+  ownership, an idle alias job, and READY+STAGED (promote) or a prior
+  PROMOTED deployment that is not current (rollback). The port promotes only
+  a deployment it created and rolls back only to one its alias-proven
+  `CurrentDeployment` returned. See [Production releases](#production-releases).
 - **Health requests.** One HTTPS GET to `<deployment URL><health_path>`: only
   a URL this operation's `WaitReady` returned, on a single-label
-  `*.vercel.app` host (custom domains are never checked, since a redeploy is
-  never aliased to them); no redirects followed; no credentials, cookies or
+  `*.vercel.app` host (production custom domains are never checked; serving
+  is proven through the alias records); no redirects followed; no credentials, cookies or
   protection-bypass headers; at most 4 KiB of body read. 2xx is healthy. A
   `401` (Vercel deployment protection) fails the step with
   `HEALTH_PROTECTED` and is never bypassed: disable protection on the
@@ -300,9 +371,12 @@ details or deviates from the above:
    overrides, which are not reachable from agent input, flags or the
    production binary.
 3. **Ordering.** New values are stored durably before any destination is
-   written. Old credentials are revoked only after health checks pass. If
-   anything fails, the old credential stays valid and the operation ends
-   `failed` with a step code. Neon's old role is reset only after health passes.
+   written. Old credentials are revoked only after health checks pass (for
+   production: after production is proven to serve the new deployment and
+   it passed health there). If anything fails, the old credential stays valid
+   and the operation ends `failed` with a step code; a production failure at
+   or after the promote rolls production back. Neon's old role is reset only
+   after health passes.
 4. **No retained authority.** Control credentials are read per action, in a
    callback, and wiped afterwards.
 5. **No agent routes.** Provider actions are not reachable through

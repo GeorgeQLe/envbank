@@ -28,6 +28,12 @@ import (
 // deployment is healthy only if every credential it was built with is still
 // valid at the provider, so a rotation that invalidated the old role before
 // the new deployment served would show up as a failed health check.
+//
+// Vercel production is modelled too: a production redeploy is created
+// STAGED and serves nothing; the project's verified production domain is
+// aliased to one deployment; promote and rollback move that alias (promote
+// through an alias job that runs for aliasDelay project reads); and a
+// production deployment snapshots the production env vars.
 
 // events is the cross-provider order of state changes and health checks.
 type events struct {
@@ -354,6 +360,8 @@ type vercelEnv struct {
 
 type vercelDeployment struct {
 	id, project, host, sha string
+	target                 string // "" (preview) or "production"
+	substate               string // production: STAGED or PROMOTED
 	meta                   map[string]string
 	snapshot               map[string]string // env values the build captured
 	created                int64
@@ -363,6 +371,16 @@ type vercelProject struct {
 	id, name, team string
 	deleted        bool
 	envs           []*vercelEnv
+	// Production: one verified domain aliased to alias; jobStatus is the
+	// last alias job's (lastAliasRequest), pending a promote's job.
+	domain, alias string
+	jobStatus     string
+	pending       *aliasJob
+}
+
+type aliasJob struct {
+	to    string
+	reads int // project reads left while the job is in progress
 }
 
 type fakeVercel struct {
@@ -379,6 +397,11 @@ type fakeVercel struct {
 	deps    map[string]*vercelDeployment
 	server  *httptest.Server
 	protect bool // deployment protection: health answers 401
+	// Production failure knobs.
+	aliasDelay       int  // project reads a promote's alias job stays in progress
+	promoteError     bool // promote moves the alias, then answers 500
+	promoteJobFails  bool // promote is accepted, its alias job fails (alias unchanged)
+	failWhileServing bool // a redeployed deployment answers 503 while it serves production
 	// health requests the deployments received, for header checks.
 	healthReqs []*http.Request
 }
@@ -397,6 +420,11 @@ func (f *fakeVercel) id(prefix string) string {
 
 // envValue returns key's value in the project's preview scope.
 func (f *fakeVercel) envValue(projectID, key string) string {
+	return f.envValueIn(projectID, key, "preview")
+}
+
+// envValueIn returns key's value in the project's target scope.
+func (f *fakeVercel) envValueIn(projectID, key, target string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p := f.byID[projectID]
@@ -404,11 +432,43 @@ func (f *fakeVercel) envValue(projectID, key string) string {
 		return ""
 	}
 	for _, e := range p.envs {
-		if e.key == key && e.target == "preview" && e.branch == "" {
+		if e.key == key && e.target == target && e.branch == "" {
 			return e.value
 		}
 	}
 	return ""
+}
+
+// seedProduction gives the project a promoted production deployment, built
+// with its production env vars, that its verified domain serves.
+func (f *fakeVercel) seedProduction(projectID, domain string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.byID[projectID]
+	d := f.deployLocked(p, map[string]string{}, "production")
+	d.substate = "PROMOTED"
+	p.domain, p.alias = domain, d.id
+	return d.id
+}
+
+// production returns the deployment the project's domain serves.
+func (f *fakeVercel) production(projectID string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.byID[projectID].alias
+}
+
+// snapshot returns the env value deployment id was built with.
+func (f *fakeVercel) snapshot(id, key string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deps[id].snapshot[key]
+}
+
+func (f *fakeVercel) aliasLocked(p *vercelProject, to string) {
+	p.alias = to
+	f.deps[to].substate = "PROMOTED"
+	f.ev.add("vercel.alias %s", to)
 }
 
 func (f *fakeVercel) deployWire(d *vercelDeployment) map[string]any {
@@ -416,17 +476,25 @@ func (f *fakeVercel) deployWire(d *vercelDeployment) map[string]any {
 	for k, v := range d.meta {
 		meta[k] = v
 	}
-	return map[string]any{"id": d.id, "projectId": d.project, "ownerId": f.team, "target": nil, "readyState": "READY", "readySubstate": "",
+	var target any
+	if d.target != "" {
+		target = d.target
+	}
+	return map[string]any{"id": d.id, "projectId": d.project, "ownerId": f.team, "target": target, "readyState": "READY", "readySubstate": d.substate,
 		"url": d.host, "meta": meta, "gitSource": map[string]string{"ref": "main", "sha": d.sha}}
 }
 
-func (f *fakeVercel) deployLocked(p *vercelProject, meta map[string]string) *vercelDeployment {
+func (f *fakeVercel) deployLocked(p *vercelProject, meta map[string]string, target string) *vercelDeployment {
 	f.clock += 1000
 	id := f.id("dpl_")
 	d := &vercelDeployment{id: id, project: p.id, host: strings.ToLower(p.name + "-" + strings.TrimPrefix(id, "dpl_") + ".vercel.app"), sha: "abc1234def5678",
-		meta: meta, snapshot: map[string]string{}, created: f.clock}
+		target: target, meta: meta, snapshot: map[string]string{}, created: f.clock}
+	envTarget := "preview"
+	if target == "production" {
+		envTarget, d.substate = "production", "STAGED"
+	}
 	for _, e := range p.envs {
-		if e.target == "preview" {
+		if e.target == envTarget {
 			d.snapshot[e.key] = e.value
 		}
 	}
@@ -467,7 +535,7 @@ func (f *fakeVercel) serve(w http.ResponseWriter, r *http.Request) {
 		p := &vercelProject{id: f.id("prj_"), name: body.Name, team: f.team}
 		f.byID[p.id] = p
 		// The first git deployment, as a linked repo would produce.
-		f.deployLocked(p, map[string]string{})
+		f.deployLocked(p, map[string]string{}, "")
 		f.ev.add("vercel.create_project %s", p.id)
 		writeJSON(w, http.StatusOK, map[string]string{"id": p.id, "name": p.name, "accountId": f.team})
 	case len(parts) == 3 && parts[0] == "v9" && parts[1] == "projects":
@@ -482,7 +550,75 @@ func (f *fakeVercel) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"id": p.id, "name": p.name, "accountId": f.team})
+		if p.pending != nil {
+			if p.pending.reads > 0 {
+				p.pending.reads--
+				p.jobStatus = "in-progress"
+			} else {
+				f.aliasLocked(p, p.pending.to)
+				p.pending, p.jobStatus = nil, "succeeded"
+			}
+		}
+		info := map[string]any{"id": p.id, "name": p.name, "accountId": f.team}
+		if p.jobStatus != "" {
+			info["lastAliasRequest"] = map[string]string{"jobStatus": p.jobStatus}
+		}
+		writeJSON(w, http.StatusOK, info)
+	case r.Method == http.MethodGet && len(parts) == 4 && parts[0] == "v9" && parts[1] == "projects" && parts[3] == "domains":
+		p := project(parts[2])
+		q := r.URL.Query()
+		if p == nil || q.Get("production") != "true" || q.Get("redirects") != "false" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// An unverified domain is listed too: it never counts as serving.
+		domains := []map[string]any{{"name": "unverified-" + p.id[4:] + ".example.com", "projectId": p.id, "redirect": nil, "gitBranch": nil, "customEnvironmentId": nil, "verified": false}}
+		if p.domain != "" {
+			domains = append(domains, map[string]any{"name": p.domain, "projectId": p.id, "redirect": nil, "gitBranch": nil, "customEnvironmentId": nil, "verified": true})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"domains": domains, "pagination": map[string]any{"next": nil}})
+	case r.Method == http.MethodGet && len(parts) == 3 && parts[0] == "v4" && parts[1] == "aliases":
+		for _, p := range f.byID {
+			if !p.deleted && p.domain == parts[2] && p.id == r.URL.Query().Get("projectId") {
+				writeJSON(w, http.StatusOK, map[string]any{"alias": p.domain, "projectId": p.id, "deploymentId": p.alias, "redirect": nil})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	case r.Method == http.MethodPost && len(parts) == 5 && parts[0] == "v10" && parts[1] == "projects" && parts[3] == "promote":
+		p, d := project(parts[2]), f.deps[parts[4]]
+		if p == nil || d == nil || d.project != p.id || d.target != "production" || d.substate != "STAGED" || p.pending != nil {
+			f.t.Errorf("vercel: unexpected promote %s", parts[4])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		f.ev.add("vercel.promote %s", d.id)
+		switch {
+		case f.promoteError:
+			f.aliasLocked(p, d.id)
+			p.jobStatus = "succeeded"
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		case f.promoteJobFails:
+			p.jobStatus = "failed"
+		case f.aliasDelay == 0:
+			f.aliasLocked(p, d.id)
+			p.jobStatus = "succeeded"
+		default:
+			p.pending, p.jobStatus = &aliasJob{to: d.id, reads: f.aliasDelay}, "in-progress"
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{})
+	case r.Method == http.MethodPost && len(parts) == 5 && parts[0] == "v9" && parts[1] == "projects" && parts[3] == "rollback":
+		p, d := project(parts[2]), f.deps[parts[4]]
+		if p == nil || d == nil || d.project != p.id || d.target != "production" || d.substate != "PROMOTED" || p.alias == d.id {
+			f.t.Errorf("vercel: unexpected rollback %s", parts[4])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		f.ev.add("vercel.rollback %s", d.id)
+		f.aliasLocked(p, d.id)
+		p.jobStatus = "succeeded"
+		writeJSON(w, http.StatusCreated, map[string]any{})
 	case len(parts) == 4 && parts[0] == "v10" && parts[1] == "projects" && parts[3] == "env":
 		p := project(parts[2])
 		if p == nil {
@@ -534,7 +670,7 @@ func (f *fakeVercel) serve(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		var list []*vercelDeployment
 		for _, d := range f.deps {
-			if d.project == q.Get("projectId") {
+			if d.project == q.Get("projectId") && (q.Get("target") != "preview" || d.target == "") {
 				list = append(list, d)
 			}
 		}
@@ -570,12 +706,12 @@ func (f *fakeVercel) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		p := project(body.Project)
 		src := f.deps[body.DeploymentID]
-		if p == nil || src == nil || body.WithLatestCommit || body.AutoAssignCustomDomains || body.Target != "" || r.URL.Query().Get("forceNew") != "1" {
+		if p == nil || src == nil || body.WithLatestCommit || body.AutoAssignCustomDomains || body.Target != src.target || r.URL.Query().Get("forceNew") != "1" {
 			f.t.Errorf("vercel: unexpected redeploy %+v", body)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		d := f.deployLocked(p, body.Meta)
+		d := f.deployLocked(p, body.Meta, src.target)
 		f.ev.add("vercel.deploy %s", d.id)
 		writeJSON(w, http.StatusOK, f.deployWire(d))
 	default:
@@ -613,6 +749,11 @@ func (f *fakeVercel) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 	protect := f.protect
+	serving := false
+	if dep != nil && dep.meta["envbankOperationId"] != "" {
+		p := f.byID[dep.project]
+		serving = f.failWhileServing && p != nil && p.alias == dep.id
+	}
 	f.mu.Unlock()
 	status := http.StatusOK
 	switch {
@@ -622,7 +763,7 @@ func (f *fakeVercel) RoundTrip(r *http.Request) (*http.Response, error) {
 		status = http.StatusUnauthorized
 	case r.URL.Path != "/api/health" && r.URL.Path != "/":
 		status = http.StatusNotFound
-	case !f.healthy(dep):
+	case serving || !f.healthy(dep):
 		status = http.StatusServiceUnavailable
 	}
 	if dep != nil {

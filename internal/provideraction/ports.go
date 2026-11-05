@@ -96,8 +96,24 @@ type VercelPort interface {
 	// UpsertSensitiveEnv creates or replaces key as a sensitive env var,
 	// reading the value only inside value.WithSecret.
 	UpsertSensitiveEnv(ctx context.Context, env VercelEnv, key string, value *lifecycle.SecretSource) error
+	// CurrentDeployment is, for production, the deployment every verified
+	// production domain of the project is proven to be aliased to (it fails
+	// while an alias job runs or the aliases disagree); for preview, the
+	// newest READY preview deployment.
 	CurrentDeployment(ctx context.Context, teamID, projectID, target string) (deploymentID string, err error)
+	// Redeploy creates a new deployment from sourceDeploymentID. A
+	// production redeploy is created STAGED: production traffic stays on the
+	// current deployment until Promote.
 	Redeploy(ctx context.Context, teamID, projectID, target, sourceDeploymentID string) (deploymentID string, err error)
+	// Promote asks Vercel to move the production domains to deploymentID, a
+	// READY, STAGED production deployment this port created. Acceptance is
+	// asynchronous: confirm with CurrentDeployment.
+	Promote(ctx context.Context, teamID, projectID, deploymentID string) error
+	// Rollback asks Vercel to move the production domains back to
+	// toDeploymentID, a deployment this port saw serving production through
+	// CurrentDeployment. Acceptance is asynchronous: confirm with
+	// CurrentDeployment.
+	Rollback(ctx context.Context, teamID, projectID, toDeploymentID string) error
 	// WaitReady waits until the deployment is ready and returns its HTTPS
 	// base URL.
 	WaitReady(ctx context.Context, teamID, deploymentID string) (deploymentURL string, err error)
@@ -194,15 +210,3 @@ func OperationAuthority(ctx context.Context) error {
 	}
 	return check(ctx)
 }
-
-// ErrPromotionUnsupported is returned by VercelPort.Redeploy for a
-// production target when the port cannot promote: a production redeploy is
-// created staged (never aliased to the production domains), so production
-// traffic would keep the old credentials, and a rotation would then
-// invalidate them under it. The step fails with CodePromotionUnsupported
-// before any deployment is created.
-var ErrPromotionUnsupported = errors.New("production promotion unsupported")
-
-// CodePromotionUnsupported: see ErrPromotionUnsupported. Nothing was
-// deployed or invalidated; env vars pushed earlier in the operation stay.
-const CodePromotionUnsupported = "PRODUCTION_PROMOTION_UNSUPPORTED"

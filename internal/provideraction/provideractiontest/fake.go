@@ -339,6 +339,11 @@ type Providers struct {
 	Secret string
 	// RolesNotPrepared makes RotationRolesReady report false.
 	RolesNotPrepared bool
+	// FailAfter makes the call with this exact log entry fail from its nth
+	// occurrence on.
+	FailAfter map[string]int
+	// StuckPromotion makes Promote succeed without production moving.
+	StuckPromotion bool
 
 	mu        sync.Mutex
 	Creds     [][]byte          // credential slices the factory was given
@@ -349,6 +354,20 @@ type Providers struct {
 	// its operation ends).
 	Closed int
 	next   int
+	// production is the deployment serving production (default
+	// dpl_current); Promote and Rollback move it.
+	production string
+	seen       map[string]int
+}
+
+// Production returns the deployment serving production.
+func (p *Providers) Production() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.production == "" {
+		return "dpl_current"
+	}
+	return p.production
 }
 
 // Closes returns how many ports were closed so far.
@@ -381,6 +400,18 @@ func (p *Providers) call(ctx context.Context, c string) error {
 	}
 	if p.Fail == c {
 		return fmt.Errorf("provider rejected %s: %s", c, p.Secret)
+	}
+	if n, ok := p.FailAfter[c]; ok {
+		p.mu.Lock()
+		if p.seen == nil {
+			p.seen = map[string]int{}
+		}
+		p.seen[c]++
+		k := p.seen[c]
+		p.mu.Unlock()
+		if k >= n {
+			return fmt.Errorf("provider rejected %s: %s", c, p.Secret)
+		}
 	}
 	return nil
 }
@@ -510,11 +541,36 @@ func (v vercel) UpsertSensitiveEnv(ctx context.Context, env provideraction.Verce
 	})
 }
 
-func (v vercel) CurrentDeployment(ctx context.Context, _, _, _ string) (string, error) {
+func (v vercel) CurrentDeployment(ctx context.Context, _, _, target string) (string, error) {
 	if err := v.p.call(ctx, "vercel.current"); err != nil {
 		return "", err
 	}
+	if target == "production" {
+		return v.p.Production(), nil
+	}
 	return "dpl_current", nil
+}
+
+func (v vercel) Promote(ctx context.Context, _, _, id string) error {
+	if err := v.p.call(ctx, "vercel.promote "+id); err != nil {
+		return err
+	}
+	v.p.mu.Lock()
+	if !v.p.StuckPromotion {
+		v.p.production = id
+	}
+	v.p.mu.Unlock()
+	return nil
+}
+
+func (v vercel) Rollback(ctx context.Context, _, _, id string) error {
+	if err := v.p.call(ctx, "vercel.rollback "+id); err != nil {
+		return err
+	}
+	v.p.mu.Lock()
+	v.p.production = id
+	v.p.mu.Unlock()
+	return nil
 }
 
 func (v vercel) Redeploy(ctx context.Context, _, _, _, source string) (string, error) {

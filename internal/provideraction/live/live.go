@@ -261,7 +261,7 @@ func (f *Factory) Vercel(credential []byte) (provideraction.VercelPort, error) {
 		wait = f.ep.waitReady
 	}
 	return &vercelPort{f: f, cred: credential, health: health, wait: wait,
-		deployments: map[string]vercel.Scope{}, urls: map[string]bool{}}, nil
+		deployments: map[string]vercel.Scope{}, urls: map[string]bool{}, served: map[string]bool{}}, nil
 }
 
 type vercelPort struct {
@@ -278,6 +278,14 @@ type vercelPort struct {
 	deployments map[string]vercel.Scope
 	// urls WaitReady returned: the only hosts CheckHealth contacts.
 	urls map[string]bool
+	// served: production deployments CurrentDeployment proved serving a
+	// project's production domains (key servedKey), the only Rollback
+	// targets.
+	served map[string]bool
+}
+
+func servedKey(teamID, projectID, deploymentID string) string {
+	return teamID + "/" + projectID + "/" + deploymentID
 }
 
 func (p *vercelPort) Close() error {
@@ -375,21 +383,24 @@ func (p *vercelPort) CurrentDeployment(ctx context.Context, teamID, projectID, t
 		return "", err
 	}
 	var d vercel.Deployment
-	if target == vercel.EnvironmentProduction {
-		d, err = a.CurrentDeployment(ctx)
-	} else {
+	if target != vercel.EnvironmentProduction {
 		d, err = a.LatestPreviewDeployment(ctx)
+		return d.ID, err
 	}
-	return d.ID, err
+	// Alias-proven: every verified production domain points at d.
+	if d, err = a.CurrentDeployment(ctx); err != nil {
+		return "", err
+	}
+	p.mu.Lock()
+	p.served[servedKey(teamID, projectID, d.ID)] = true
+	p.mu.Unlock()
+	return d.ID, nil
 }
 
+// Redeploy creates the deployment through the adapter, which never assigns
+// custom domains: a production redeploy is created STAGED and serves no
+// production traffic until Promote.
 func (p *vercelPort) Redeploy(ctx context.Context, teamID, projectID, target, sourceDeploymentID string) (string, error) {
-	if target == vercel.EnvironmentProduction {
-		// Vercel creates a production redeploy staged (custom domains are
-		// never auto-assigned), so production traffic would keep the old
-		// credentials and a rotation would then invalidate them under it.
-		return "", provideraction.ErrPromotionUnsupported
-	}
 	scope := vercel.Scope{TeamID: teamID, ProjectID: projectID, Environment: target}
 	a, err := p.project(scope)
 	if err != nil {
@@ -407,6 +418,41 @@ func (p *vercelPort) Redeploy(ctx context.Context, teamID, projectID, target, so
 	p.deployments[d.ID] = scope
 	p.mu.Unlock()
 	return d.ID, nil
+}
+
+// Promote promotes a staged production deployment this port created, through
+// the adapter's Promote (mutation-authorized, exact production scope, alias
+// job idle, READY and STAGED).
+func (p *vercelPort) Promote(ctx context.Context, teamID, projectID, deploymentID string) error {
+	p.mu.Lock()
+	scope, ok := p.deployments[deploymentID]
+	p.mu.Unlock()
+	if !ok || scope.TeamID != teamID || scope.ProjectID != projectID || scope.Environment != vercel.EnvironmentProduction {
+		return provider.NewError("promote", 0, "UNKNOWN_DEPLOYMENT", provider.RetryNever)
+	}
+	a, err := p.project(scope)
+	if err != nil {
+		return err
+	}
+	return a.Promote(mutating(ctx), deploymentID)
+}
+
+// Rollback restores production to a deployment this port proved serving it
+// (CurrentDeployment), through the adapter's Rollback (mutation-authorized,
+// exact production scope, alias job idle, READY, previously promoted, not
+// current).
+func (p *vercelPort) Rollback(ctx context.Context, teamID, projectID, toDeploymentID string) error {
+	p.mu.Lock()
+	ok := p.served[servedKey(teamID, projectID, toDeploymentID)]
+	p.mu.Unlock()
+	if !ok {
+		return provider.NewError("rollback", 0, "UNKNOWN_DEPLOYMENT", provider.RetryNever)
+	}
+	a, err := p.project(vercel.Scope{TeamID: teamID, ProjectID: projectID, Environment: vercel.EnvironmentProduction})
+	if err != nil {
+		return err
+	}
+	return a.Rollback(mutating(ctx), toDeploymentID)
 }
 
 func (p *vercelPort) WaitReady(ctx context.Context, teamID, deploymentID string) (string, error) {
@@ -435,8 +481,10 @@ func (p *vercelPort) WaitReady(ctx context.Context, teamID, deploymentID string)
 }
 
 // healthHost accepts a deployment host under vercel.app (Vercel's
-// deployment URLs, which the health check targets). Custom domains are not
-// checked: a redeploy is never aliased to them by this broker.
+// deployment URLs, which the health check targets). Custom domains are never
+// contacted: after a promote, production is proven to serve the deployment
+// through the API's alias records (CurrentDeployment), and the health check
+// stays on the deployment's own URL.
 func healthHost(host string) bool {
 	const suffix = ".vercel.app"
 	if len(host) <= len(suffix) || len(host) > 253 || !strings.HasSuffix(host, suffix) {

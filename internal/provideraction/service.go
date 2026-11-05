@@ -53,6 +53,9 @@ type Options struct {
 	// Clock and HealthInterval default to the wall clock and 15 s.
 	Clock          Clock
 	HealthInterval time.Duration
+	// PromotionInterval is the wait between production alias reads after a
+	// promote or rollback (default 5 s; at most maxPromotionPolls reads).
+	PromotionInterval time.Duration
 	// Executor bounds (defaults: 2 running, 64 journal entries, 30 min).
 	MaxRunning       int
 	MaxJournal       int
@@ -67,6 +70,7 @@ type Service struct {
 	factory   Factory
 	clock     Clock
 	interval  time.Duration
+	promoteIn time.Duration
 	exec      *Executor
 	closeWait time.Duration
 	closeOnce sync.Once
@@ -75,13 +79,16 @@ type Service struct {
 // New returns a service. It is always usable for status; actions need a
 // vault and a factory.
 func New(o Options) *Service {
-	s := &Service{vault: o.Vault, factory: o.Factory, clock: o.Clock, interval: o.HealthInterval, closeWait: o.CloseWait,
+	s := &Service{vault: o.Vault, factory: o.Factory, clock: o.Clock, interval: o.HealthInterval, promoteIn: o.PromotionInterval, closeWait: o.CloseWait,
 		exec: NewExecutor(o.MaxRunning, o.MaxJournal, o.OperationTimeout)}
 	if s.clock == nil {
 		s.clock = realClock{}
 	}
 	if s.interval <= 0 {
 		s.interval = DefaultHealthInterval
+	}
+	if s.promoteIn <= 0 {
+		s.promoteIn = DefaultPromotionInterval
 	}
 	if s.closeWait <= 0 {
 		s.closeWait = 5 * time.Second
@@ -300,6 +307,7 @@ type run struct {
 	vercel VercelPort
 	stripe StripePort
 	res    *Result
+	prod   *release // production release state (production.go)
 }
 
 func (r *run) res0() *Result {
@@ -326,8 +334,6 @@ func (r *run) step(name, code string, fn func() error) error {
 		var given *failure
 		if errors.As(err, &given) {
 			f.code = given.code
-		} else if errors.Is(err, ErrPromotionUnsupported) {
-			f.code = CodePromotionUnsupported
 		}
 		if c := cancelCode(r.ctx); c != "" {
 			f.code = c
@@ -339,8 +345,9 @@ func (r *run) step(name, code string, fn func() error) error {
 }
 
 // checkHealth makes checks until at least MinHealthChecks succeeded over at
-// least MinHealthWindow. Any failed check fails the step.
-func (r *run) checkHealth(deploymentURL, path string) error {
+// least MinHealthWindow. Any failed check fails the step. The summary goes
+// to *into.
+func (r *run) checkHealth(deploymentURL, path string, into **HealthResult) error {
 	var first, last time.Time
 	n := 0
 	for {
@@ -366,7 +373,7 @@ func (r *run) checkHealth(deploymentURL, path string) error {
 			return fail(CodeHealthFailed)
 		}
 	}
-	r.res.Health = &HealthResult{Checks: n, WindowSeconds: int(last.Sub(first) / time.Second)}
+	*into = &HealthResult{Checks: n, WindowSeconds: int(last.Sub(first) / time.Second)}
 	return nil
 }
 

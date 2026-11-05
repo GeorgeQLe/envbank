@@ -385,20 +385,3 @@ func TestDeploymentProtectionStopsRotationBeforeInvalidation(t *testing.T) {
 		}
 	}
 }
-
-// A production redeploy is refused (Vercel stages it without promotion), so
-// a production rotation never invalidates the role production still uses.
-func TestProductionRedeployRefusedWithoutPromotion(t *testing.T) {
-	h := newHarness(t, Config{})
-	team := h.fx.team
-	h.grant(provideraction.ActionVercelProjectCreate, provideraction.ActionVercelRedeploy)
-	project := h.mustSucceed(provideraction.ActionVercelProjectCreate, map[string]any{"team_id": team, "name": "envbank-e2e-prod"}).ProjectID
-	r := h.act(provideraction.ActionVercelRedeploy, map[string]any{"team_id": team, "project_id": project, "target": "production", "production": true,
-		"deployment": "dpl_e2e2"})
-	if r.resp.State != provideraction.StateFailed || r.resp.Step != provideraction.StepVercelRedeploy || r.resp.Code != provideraction.CodePromotionUnsupported {
-		t.Fatalf("status %+v", r.resp)
-	}
-	if h.fx.ev.last("vercel.deploy") >= 0 {
-		t.Fatal("a production deployment was created")
-	}
-}

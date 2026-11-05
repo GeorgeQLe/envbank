@@ -47,15 +47,21 @@ const (
 	StepVercelRedeploy      = "vercel.redeploy"
 	StepVercelWaitReady     = "vercel.wait_ready"
 	StepHealth              = "health"
-	StepStripeReadEndpoint  = "stripe.read_endpoint"
-	StepStripeCreate        = "stripe.create_endpoint"
-	StepStripeDeleteOld     = "stripe.delete_old_endpoint"
-	StepStripeDelete        = "stripe.delete_endpoint"
-	StepBindingCheck        = "vault.check_bindings"
-	StepBindingSave         = "vault.save_bindings"
-	StepBindingRevoke       = "vault.revoke_bindings"
-	StepBindingAllow        = "vault.allow_destination"
-	StepProvenanceSave      = "vault.save_provenance"
+	// Production releases (production.go).
+	StepVercelPromote           = "vercel.promote"
+	StepVercelVerifyProduction  = "vercel.verify_production"
+	StepHealthProduction        = "health.production"
+	StepVercelConfirmProduction = "vercel.confirm_production"
+	StepVercelRollback          = "vercel.rollback"
+	StepStripeReadEndpoint      = "stripe.read_endpoint"
+	StepStripeCreate            = "stripe.create_endpoint"
+	StepStripeDeleteOld         = "stripe.delete_old_endpoint"
+	StepStripeDelete            = "stripe.delete_endpoint"
+	StepBindingCheck            = "vault.check_bindings"
+	StepBindingSave             = "vault.save_bindings"
+	StepBindingRevoke           = "vault.revoke_bindings"
+	StepBindingAllow            = "vault.allow_destination"
+	StepProvenanceSave          = "vault.save_provenance"
 )
 
 // Fixed codes: refusals before any prompt, and failure codes of an
@@ -86,6 +92,31 @@ const (
 	CodeBindingMismatch = "BINDING_MISMATCH"
 	// CodeBindingLimit: a binding already allows MaxAllowedDestinations.
 	CodeBindingLimit = "BINDING_LIMIT"
+	// CodeProductionDrift: production was not served by the deployment this
+	// operation expected (before the promote: the one it read at the start;
+	// after it: the promoted one). Nothing old was invalidated.
+	CodeProductionDrift = "PRODUCTION_DEPLOYMENT_DRIFT"
+	// CodeProductionNotServing: after the promote, Vercel's aliases were
+	// never proven to serve the new deployment within the polling bound.
+	CodeProductionNotServing = "PRODUCTION_NOT_SERVING"
+)
+
+// Rollback outcomes (Result.Rollback), set when a production release failed
+// at or after its promote step.
+const (
+	// RollbackDone: a rollback was requested and production was then proven
+	// to serve previous_deployment_id again (rolled_back is true).
+	RollbackDone = "rolled_back"
+	// RollbackNotNeeded: production was proven still to serve
+	// previous_deployment_id, so no rollback was sent.
+	RollbackNotNeeded = "not_needed"
+	// RollbackFailed: production could not be proven to serve
+	// previous_deployment_id (request refused, aliases unreadable, or the
+	// operation was cancelled). Both credentials stay valid.
+	RollbackFailed = "failed"
+	// RollbackDrift: production serves a deployment this operation neither
+	// read nor created; it was left alone.
+	RollbackDrift = "drift"
 )
 
 // Result is an operation's value-free outcome: validated IDs, record names
@@ -106,6 +137,16 @@ type Result struct {
 	Variables         map[string]string `json:"variables,omitempty"`
 	Health            *HealthResult     `json:"health,omitempty"`
 	Deleted           bool              `json:"deleted,omitempty"`
+	// Production releases (production.go). PreviousDeploymentID is the
+	// deployment that served production when the operation started (the
+	// rollback target); Health is then the staged deployment's checks and
+	// ProductionHealth the checks after production was proven to serve it.
+	PreviousDeploymentID string        `json:"previous_deployment_id,omitempty"`
+	Promoted             bool          `json:"promoted,omitempty"`
+	ProductionVerified   bool          `json:"production_verified,omitempty"`
+	ProductionHealth     *HealthResult `json:"production_health,omitempty"`
+	RolledBack           bool          `json:"rolled_back,omitempty"`
+	Rollback             string        `json:"rollback,omitempty"`
 	// RevokedBindings names the records whose bindings a delete revoked
 	// (the records stay in the vault).
 	RevokedBindings []string `json:"revoked_bindings,omitempty"`
@@ -140,6 +181,10 @@ func (r Result) clone() Result {
 	if r.Health != nil {
 		h := *r.Health
 		c.Health = &h
+	}
+	if r.ProductionHealth != nil {
+		h := *r.ProductionHealth
+		c.ProductionHealth = &h
 	}
 	return c
 }
@@ -390,8 +435,8 @@ func (p *neonProjectDelete) execute(r *run) error {
 func (p *neonRotate) summary() string {
 	old, next := p.Roles[0], p.Roles[1]
 	return "ROTATE Neon role " + next + " to active in project " + p.ProjectID + " branch " + p.BranchID + " database " + p.Database +
-		" (rotation roles checked as owner role " + p.OwnerRole + "): reset its password, store its URIs in bound records " + p.Records.Pooled + ", " + p.Records.Direct + ", push them to " + p.Vercel.text() +
-		", redeploy" + fromDeployment(p.Vercel.Deployment) + ", check health at " + p.HealthPath + ", then invalidate role " + old
+		" (roles checked as " + p.OwnerRole + "): store its new URIs in bound records " + p.Records.Pooled + ", " + p.Records.Direct + ", push them to " + p.Vercel.text() +
+		deployText(p.Vercel, p.HealthPath) + ", then invalidate role " + old
 }
 func (p *neonRotate) controls() []string { return []string{ControlNeon, ControlVercel} }
 
@@ -444,6 +489,11 @@ func (p *neonRotate) execute(r *run) error {
 	}); err != nil {
 		return err
 	}
+	// Production: read the deployment serving production now (the rollback
+	// target) before anything changes.
+	if err := r.productionBaseline(p.Vercel); err != nil {
+		return err
+	}
 	if err := r.step(StepNeonResetNewRole, CodeProviderFailed, func() error {
 		w := r.recorder()
 		if err := r.neon.ResetRolePassword(r.ctx, p.ProjectID, p.BranchID, next, p.Database, w.sink(p.Records.Pooled), w.sink(p.Records.Direct)); err != nil {
@@ -482,6 +532,23 @@ func (p *neonRotate) execute(r *run) error {
 	r.res.InvalidatedRole = old
 	return nil
 }
+
+// deployText is a composite action's redeploy wording: for production, the
+// staged redeploy, the promote and the automatic rollback. It is terse
+// because the whole plan must fit the 600-byte Touch ID prompt.
+func deployText(ref VercelRef, healthPath string) string {
+	if ref.Target == TargetProduction {
+		from := ""
+		if ref.Deployment != "" {
+			from = " from " + ref.Deployment
+		}
+		return ", STAGED redeploy" + from + ", check health at " + healthPath + productionText
+	}
+	return ", redeploy" + fromDeployment(ref.Deployment) + ", check health at " + healthPath
+}
+
+// productionText follows a production release's staged health check.
+const productionText = ", PROMOTE, verify production serves it and recheck, auto ROLL BACK on failure"
 
 func fromDeployment(d string) string {
 	if d == "" {
@@ -591,11 +658,17 @@ func (p *vercelRedeploy) healthPath() string {
 	return p.HealthPath
 }
 func (p *vercelRedeploy) summary() string {
+	if p.Target == TargetProduction {
+		return "REDEPLOY " + p.ref().text() + fromDeployment(p.Deployment) + " as STAGED, check health at " + p.healthPath() + productionText
+	}
 	return "REDEPLOY " + p.ref().text() + fromDeployment(p.Deployment) + ", then check health at " + p.healthPath()
 }
 func (p *vercelRedeploy) controls() []string                           { return []string{ControlVercel} }
 func (p *vercelRedeploy) precheck(ctx context.Context, v Vault) string { return noCheck(ctx, v) }
 func (p *vercelRedeploy) execute(r *run) error {
+	if err := r.productionBaseline(p.ref()); err != nil {
+		return err
+	}
 	return r.redeployAndCheck(p.ref(), p.healthPath())
 }
 
@@ -668,9 +741,9 @@ func (p *stripeWebhookDelete) execute(r *run) error {
 // ---- stripe.webhook.rotate ----
 
 func (p *stripeWebhookRotate) summary() string {
-	return "ROTATE Stripe webhook " + p.EndpointID + ": create a new endpoint with the same URL and events, copy bound record " + p.Record +
-		" to " + p.PreviousRecord + " (bound as previous), store the new signing secret in " + p.Record + ", push both to " + p.Vercel.text() +
-		", redeploy" + fromDeployment(p.Vercel.Deployment) + ", check health at " + p.HealthPath + ", then delete " + p.EndpointID
+	return "ROTATE Stripe webhook " + p.EndpointID + ": new endpoint, same URL and events; copy bound record " + p.Record +
+		" to " + p.PreviousRecord + " (bound as previous), new secret in " + p.Record + ", push both to " + p.Vercel.text() +
+		deployText(p.Vercel, p.HealthPath) + ", then delete " + p.EndpointID
 }
 func (p *stripeWebhookRotate) controls() []string { return []string{ControlStripe, ControlVercel} }
 
@@ -759,6 +832,9 @@ func (p *stripeWebhookRotate) execute(r *run) error {
 		}
 		return nil
 	}); err != nil {
+		return err
+	}
+	if err := r.productionBaseline(p.Vercel); err != nil {
 		return err
 	}
 	// The current secret is copied to PreviousRecord before the new one is
@@ -863,9 +939,22 @@ func (r *run) push(env VercelEnv, vars map[string]string) error {
 	})
 }
 
+// redeployAndCheck redeploys and checks health. For production it is the
+// whole release (production.go): staged redeploy from the source (default:
+// the deployment productionBaseline read), health on the staged deployment,
+// promote, proof that production serves it, health again and a final proof;
+// a failure at or after the promote rolls production back.
 func (r *run) redeployAndCheck(ref VercelRef, healthPath string) error {
+	production := ref.Target == TargetProduction
 	source := ref.Deployment
-	if source == "" {
+	if production {
+		if r.prod == nil {
+			return &failure{step: StepVercelCurrent, code: CodeProviderFailed}
+		}
+		if source == "" {
+			source = r.prod.previous
+		}
+	} else if source == "" {
 		if err := r.step(StepVercelCurrent, CodeProviderFailed, func() error {
 			id, err := r.vercel.CurrentDeployment(r.ctx, ref.TeamID, ref.ProjectID, ref.Target)
 			if err != nil {
@@ -886,7 +975,7 @@ func (r *run) redeployAndCheck(ref VercelRef, healthPath string) error {
 		if err != nil {
 			return err
 		}
-		if !vercelDeploymentRe.MatchString(id) || id == source {
+		if !vercelDeploymentRe.MatchString(id) || id == source || (production && id == r.prod.previous) {
 			return fail(CodeProviderResponse)
 		}
 		deployment, r.res.DeploymentID = id, id
@@ -907,5 +996,11 @@ func (r *run) redeployAndCheck(ref VercelRef, healthPath string) error {
 	}); err != nil {
 		return err
 	}
-	return r.step(StepHealth, CodeHealthFailed, func() error { return r.checkHealth(deploymentURL, healthPath) })
+	if err := r.step(StepHealth, CodeHealthFailed, func() error { return r.checkHealth(deploymentURL, healthPath, &r.res.Health) }); err != nil {
+		return err
+	}
+	if !production {
+		return nil
+	}
+	return r.promoteAndVerify(ref, deployment, deploymentURL, healthPath)
 }
