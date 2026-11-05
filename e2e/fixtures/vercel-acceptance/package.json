@@ -1,0 +1,9 @@
+{
+  "name": "envbank-acceptance-fixture",
+  "private": true,
+  "description": "Disposable EnvBank Vercel acceptance fixture: status-only, no database, no outbound requests.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  }
+}

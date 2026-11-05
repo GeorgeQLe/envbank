@@ -112,17 +112,20 @@ type Record struct {
 }
 
 type Target struct {
-	Provider      string             `yaml:"provider,omitempty" json:"provider,omitempty"`
-	Project       string             `yaml:"project" json:"project"`
-	ProjectID     string             `yaml:"project_id,omitempty" json:"project_id,omitempty"`
-	Environment   string             `yaml:"environment" json:"environment"`
-	EnvironmentID string             `yaml:"environment_id,omitempty" json:"environment_id,omitempty"`
-	Services      map[string]Service `yaml:"services" json:"services"`
-	Stage         string             `yaml:"stage,omitempty" json:"stage,omitempty"`
-	Activation    string             `yaml:"activation,omitempty" json:"activation,omitempty"`
-	HealthChecks  []HealthCheck      `yaml:"health_checks,omitempty" json:"health_checks,omitempty"`
-	Promotion     string             `yaml:"promotion,omitempty" json:"promotion,omitempty"`
-	Rollback      string             `yaml:"rollback,omitempty" json:"rollback,omitempty"`
+	TeamID              string             `yaml:"team_id,omitempty" json:"team_id,omitempty"`
+	GitBranch           string             `yaml:"git_branch,omitempty" json:"git_branch,omitempty"`
+	CustomEnvironmentID string             `yaml:"custom_environment_id,omitempty" json:"custom_environment_id,omitempty"`
+	Provider            string             `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Project             string             `yaml:"project" json:"project"`
+	ProjectID           string             `yaml:"project_id,omitempty" json:"project_id,omitempty"`
+	Environment         string             `yaml:"environment" json:"environment"`
+	EnvironmentID       string             `yaml:"environment_id,omitempty" json:"environment_id,omitempty"`
+	Services            map[string]Service `yaml:"services" json:"services"`
+	Stage               string             `yaml:"stage,omitempty" json:"stage,omitempty"`
+	Activation          string             `yaml:"activation,omitempty" json:"activation,omitempty"`
+	HealthChecks        []HealthCheck      `yaml:"health_checks,omitempty" json:"health_checks,omitempty"`
+	Promotion           string             `yaml:"promotion,omitempty" json:"promotion,omitempty"`
+	Rollback            string             `yaml:"rollback,omitempty" json:"rollback,omitempty"`
 }
 
 type HealthCheck struct {

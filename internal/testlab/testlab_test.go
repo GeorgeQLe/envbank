@@ -23,6 +23,10 @@ func TestFullLifecycleThroughMCPAndEncryptedPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := mcpserver.Server{Backend: lab.Production(), Extension: lab.Extension()}
+	capabilities, err := server.Call(context.Background(), "envbank_capabilities", json.RawMessage(`{}`))
+	if err != nil || capabilities.Stage != "simulation" || !strings.Contains(capabilities.Capability, "vercel:deployment=simulated") || strings.Contains(capabilities.Capability, "=automatic") {
+		t.Fatal("test lab advertised real provider capabilities")
+	}
 	input := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"envbank_workflow_start","arguments":{"provider":"stripe"}}}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"envbank_test_clock_advance","arguments":{"duration":"30s"}}}`,

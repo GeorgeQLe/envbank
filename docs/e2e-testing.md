@@ -150,9 +150,23 @@ dedicated free project. The only mutation is an idempotent upsert of
 never queries values, deploys, or blindly deletes a variable. Verification is
 truthfully printed as `LIMITED_NAMES_ONLY`.
 
-There is no production Vercel lifecycle adapter. `PROVIDER=vercel` fails with
-`PRODUCTION_ADAPTER_UNAVAILABLE`; hermetic emulator coverage remains required.
-The public Vercel website is independently validated by its HTTP smoke tests.
+`PROVIDER=vercel` runs `envbank vercel accept`: disposable **Preview**
+acceptance through the configured vault workflow, after the owner has bound
+the token on stdin, enrolled the Secure Enclave approval key, planned and
+approved. It requires `ENVBANK_VERCEL_ACCEPTANCE_TARGET`, the dedicated
+fixture manifest/config/passphrase file, `VERCEL_ACCEPTANCE_PLAN` and an
+absolute `VERCEL_ACCEPTANCE_CLI` pointing to the trusted signed helper. It never
+rebuilds a different unsigned binary, refuses
+Vercel credentials in the environment, and reports `BLOCKED` with an exact
+code instead of a PASS when owner setup is missing. It is provider Preview
+acceptance only, not full-workflow (Production promotion/rollback) acceptance.
+`PROVIDER=vercel-production` selects the separate generated-fixture Production
+runner and its `disposable-production:` target. It admits only the verified
+default project domain, tests promotion/rollback and reports variables not
+reverted. No real provider or physical acceptance is implied by local tests.
+See [Vercel acceptance](vercel-acceptance.md). Hermetic coverage remains
+required. The public Vercel website is independently validated by its HTTP
+smoke tests.
 If any provider removes its free allowance, record a release exception and skip
 that local probe—never weaken the offline gate or incur a charge.
 

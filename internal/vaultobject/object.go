@@ -29,6 +29,7 @@ const (
 	KindLifecycleLease       = "lifecycle-lease"
 	KindOperationEvidence    = "operation-evidence"
 	KindRollbackMaterial     = "rollback-material"
+	KindDeploymentOperation  = "deployment-operation"
 
 	MaxKindBytes    = 64
 	MaxKeyBytes     = 512

@@ -3,9 +3,33 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
+
+type capabilityBackend struct{ fail bool }
+
+func (backend capabilityBackend) Call(_ context.Context, name string, _ Request) (Result, error) {
+	if backend.fail {
+		return Result{}, errors.New("untrusted-provider-response")
+	}
+	if name != "envbank_capabilities" {
+		return Result{}, errors.New("unexpected operation")
+	}
+	return Result{Capability: "vercel:deployment=unavailable"}, nil
+}
+
+func TestCapabilitiesComeFromConfiguredBackend(t *testing.T) {
+	result, err := (Server{Backend: capabilityBackend{}}).Call(context.Background(), "envbank_capabilities", json.RawMessage(`{}`))
+	if err != nil || result.Capability != "vercel:deployment=unavailable" {
+		t.Fatalf("capability result: %+v, %v", result, err)
+	}
+	result, err = (Server{Backend: capabilityBackend{fail: true}}).Call(context.Background(), "envbank_capabilities", json.RawMessage(`{}`))
+	if err != nil || result.BlockerCode != "WORKFLOW_FAILED" || result.Capability != "" {
+		t.Fatal("backend failure did not return a bounded blocker")
+	}
+}
 
 func TestToolSurfaceIsWorkflowOnly(t *testing.T) {
 	tools := strings.Join(Tools(), ",")
@@ -35,7 +59,7 @@ func TestServeListsToolsAndReturnsNoSecrets(t *testing.T) {
 	if err := (Server{}).Serve(context.Background(), input, &output); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "stripe:webhook-signing-secret=automatic") || strings.Contains(output.String(), "whsec_") {
+	if !strings.Contains(output.String(), "workflow=unavailable") || !strings.Contains(output.String(), "WORKFLOW_BACKEND_UNAVAILABLE") || strings.Contains(output.String(), "=automatic") || strings.Contains(output.String(), "whsec_") {
 		t.Fatalf("output=%s", output.String())
 	}
 }

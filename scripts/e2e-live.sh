@@ -36,12 +36,44 @@ clerk)
 	if e2e_scan_extended '(^|[^A-Za-z])(sk_|pk_|whsec_)[A-Za-z0-9_-]{12}' "$tmp/result.out" "$tmp/records.out" "$tmp/result.err"; then printf 'e2e-live: FAIL reason=PLAINTEXT_OUTPUT_DETECTED\n' >&2; exit 1; fi
 	printf 'e2e-live: provider=clerk records=5 verification=NAMES_AND_REVISIONS_ONLY result=PASS\n'
 	;;
-vercel)
-	printf 'e2e-live: provider=vercel result=PRODUCTION_ADAPTER_UNAVAILABLE\n' >&2
-	exit 1
+vercel | vercel-production)
+	# Disposable Preview acceptance through the configured vault workflow. The
+	# owner binds the token (stdin -> Keychain), enrolls the Secure Enclave
+	# approval key, plans and approves BEFORE this runs; see
+	# docs/vercel-acceptance.md. This script never binds, approves or deletes.
+	for forbidden in VERCEL_TOKEN VERCEL_API_TOKEN VERCEL_ACCESS_TOKEN VERCEL_AUTOMATION_BYPASS_SECRET VERCEL_OIDC_TOKEN ENVBANK_VERCEL_TOKEN; do
+		[[ -z "${!forbidden:-}" ]] || { printf 'e2e-live: FAIL reason=CREDENTIAL_ENVIRONMENT_FORBIDDEN\n' >&2; exit 1; }
+	done
+    vercel_subcommand=accept
+    if [[ "$PROVIDER" == vercel-production ]]; then
+        vercel_subcommand=accept-production
+        [[ "${ENVBANK_VERCEL_ACCEPTANCE_TARGET:-}" == disposable-production:*/*/envbank-acceptance-* ]] || { printf 'e2e-live: FAIL reason=DISPOSABLE_TARGET_REQUIRED\n' >&2; exit 1; }
+    else
+        [[ "${ENVBANK_VERCEL_ACCEPTANCE_TARGET:-}" == disposable:*/*/envbank-acceptance-*@envbank-acceptance* ]] || { printf 'e2e-live: FAIL reason=DISPOSABLE_TARGET_REQUIRED\n' >&2; exit 1; }
+    fi
+    # Keep the exact signed helper identity used for enrollment/binding. An
+    # unsigned rebuilt binary may not access its Data Protection Keychain group.
+    vercel_cli=${VERCEL_ACCEPTANCE_CLI:-}
+    [[ "$vercel_cli" == /* && -f "$vercel_cli" && -x "$vercel_cli" ]] || { printf 'e2e-live: FAIL reason=TRUSTED_CLI_REQUIRED\n' >&2; exit 1; }
+	: "${VERCEL_ACCEPTANCE_MANIFEST:?VERCEL_ACCEPTANCE_MANIFEST is required}"
+	: "${VERCEL_ACCEPTANCE_CONFIG:?VERCEL_ACCEPTANCE_CONFIG is required}"
+	: "${VERCEL_ACCEPTANCE_PASSPHRASE_FILE:?VERCEL_ACCEPTANCE_PASSPHRASE_FILE is required}"
+	: "${VERCEL_ACCEPTANCE_PLAN:?VERCEL_ACCEPTANCE_PLAN is required; the owner must plan and approve first}"
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/envbank-vercel-acceptance.XXXXXX")
+	trap 'rm -rf -- "$tmp"' EXIT
+	status=0
+	"$vercel_cli" vercel "$vercel_subcommand" --manifest "$VERCEL_ACCEPTANCE_MANIFEST" --plan "$VERCEL_ACCEPTANCE_PLAN" \
+		--config "$VERCEL_ACCEPTANCE_CONFIG" --passphrase-file "$VERCEL_ACCEPTANCE_PASSPHRASE_FILE" >"$tmp/receipt.json" 2>"$tmp/result.err" || status=$?
+	if e2e_scan_extended 'x-vercel-protection-bypass|"(proof|challenge|token|value)"|Bearer ' "$tmp/receipt.json" "$tmp/result.err"; then
+		printf 'e2e-live: FAIL reason=PLAINTEXT_OUTPUT_DETECTED\n' >&2
+		exit 1
+	fi
+	cat "$tmp/receipt.json"
+	[[ "$status" == 0 ]] || { printf 'e2e-live: provider=%s result=BLOCKED (see receipt blocker; no fake PASS)\n' "$PROVIDER" >&2; exit 1; }
+	printf 'e2e-live: provider=%s full_workflow=not-qualified result=PASS\n' "$PROVIDER"
 	;;
 *)
-	printf 'e2e-live: FAIL reason=PROVIDER_MUST_BE_STRIPE_CLERK_CLOUDFLARE_OR_RAILWAY\n' >&2
+	printf 'e2e-live: FAIL reason=PROVIDER_MUST_BE_STRIPE_CLERK_CLOUDFLARE_RAILWAY_VERCEL_OR_VERCEL_PRODUCTION\n' >&2
 	exit 1
 	;;
 esac

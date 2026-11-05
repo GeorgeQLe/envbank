@@ -1,0 +1,52 @@
+{
+  "date": "2026-11-04",
+  "source_commit": "ba6720a6f0580c8e8753682db9a6866c85bd1720",
+  "scope": "local synthetic native computer-use test only",
+  "qualification": "NOT_QUALIFIED_NATIVE_ROUTE_OUTSIDE_ENVBANK_GATE",
+  "production_credential_release": "disabled",
+  "fixture": {
+    "loopback_only": true,
+    "random_synthetic_marker_only": true,
+    "real_vault_access": false,
+    "real_provider_access": false,
+    "driver": "synthetic hold/release test double; not an owned-context or destruction attestation"
+  },
+  "observed": {
+    "real_gate_blocked_during_probe": true,
+    "gate_observe_denied": true,
+    "pre_tool_use_hook_denied": true,
+    "post_tool_use_hook_blocked": true,
+    "native_accessibility_received_synthetic_marker": true,
+    "native_screenshot_returned_nonempty_bytes": true,
+    "native_input_finish_control_operated_during_protected_phase": true,
+    "marker_and_capture_not_emitted": true,
+    "marker_absent_after_finish": true,
+    "gate_resumed_after_finish": true
+  },
+  "limits": [
+    "No screenshot OCR or pixel-content assertion was performed.",
+    "No DOM/CDP, OS recording, clipboard, crash-report or every-route qualification was performed.",
+    "No Codex hook was installed/trusted in the active agent runtime. Hook decisions were evaluated by the local fixture against the real shared gate.",
+    "The test demonstrates missing global integration, not a production credential leak: no real credential was released.",
+    "A synthetic driver receipt is not evidence of actual browser-context destruction."
+  ],
+  "tests": {
+    "uncached_race_packages": [
+      "pkg/protectedfill",
+      "pkg/codexhook",
+      "pkg/computeruse"
+    ],
+    "race_result": "PASS",
+    "vercel_local_acceptance_and_fixture_tests": "PASS; fake APIs only",
+    "real_vercel_acceptance": "NOT_RUN; owner selected local testing only"
+  },
+  "cleanup": {
+    "preexisting_tabs": 15,
+    "remaining_tabs": 15,
+    "task_tab_closed": true,
+    "fixture_process_stopped": true,
+    "fixture_listener_closed": true,
+    "raw_capture_retained_on_disk": false
+  },
+  "next_requirement": "A host-owned barrier must control native screenshot/accessibility/input and all other observation routes before a real browser value is released. Provider API acceptance is independent and still needs owner private credential setup and hardware approval."
+}

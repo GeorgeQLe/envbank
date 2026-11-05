@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/ABSOLUTE/PATH/TO/envbank codex-hook pre-tool-use --gate-dir /ABSOLUTE/PRIVATE/GATE/DIRECTORY",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/ABSOLUTE/PATH/TO/envbank codex-hook post-tool-use --gate-dir /ABSOLUTE/PRIVATE/GATE/DIRECTORY",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

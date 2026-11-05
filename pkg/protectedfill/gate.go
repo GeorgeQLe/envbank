@@ -14,6 +14,13 @@ import (
 
 var ErrBlocked = errors.New("OBSERVATION_BLOCKED")
 
+// Durable state names inside the private gate directory. ProbeGate reads the
+// same files; there is exactly one latch per gate directory.
+const (
+	gateLockName  = "authority.lock"
+	gateLatchName = "blocked"
+)
+
 // Gate holds an exclusive process lock and a durable blocked latch. A restarted
 // authority cannot observe until trusted recovery has destroyed orphan contexts.
 // It does not sandbox tools that bypass it or malicious same-user processes.
@@ -41,7 +48,7 @@ func OpenGate(directory string) (*Gate, error) {
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("GATE_PRIVATE_DIRECTORY_REQUIRED")
 	}
-	lock, err := os.OpenFile(filepath.Join(directory, "authority.lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	lock, err := os.OpenFile(filepath.Join(directory, gateLockName), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, errors.New("GATE_STORAGE_UNAVAILABLE")
 	}
@@ -49,7 +56,7 @@ func OpenGate(directory string) (*Gate, error) {
 		lock.Close()
 		return nil, errors.New("GATE_AUTHORITY_ALREADY_RUNNING")
 	}
-	g := &Gate{lock: lock, latch: filepath.Join(directory, "blocked"), pending: make(map[uint64]context.CancelFunc)}
+	g := &Gate{lock: lock, latch: filepath.Join(directory, gateLatchName), pending: make(map[uint64]context.CancelFunc)}
 	if _, err := os.Lstat(g.latch); err == nil {
 		g.blocked = true
 	} else if !errors.Is(err, os.ErrNotExist) {

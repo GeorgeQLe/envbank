@@ -1,5 +1,17 @@
 # Current work
 
+## Vercel integration — implementation verified, live acceptance pending
+
+See [scope, verification and remaining acceptance](vercel-workflow-2026-11-03.md).
+
+- [x] Implement exact-scoped Secret writes and the vault-to-deployment CLI/MCP backend.
+- [x] Verify synthetic API workflows, policy enforcement, recovery and rollback.
+- [x] Add owner hardware-signature enforcement, encrypted pinning and separate
+  disposable Preview/Production acceptance runners; execute synthetic checks.
+- [ ] Owner imports acceptance credentials privately and approves disposable targets.
+- [ ] Qualify real Preview consumption, staged Production promotion and rollback.
+- [ ] Qualify the external observation controller before browser key capture.
+
 ## Milestone 12: Cloudflare-first migration — foundation complete
 
 - [x] Add the staging EnvBank Worker with one SQLite-backed Durable Object per
