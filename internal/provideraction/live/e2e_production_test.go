@@ -44,7 +44,7 @@ func newProdFixture(t *testing.T) *prodFixture {
 	p.rotateArgs = map[string]any{"project_id": p.np.ProjectID, "branch_id": p.np.BranchID,
 		"roles": []string{"app_a", "app_b"}, "owner_role": p.np.Role, "database": p.np.Database,
 		"records": map[string]string{"pooled": "DATABASE_URL", "direct": "DATABASE_URL_UNPOOLED"},
-		"vercel":  p.vercel(), "health_path": "/api/health"}
+		"vercel":  []any{p.vercel()}, "health_path": "/api/health"}
 	return p
 }
 
@@ -136,7 +136,7 @@ func TestProductionNeonRotation(t *testing.T) {
 			t.Errorf("approval lacks %q: %s", want, text)
 		}
 	}
-	if !strings.Contains(text, "; session label: E2E provider actions") {
+	if !strings.HasSuffix(text, `; [agent label: "E2E provider actions"]`) {
 		t.Errorf("label dropped from a production approval: %s", text)
 	}
 	p.noLeaks(t)
@@ -264,7 +264,7 @@ func TestProductionRedeployAndStripeRotation(t *testing.T) {
 		"events": []string{"invoice.paid"}, "record": "STRIPE_WEBHOOK_SECRET"})
 	h.mustSucceed(provideraction.ActionBindingAllow, map[string]any{"records": []string{"STRIPE_WEBHOOK_SECRET"}, "team_id": h.fx.team, "project_id": p.project})
 	sr := h.mustSucceed(provideraction.ActionStripeWebhookRotate, map[string]any{"endpoint_id": wc.EndpointID,
-		"record": "STRIPE_WEBHOOK_SECRET", "previous_record": "STRIPE_WEBHOOK_SECRET_PREVIOUS", "vercel": p.vercel(), "health_path": "/api/health"})
+		"record": "STRIPE_WEBHOOK_SECRET", "previous_record": "STRIPE_WEBHOOK_SECRET_PREVIOUS", "vercel": []any{p.vercel()}, "health_path": "/api/health"})
 	if !sr.Promoted || !sr.ProductionVerified || sr.DeletedEndpointID != wc.EndpointID || sr.PreviousDeploymentID != current ||
 		h.fx.vercel.production(p.project) != sr.DeploymentID || h.fx.vercel.snapshot(sr.DeploymentID, "STRIPE_WEBHOOK_SECRET") != value(h.vault, "STRIPE_WEBHOOK_SECRET") {
 		t.Fatalf("stripe rotate result %+v", sr)

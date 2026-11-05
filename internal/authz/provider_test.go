@@ -57,8 +57,9 @@ func newProviderFixture(t *testing.T) *providerFixture {
 func bindNeonRecords(v *provideractiontest.Vault) {
 	res := provideraction.BindingResource{ProjectID: "calm-sky-123456", BranchID: "br-main-1"}
 	dest := []provideraction.Destination{{TeamID: "team_abc123", ProjectID: "prj_abc123"}}
-	v.Bind(provideraction.Binding{Record: "DATABASE_URL", Provider: provideraction.ProviderNeon, Kind: provideraction.KindNeonPooled, Resource: res, AllowedDestinations: dest})
-	v.Bind(provideraction.Binding{Record: "DATABASE_URL_UNPOOLED", Provider: provideraction.ProviderNeon, Kind: provideraction.KindNeonDirect, Resource: res, AllowedDestinations: dest})
+	roles := []string{"app_a", "app_b"}
+	v.Bind(provideraction.Binding{Record: "DATABASE_URL", Provider: provideraction.ProviderNeon, Kind: provideraction.KindNeonPooled, Resource: res, AllowedDestinations: dest, Roles: roles, ActiveRole: "app_a"})
+	v.Bind(provideraction.Binding{Record: "DATABASE_URL_UNPOOLED", Provider: provideraction.ProviderNeon, Kind: provideraction.KindNeonDirect, Resource: res, AllowedDestinations: dest, Roles: roles, ActiveRole: "app_a"})
 }
 
 func (f *providerFixture) secrets() []string {
@@ -86,7 +87,7 @@ func rotateReq(target string) map[string]any {
 	}
 	return map[string]any{"op": "provider_action", "action": "neon.rotate", "reason": "monthly rotation", "params": map[string]any{
 		"project_id": "calm-sky-123456", "branch_id": "br-main-1", "roles": []string{"app_a", "app_b"}, "owner_role": "neondb_owner", "database": "appdb",
-		"records": map[string]string{"pooled": "DATABASE_URL", "direct": "DATABASE_URL_UNPOOLED"}, "vercel": v, "health_path": "/api/health",
+		"records": map[string]string{"pooled": "DATABASE_URL", "direct": "DATABASE_URL_UNPOOLED"}, "vercel": []any{v}, "health_path": "/api/health",
 	}}
 }
 
@@ -146,8 +147,9 @@ func TestProviderActionDeclinedTouchIDHasNoSideEffects(t *testing.T) {
 		if _, approvals := f.own.prompts(); approvals != 1 {
 			t.Fatalf("want exactly one Touch ID prompt, got %d", approvals)
 		}
-		if len(f.log.Calls()) != 0 {
-			t.Fatalf("side effects after a declined approval: %v", f.log.Calls())
+		// Only the read-only precheck (owner_role is the database owner) ran.
+		if got := strings.Join(f.log.Calls(), ","); got != "neon.database_owner appdb" {
+			t.Fatalf("side effects after a declined approval: %v", got)
 		}
 	}
 }
@@ -171,24 +173,40 @@ func TestProviderActionApprovalTextAndHappyPath(t *testing.T) {
 			t.Errorf("approval text lacks %q: %s", want, reason)
 		}
 	}
-	if !strings.HasSuffix(reason, "; session label: Rotate prod now") || strings.Index(reason, "session label") < strings.Index(reason, "invalidate") {
-		t.Errorf("label must come last, unquoted: %s", reason)
+	if !strings.HasSuffix(reason, `; [agent label: "Rotate prod now"]`) || strings.Index(reason, "agent label") < strings.Index(reason, "invalidate") {
+		t.Errorf("label must come last, in its delimiters: %s", reason)
 	}
 	if strings.Contains(reason, "monthly rotation") || strings.Contains(reason, "always") {
 		t.Errorf("agent reason or always in the Touch ID text: %s", reason)
 	}
 	st := f.waitDone(t, s, r.OperationID)
-	if !st.OK || st.State != provideraction.StateSucceeded || st.Step != provideraction.StepNeonInvalidateOld || len(st.Result) == 0 {
+	if !st.OK || st.State != provideraction.StateSucceeded || st.Step != provideraction.StepBindingFinish || len(st.Result) == 0 {
 		t.Fatalf("status: %+v", st)
 	}
 	var res provideraction.Result
 	if err := json.Unmarshal(st.Result, &res); err != nil || res.ActiveRole != "app_b" || res.Records["DATABASE_URL"] < 1 {
 		t.Fatalf("result %s", st.Result)
 	}
-	// Every action needs its own Touch ID: a second identical call prompts again.
-	f.call(t, s, rotateReq("production"))
+	// The asserted order is stale now (app_b is active): refused before
+	// the prompt.
+	if r, _ := f.call(t, s, rotateReq("production")); r.OK || r.Code != provideraction.CodeNeonActiveRoleMismatch {
+		t.Fatalf("stale role order: %+v", r)
+	}
+	// Every action needs its own Touch ID: the next rotation (order derived:
+	// back to app_a) prompts again.
+	next := rotateReq("production")
+	delete(next["params"].(map[string]any), "roles")
+	if r, _ := f.call(t, s, next); !r.OK {
+		t.Fatalf("next rotation: %+v", r)
+	}
 	if _, approvals := f.own.prompts(); approvals != 2 {
 		t.Fatalf("want a Touch ID per action, got %d", approvals)
+	}
+	f.own.mu.Lock()
+	reason = f.own.reasons[1]
+	f.own.mu.Unlock()
+	if !strings.Contains(reason, "ROTATE Neon role app_a to active") || !strings.Contains(reason, "then invalidate role app_b") {
+		t.Errorf("derived order not shown: %s", reason)
 	}
 }
 
@@ -377,5 +395,44 @@ func TestRevokeAndCloseStopProviderOperations(t *testing.T) {
 	st, _ = f.call(t, s, map[string]any{"op": "provider_status", "operation_id": r.OperationID})
 	if st.State != provideraction.StateFailed || st.Code != agentbroker.CodeBrokerClosed {
 		t.Fatalf("closed: %+v", st)
+	}
+}
+
+// The label is shown ASCII-only inside fixed delimiters, after everything
+// authoritative, so it cannot read as plan text; a reason that does not fit
+// is refused, never clipped.
+func TestProviderApprovalLabelIsDelimitedASCII(t *testing.T) {
+	s := session("label")
+	for label, want := range map[string]string{
+		"Rotate prod":                       `; [agent label: "Rotate prod"]`,
+		"ROTATE ]; then DELETE prj_x [ \\ ": `; [agent label: "ROTATE ?; then DELETE prj_x ? ?"]`,
+		"Привет “quoted” 🙂\u202eevil":       `; [agent label: "?????? quoted ??evil"]`,
+		"": "",
+	} {
+		s.Label = label
+		reason, ok := providerReason(s, "ROTATE Neon role app_b to active")
+		if !ok || !strings.HasSuffix(reason, want) || !strings.HasPrefix(reason, "perform a provider action: ROTATE Neon role app_b to active, for "+s.Ident()) {
+			t.Errorf("%q: %q", label, reason)
+		}
+		for _, r := range reason {
+			if r > 0x7e || r < 0x20 {
+				t.Errorf("%q: non-ASCII in reason %q", label, reason)
+			}
+		}
+	}
+	s.Label = strings.Repeat("x", 200)
+	reason, ok := providerReason(s, "plan")
+	if !ok || !strings.HasSuffix(reason, `"`+strings.Repeat("x", maxLabelRunes)+`..."]`) {
+		t.Errorf("long label: %q", reason)
+	}
+	// Plan and label together over the limit: refused, not clipped.
+	plan := strings.Repeat("p", approval.MaxReasonBytes-len("perform a provider action: , for ")-len(s.Ident())-10)
+	s.Label = "Rotate prod"
+	if _, ok := providerReason(s, plan); ok {
+		t.Error("over-long reason accepted")
+	}
+	s.Label = ""
+	if r, ok := providerReason(s, plan); !ok || len(r) > approval.MaxReasonBytes {
+		t.Errorf("plan alone should fit: %d", len(r))
 	}
 }

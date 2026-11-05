@@ -147,6 +147,18 @@ func (p *neonPort) RotationRolesReady(ctx context.Context, projectID, branchID, 
 	return p.a.RotationRolesReady(ctx, projectID, branchID, database, ownerRole, roles)
 }
 
+func (p *neonPort) RoleExists(ctx context.Context, projectID, branchID, role string) (bool, error) {
+	return p.a.RoleExists(ctx, projectID, branchID, role)
+}
+
+func (p *neonPort) DatabaseOwner(ctx context.Context, projectID, branchID, database string) (string, error) {
+	owner, err := p.a.DatabaseOwner(ctx, projectID, branchID, database)
+	if neon.IsNotFound(err) {
+		return "", provideraction.ErrNotFound
+	}
+	return owner, err
+}
+
 func (p *neonPort) ResetRolePassword(ctx context.Context, projectID, branchID, role, database string, pooled, direct *lifecycle.SecretSink) error {
 	if err := authorized(ctx, "role_reset_password"); err != nil {
 		return err
@@ -217,6 +229,10 @@ func (p *stripePort) CreateWebhook(ctx context.Context, endpointURL string, even
 
 func (p *stripePort) Webhook(ctx context.Context, endpointID string) (provideraction.StripeWebhook, error) {
 	ep, err := p.a.Endpoint(ctx, endpointID)
+	var perr provider.Error
+	if errors.As(err, &perr) && perr.Status == http.StatusNotFound {
+		return provideraction.StripeWebhook{}, provideraction.ErrNotFound // deleted
+	}
 	if err != nil {
 		return provideraction.StripeWebhook{}, err
 	}
@@ -377,14 +393,25 @@ func (p *vercelPort) UpsertSensitiveEnv(ctx context.Context, env provideraction.
 	})
 }
 
-func (p *vercelPort) CurrentDeployment(ctx context.Context, teamID, projectID, target string) (string, error) {
-	a, err := p.project(vercel.Scope{TeamID: teamID, ProjectID: projectID, Environment: target})
+// CurrentDeployment: for a branch-scoped preview, the adapter lists with
+// Vercel's branch filter and then proves the deployment's own git branch
+// (gitSource ref and commit-ref meta) is env.GitBranch.
+func (p *vercelPort) CurrentDeployment(ctx context.Context, env provideraction.VercelEnv) (string, error) {
+	teamID, projectID := env.TeamID, env.ProjectID
+	scope := vercel.Scope{TeamID: teamID, ProjectID: projectID, Environment: env.Target}
+	if env.Target != vercel.EnvironmentProduction {
+		scope.GitBranch = env.GitBranch
+	}
+	a, err := p.project(scope)
 	if err != nil {
 		return "", err
 	}
 	var d vercel.Deployment
-	if target != vercel.EnvironmentProduction {
+	if env.Target != vercel.EnvironmentProduction {
 		d, err = a.LatestPreviewDeployment(ctx)
+		if err == nil && env.GitBranch != "" && d.GitBranch != env.GitBranch {
+			return "", provider.NewError("current_deployment", 0, "SCOPE_MISMATCH", provider.RetryNever)
+		}
 		return d.ID, err
 	}
 	// Alias-proven: every verified production domain points at d.
@@ -400,8 +427,13 @@ func (p *vercelPort) CurrentDeployment(ctx context.Context, teamID, projectID, t
 // Redeploy creates the deployment through the adapter, which never assigns
 // custom domains: a production redeploy is created STAGED and serves no
 // production traffic until Promote.
-func (p *vercelPort) Redeploy(ctx context.Context, teamID, projectID, target, sourceDeploymentID string) (string, error) {
-	scope := vercel.Scope{TeamID: teamID, ProjectID: projectID, Environment: target}
+func (p *vercelPort) Redeploy(ctx context.Context, env provideraction.VercelEnv, sourceDeploymentID string) (string, error) {
+	// A branch-scoped scope makes the adapter prove the source (and the new
+	// deployment) belong to that branch.
+	scope := vercel.Scope{TeamID: env.TeamID, ProjectID: env.ProjectID, Environment: env.Target}
+	if env.Target != vercel.EnvironmentProduction {
+		scope.GitBranch = env.GitBranch
+	}
 	a, err := p.project(scope)
 	if err != nil {
 		return "", err

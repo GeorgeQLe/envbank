@@ -30,6 +30,16 @@ import (
 
 // brokerVault adapts the unlocked EnvBank client. Calls are serialized: the
 // client signs requests with replay protection.
+//
+// Memory hygiene, honestly: Names and Values (agent run injection) decrypt
+// every record into protocol.SecretRecord, whose Value is a Go string that
+// cannot be wiped. The provider-action paths avoid that where the client API
+// allows: Exists and Revision find the record by its keyed ID without
+// decrypting anything; Latest and ReadSecret decrypt only the one record,
+// into byte buffers that are wiped after the callback. StoreSecret (through
+// putSecretValue) still decrypts every record to preserve the record's
+// metadata, and encrypts the new value from a string; those strings stay
+// in memory until the garbage collector reuses them.
 type brokerVault struct {
 	mu       sync.Mutex
 	api      *client.API
@@ -81,13 +91,37 @@ func (v *brokerVault) Values(_ context.Context, names []string) (map[string]stri
 	return out, nil
 }
 
-func (v *brokerVault) Exists(ctx context.Context, name string) (bool, error) {
-	names, err := v.Names(ctx)
+// find returns name's encrypted record by keyed ID; nothing is decrypted.
+func (v *brokerVault) find(name string) (protocol.Record, bool, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	encrypted, err := v.api.ListRecords()
 	if err != nil {
-		return false, err
+		return protocol.Record{}, false, err
 	}
-	i := sort.SearchStrings(names, name)
-	return i < len(names) && names[i] == name, nil
+	record, ok := client.FindRecord(v.vaultKey, encrypted, name)
+	return record, ok, nil
+}
+
+// Exists finds the record by keyed ID without decrypting any record.
+func (v *brokerVault) Exists(_ context.Context, name string) (bool, error) {
+	_, ok, err := v.find(name)
+	return ok, err
+}
+
+// Revision implements provideraction.Vault: the revision the sync service
+// reports for name, without decrypting any record. It is advisory: every
+// read of a value (ReadSecret) authenticates the revision inside the
+// ciphertext.
+func (v *brokerVault) Revision(_ context.Context, name string) (int64, error) {
+	record, ok, err := v.find(name)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, provideraction.ErrMissing
+	}
+	return record.Revision, nil
 }
 
 func (v *brokerVault) Store(_ context.Context, name, value string) error {
@@ -117,24 +151,29 @@ func (v *brokerVault) StoreSecret(_ context.Context, name string, fill func(func
 	return revision, nil
 }
 
-// latest returns a copy of name's current value and revision.
+// latest decrypts only name's record and returns its value (a buffer the
+// caller wipes) and authenticated revision.
 func (v *brokerVault) latest(name string) ([]byte, int64, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	records, err := v.records()
+	encrypted, err := v.api.ListRecords()
 	if err != nil {
 		return nil, 0, err
 	}
-	for _, r := range records {
-		if r.Name == name {
-			return []byte(r.Value), r.Revision, nil
-		}
+	record, ok := client.FindRecord(v.vaultKey, encrypted, name)
+	if !ok {
+		return nil, 0, provideraction.ErrMissing
 	}
-	return nil, 0, provideraction.ErrMissing
+	value, err := client.DecryptRecordValue(v.api.Config.VaultID, v.vaultKey, record, name)
+	if err != nil {
+		return nil, 0, err
+	}
+	return value, record.Revision, nil
 }
 
 // Latest implements provideraction.Vault: consume sees the current value
-// (outside the vault lock); the copy is wiped afterwards.
+// (outside the vault lock); the buffer is wiped afterwards. Only this
+// record is decrypted.
 func (v *brokerVault) Latest(_ context.Context, name string, consume func([]byte) error) (int64, error) {
 	value, revision, err := v.latest(name)
 	if err != nil {
@@ -247,6 +286,59 @@ func (v *brokerVault) SaveVercelProject(_ context.Context, p provideraction.Verc
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	_, err := v.api.PutObject(v.vaultKey, vaultobject.KindProviderVercelProject, provideraction.VercelProjectKey(p.TeamID, p.ProjectID), p, 0)
+	return err
+}
+
+// LoadNeonProject implements provideraction.BindingStore.
+func (v *brokerVault) LoadNeonProject(_ context.Context, projectID string) (provideraction.NeonProjectProvenance, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	object, err := v.api.GetObject(v.vaultKey, vaultobject.KindProviderNeonProject, projectID)
+	if err != nil {
+		return provideraction.NeonProjectProvenance{}, objectErr(err)
+	}
+	p, err := provideraction.DecodeNeonProject(object.Payload)
+	if err != nil || p.ProjectID != projectID {
+		return provideraction.NeonProjectProvenance{}, errors.New("neon project provenance is invalid")
+	}
+	return p, nil
+}
+
+// SaveNeonProject implements provideraction.BindingStore (create only).
+func (v *brokerVault) SaveNeonProject(_ context.Context, p provideraction.NeonProjectProvenance) error {
+	if !p.Valid() {
+		return errors.New("neon project provenance is invalid")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	_, err := v.api.PutObject(v.vaultKey, vaultobject.KindProviderNeonProject, p.ProjectID, p, 0)
+	return err
+}
+
+// LoadStripeEndpoint implements provideraction.BindingStore.
+func (v *brokerVault) LoadStripeEndpoint(_ context.Context, endpointID string) (provideraction.StripeEndpointProvenance, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	object, err := v.api.GetObject(v.vaultKey, vaultobject.KindProviderStripeEndpoint, endpointID)
+	if err != nil {
+		return provideraction.StripeEndpointProvenance{}, objectErr(err)
+	}
+	p, err := provideraction.DecodeStripeEndpoint(object.Payload)
+	if err != nil || p.EndpointID != endpointID {
+		return provideraction.StripeEndpointProvenance{}, errors.New("stripe endpoint provenance is invalid")
+	}
+	return p, nil
+}
+
+// SaveStripeEndpoint implements provideraction.BindingStore (create only:
+// endpoint IDs are never reused).
+func (v *brokerVault) SaveStripeEndpoint(_ context.Context, p provideraction.StripeEndpointProvenance) error {
+	if !p.Valid() {
+		return errors.New("stripe endpoint provenance is invalid")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	_, err := v.api.PutObject(v.vaultKey, vaultobject.KindProviderStripeEndpoint, p.EndpointID, p, 0)
 	return err
 }
 

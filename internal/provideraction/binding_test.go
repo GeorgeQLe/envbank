@@ -67,7 +67,7 @@ func TestPushRefusesDestinationsNotAllowed(t *testing.T) {
 			params = stripeRotateParams(t)
 		}
 		_ = json.Unmarshal(params, &p)
-		p["vercel"].(map[string]any)["project_id"] = "prj_attacker"
+		p["vercel"].([]any)[0].(map[string]any)["project_id"] = "prj_attacker"
 		if code := e.prepareCode(t, action, js(t, p)); code != pa.CodeDestinationNotAllowed {
 			t.Fatalf("%s to another project: %q", action, code)
 		}
@@ -264,6 +264,7 @@ func TestStripeRotationMovesBindingAlongLineage(t *testing.T) {
 
 func TestDeletesRevokeBindingsButKeepRecords(t *testing.T) {
 	e := newEnv(t, map[string]string{"STRIPE_WEBHOOK_SECRET": provideractiontest.Sentinel("whsec_")})
+	e.vault.CreatedNeonProject("calm-sky-123456", "br-main-1")
 	st := e.run(t, pa.ActionNeonProjectDelete, js(t, map[string]any{"project_id": "calm-sky-123456"}))
 	if st.State != pa.StateSucceeded || strings.Join(st.Result.RevokedBindings, ",") != "DATABASE_URL,DATABASE_URL_UNPOOLED" {
 		t.Fatalf("neon delete %+v", st)
@@ -285,6 +286,7 @@ func TestDeletesRevokeBindingsButKeepRecords(t *testing.T) {
 	}
 	// A failed provider delete revokes nothing.
 	e = newEnv(t, nil)
+	e.vault.CreatedNeonProject("calm-sky-123456", "br-main-1")
 	e.fake.Fail = "neon.delete_project calm-sky-123456"
 	st = e.run(t, pa.ActionNeonProjectDelete, js(t, map[string]any{"project_id": "calm-sky-123456"}))
 	if b, _ := e.vault.Binding("DATABASE_URL"); st.State != pa.StateFailed || b.Revoked {

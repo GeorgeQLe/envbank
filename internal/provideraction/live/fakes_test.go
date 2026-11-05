@@ -232,6 +232,13 @@ func (f *fakeNeon) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusOK, map[string]string{"uri": f.uriLocked(p, role, q.Get("pooled") == "true")})
 			return
+		case len(parts) == 6 && parts[2] == "branches" && parts[3] == p.branch && parts[4] == "databases" && r.Method == http.MethodGet:
+			if parts[5] != p.database {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"database": map[string]string{"name": p.database, "branch_id": p.branch, "owner_name": p.owner}})
+			return
 		case len(parts) >= 5 && parts[2] == "branches" && parts[3] == p.branch && parts[4] == "roles":
 			switch {
 			case len(parts) == 5 && r.Method == http.MethodPost:
@@ -360,6 +367,7 @@ type vercelEnv struct {
 
 type vercelDeployment struct {
 	id, project, host, sha string
+	branch                 string // git branch (gitSource ref)
 	target                 string // "" (preview) or "production"
 	substate               string // production: STAGED or PROMOTED
 	meta                   map[string]string
@@ -402,6 +410,9 @@ type fakeVercel struct {
 	promoteError     bool // promote moves the alias, then answers 500
 	promoteJobFails  bool // promote is accepted, its alias job fails (alias unchanged)
 	failWhileServing bool // a redeployed deployment answers 503 while it serves production
+	// ignoreBranchFilter: the deployments list ignores ?branch= (the port
+	// must still prove the branch itself).
+	ignoreBranchFilter bool
 	// health requests the deployments received, for header checks.
 	healthReqs []*http.Request
 }
@@ -445,10 +456,17 @@ func (f *fakeVercel) seedProduction(projectID, domain string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p := f.byID[projectID]
-	d := f.deployLocked(p, map[string]string{}, "production")
+	d := f.deployLocked(p, map[string]string{}, "production", "main")
 	d.substate = "PROMOTED"
 	p.domain, p.alias = domain, d.id
 	return d.id
+}
+
+// seedPreview adds a READY preview deployment of branch (newest).
+func (f *fakeVercel) seedPreview(projectID, branch string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deployLocked(f.byID[projectID], map[string]string{}, "", branch).id
 }
 
 // production returns the deployment the project's domain serves.
@@ -481,20 +499,26 @@ func (f *fakeVercel) deployWire(d *vercelDeployment) map[string]any {
 		target = d.target
 	}
 	return map[string]any{"id": d.id, "projectId": d.project, "ownerId": f.team, "target": target, "readyState": "READY", "readySubstate": d.substate,
-		"url": d.host, "meta": meta, "gitSource": map[string]string{"ref": "main", "sha": d.sha}}
+		"url": d.host, "meta": meta, "gitSource": map[string]string{"ref": d.branch, "sha": d.sha}}
 }
 
-func (f *fakeVercel) deployLocked(p *vercelProject, meta map[string]string, target string) *vercelDeployment {
+func (f *fakeVercel) deployLocked(p *vercelProject, meta map[string]string, target, branch string) *vercelDeployment {
 	f.clock += 1000
 	id := f.id("dpl_")
 	d := &vercelDeployment{id: id, project: p.id, host: strings.ToLower(p.name + "-" + strings.TrimPrefix(id, "dpl_") + ".vercel.app"), sha: "abc1234def5678",
-		target: target, meta: meta, snapshot: map[string]string{}, created: f.clock}
+		branch: branch, target: target, meta: meta, snapshot: map[string]string{}, created: f.clock}
 	envTarget := "preview"
 	if target == "production" {
 		envTarget, d.substate = "production", "STAGED"
 	}
 	for _, e := range p.envs {
-		if e.target == envTarget {
+		if e.target == envTarget && e.branch == "" {
+			d.snapshot[e.key] = e.value
+		}
+	}
+	// Branch-scoped preview variables override the all-branches ones.
+	for _, e := range p.envs {
+		if e.target == envTarget && e.branch != "" && e.branch == branch {
 			d.snapshot[e.key] = e.value
 		}
 	}
@@ -535,7 +559,7 @@ func (f *fakeVercel) serve(w http.ResponseWriter, r *http.Request) {
 		p := &vercelProject{id: f.id("prj_"), name: body.Name, team: f.team}
 		f.byID[p.id] = p
 		// The first git deployment, as a linked repo would produce.
-		f.deployLocked(p, map[string]string{}, "")
+		f.deployLocked(p, map[string]string{}, "", "main")
 		f.ev.add("vercel.create_project %s", p.id)
 		writeJSON(w, http.StatusOK, map[string]string{"id": p.id, "name": p.name, "accountId": f.team})
 	case len(parts) == 3 && parts[0] == "v9" && parts[1] == "projects":
@@ -670,7 +694,7 @@ func (f *fakeVercel) serve(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		var list []*vercelDeployment
 		for _, d := range f.deps {
-			if d.project == q.Get("projectId") && (q.Get("target") != "preview" || d.target == "") {
+			if d.project == q.Get("projectId") && (q.Get("target") != "preview" || d.target == "") && (q.Get("branch") == "" || q.Get("branch") == d.branch || f.ignoreBranchFilter) {
 				list = append(list, d)
 			}
 		}
@@ -711,7 +735,7 @@ func (f *fakeVercel) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		d := f.deployLocked(p, body.Meta, src.target)
+		d := f.deployLocked(p, body.Meta, src.target, src.branch)
 		f.ev.add("vercel.deploy %s", d.id)
 		writeJSON(w, http.StatusOK, f.deployWire(d))
 	default:

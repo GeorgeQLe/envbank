@@ -73,6 +73,11 @@ type NeonPort interface {
 	// RotationRolesReady reports whether PrepareRotationRoles' end state
 	// holds for roles (read-only).
 	RotationRolesReady(ctx context.Context, projectID, branchID, database, ownerRole string, roles [2]string) (bool, error)
+	// RoleExists reports whether role exists on the branch (read-only).
+	RoleExists(ctx context.Context, projectID, branchID, role string) (bool, error)
+	// DatabaseOwner returns the role that owns database on the branch
+	// (read-only; ErrNotFound for an unknown database).
+	DatabaseOwner(ctx context.Context, projectID, branchID, database string) (string, error)
 	// ResetRolePassword resets role's password, invalidating the old one,
 	// and stores the pooled and direct URIs for database through the sinks.
 	// Both sinks nil means invalidate only: the new password is discarded.
@@ -99,12 +104,15 @@ type VercelPort interface {
 	// CurrentDeployment is, for production, the deployment every verified
 	// production domain of the project is proven to be aliased to (it fails
 	// while an alias job runs or the aliases disagree); for preview, the
-	// newest READY preview deployment.
-	CurrentDeployment(ctx context.Context, teamID, projectID, target string) (deploymentID string, err error)
-	// Redeploy creates a new deployment from sourceDeploymentID. A
-	// production redeploy is created STAGED: production traffic stays on the
-	// current deployment until Promote.
-	Redeploy(ctx context.Context, teamID, projectID, target, sourceDeploymentID string) (deploymentID string, err error)
+	// newest READY preview deployment, of env.GitBranch when it is set (the
+	// port proves the deployment's branch, never trusting the list filter
+	// alone).
+	CurrentDeployment(ctx context.Context, env VercelEnv) (deploymentID string, err error)
+	// Redeploy creates a new deployment from sourceDeploymentID in env's
+	// exact scope: with env.GitBranch set, the source must be a deployment of
+	// that branch. A production redeploy is created STAGED: production
+	// traffic stays on the current deployment until Promote.
+	Redeploy(ctx context.Context, env VercelEnv, sourceDeploymentID string) (deploymentID string, err error)
 	// Promote asks Vercel to move the production domains to deploymentID, a
 	// READY, STAGED production deployment this port created. Acceptance is
 	// asynchronous: confirm with CurrentDeployment.
@@ -137,6 +145,7 @@ type StripePort interface {
 	// CreateWebhook creates an endpoint and stores its whsec_ signing secret
 	// through secret before returning.
 	CreateWebhook(ctx context.Context, url string, events []string, secret *lifecycle.SecretSink) (endpointID string, err error)
+	// Webhook reads an endpoint; ErrNotFound if it does not exist (deleted).
 	Webhook(ctx context.Context, endpointID string) (StripeWebhook, error)
 	DeleteWebhook(ctx context.Context, endpointID string) error
 }
@@ -165,6 +174,10 @@ type Vault interface {
 	// Latest calls consume with the current value of name and returns its
 	// revision; ErrMissing if absent.
 	Latest(ctx context.Context, name string, consume func([]byte) error) (int64, error)
+	// Revision returns name's current revision without reading its value;
+	// ErrMissing if absent. It is advisory (prechecks): every read that
+	// pushes a value uses ReadSecret, which verifies the exact revision.
+	Revision(ctx context.Context, name string) (int64, error)
 	Exists(ctx context.Context, name string) (bool, error)
 	// BindingStore keeps record bindings and Vercel provenance as encrypted
 	// vault objects beside the records (binding.go).
@@ -174,6 +187,10 @@ type Vault interface {
 // ErrMissing is returned by Vault.Latest for an absent record, and by the
 // BindingStore loads for an absent object.
 var ErrMissing = errors.New("record not found")
+
+// ErrNotFound is returned by a port's read when the provider reports the
+// resource does not exist (HTTP 404).
+var ErrNotFound = errors.New("provider resource not found")
 
 // ErrHealthProtected is returned by VercelPort.CheckHealth when the
 // deployment answered as protected (Vercel deployment protection, HTTP 401).

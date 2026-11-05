@@ -53,9 +53,18 @@ func (p *neonRolesPrepare) resources(context.Context, Vault) []string {
 func (p *neonProjectDelete) resources(context.Context, Vault) []string {
 	return []string{lockNeon(p.ProjectID)}
 }
+
+// vercelKeys locks every Vercel project a rotation writes to.
+func vercelKeys(refs VercelRefs) []string {
+	keys := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		keys = append(keys, lockVercel(ref.TeamID, ref.ProjectID))
+	}
+	return keys
+}
+
 func (p *neonRotate) resources(context.Context, Vault) []string {
-	return []string{lockNeon(p.ProjectID), lockVercel(p.Vercel.TeamID, p.Vercel.ProjectID),
-		lockRecord(p.Records.Pooled), lockRecord(p.Records.Direct)}
+	return append([]string{lockNeon(p.ProjectID), lockRecord(p.Records.Pooled), lockRecord(p.Records.Direct)}, vercelKeys(p.Vercel)...)
 }
 func (p *vercelProjectCreate) resources(context.Context, Vault) []string {
 	return []string{lockVercelName(p.TeamID, p.Name)}
@@ -73,8 +82,8 @@ func (p *stripeWebhookCreate) resources(context.Context, Vault) []string {
 	return []string{lockRecord(p.Record)}
 }
 func (p *stripeWebhookRotate) resources(ctx context.Context, v Vault) []string {
-	return append(stripeKeys(ctx, v, p.EndpointID), lockVercel(p.Vercel.TeamID, p.Vercel.ProjectID),
-		lockRecord(p.Record), lockRecord(p.PreviousRecord))
+	keys := append(stripeKeys(ctx, v, p.EndpointID), lockRecord(p.Record), lockRecord(p.PreviousRecord))
+	return append(keys, vercelKeys(p.Vercel)...)
 }
 func (p *stripeWebhookDelete) resources(ctx context.Context, v Vault) []string {
 	return stripeKeys(ctx, v, p.EndpointID)

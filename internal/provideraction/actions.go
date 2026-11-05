@@ -3,10 +3,7 @@ package provideraction
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"sort"
-	"strconv"
-	"strings"
 
 	"github.com/GeorgeQLe/envbank/internal/agentbroker"
 	"github.com/GeorgeQLe/envbank/internal/lifecycle"
@@ -35,6 +32,7 @@ const (
 	StepNeonDeleteProject   = "neon.delete_project"
 	StepNeonPrepareRoles    = "neon.prepare_roles"
 	StepNeonCheckRoles      = "neon.check_roles"
+	StepNeonCheckRoleState  = "neon.check_role_state"
 	StepNeonResetActive     = "neon.reset_active_role"
 	StepNeonResetNewRole    = "neon.reset_new_role"
 	StepNeonInvalidateOld   = "neon.invalidate_old_role"
@@ -62,6 +60,9 @@ const (
 	StepBindingRevoke           = "vault.revoke_bindings"
 	StepBindingAllow            = "vault.allow_destination"
 	StepProvenanceSave          = "vault.save_provenance"
+	StepBindingDeployed         = "vault.record_deployments"
+	StepBindingFinish           = "vault.finish_rotation"
+	StepBindingForget           = "vault.forget_deployments"
 )
 
 // Fixed codes: refusals before any prompt, and failure codes of an
@@ -99,6 +100,30 @@ const (
 	// CodeProductionNotServing: after the promote, Vercel's aliases were
 	// never proven to serve the new deployment within the polling bound.
 	CodeProductionNotServing = "PRODUCTION_NOT_SERVING"
+	// CodeRotationScopeIncomplete: a rotated record was deployed (by this
+	// broker) to a Vercel scope the rotation does not name; invalidating the
+	// old credential would break it. Name every scope in the binding's
+	// deployed_to.
+	CodeRotationScopeIncomplete = "ROTATION_SCOPE_INCOMPLETE"
+	// CodeNeonActiveRoleMismatch: the records' bindings do not determine the
+	// active rotation role (missing or inconsistent role state), or params
+	// roles assert another order than the bindings.
+	CodeNeonActiveRoleMismatch = "NEON_ACTIVE_ROLE_MISMATCH"
+	// CodeNeonOwnerRoleMismatch: owner_role is not the role Neon reports as
+	// the database's owner, or a rotation role is that owner.
+	CodeNeonOwnerRoleMismatch = "NEON_OWNER_ROLE_MISMATCH"
+	// CodeNeonRoleExists: neon.roles.prepare names a role that already
+	// exists and that this broker did not create; set adopt_existing_roles
+	// to make it a rotation role anyway.
+	CodeNeonRoleExists = "NEON_ROLE_EXISTS"
+	// CodeNotCreatedByBroker: a delete names a Neon project, Vercel project
+	// or Stripe endpoint this broker did not create (v1 deletes only its own).
+	CodeNotCreatedByBroker = "NOT_CREATED_BY_BROKER"
+	// CodeStripeOrphanEndpoint: previous_record is bound to an endpoint that
+	// still exists (an earlier rotation did not finish). Rotating now would
+	// overwrite a secret that may still be in use; the refusal names the
+	// endpoint (orphan_endpoint_id) for cleanup.
+	CodeStripeOrphanEndpoint = "STRIPE_ORPHAN_ENDPOINT"
 )
 
 // Rollback outcomes (Result.Rollback), set when a production release failed
@@ -150,6 +175,26 @@ type Result struct {
 	// RevokedBindings names the records whose bindings a delete revoked
 	// (the records stay in the vault).
 	RevokedBindings []string `json:"revoked_bindings,omitempty"`
+	// Redeployed lists every Vercel scope a rotation or redeploy rebuilt
+	// and health-checked, in order.
+	Redeployed []Redeployed `json:"redeployed,omitempty"`
+	// Resumed: neon.rotate completed an interrupted rotation (no password
+	// was reset; the stored URIs were deployed and the retiring role
+	// invalidated).
+	Resumed bool `json:"resumed,omitempty"`
+	// ForgottenDeployments names the records whose deployed_to entries a
+	// vercel.project.delete removed.
+	ForgottenDeployments []string `json:"forgotten_deployments,omitempty"`
+	// OrphanEndpointID is set only on a STRIPE_ORPHAN_ENDPOINT refusal: the
+	// endpoint previous_record is bound to, which still exists.
+	OrphanEndpointID string `json:"orphan_endpoint_id,omitempty"`
+}
+
+// Redeployed is one rebuilt Vercel scope.
+type Redeployed struct {
+	DeployTarget
+	DeploymentID string        `json:"deployment_id"`
+	Health       *HealthResult `json:"health,omitempty"`
 }
 
 // HealthResult summarizes the passed health checks.
@@ -177,6 +222,19 @@ func (r Result) clone() Result {
 	}
 	if r.RevokedBindings != nil {
 		c.RevokedBindings = append([]string(nil), r.RevokedBindings...)
+	}
+	if r.ForgottenDeployments != nil {
+		c.ForgottenDeployments = append([]string(nil), r.ForgottenDeployments...)
+	}
+	if r.Redeployed != nil {
+		c.Redeployed = make([]Redeployed, len(r.Redeployed))
+		for i, d := range r.Redeployed {
+			c.Redeployed[i] = d
+			if d.Health != nil {
+				h := *d.Health
+				c.Redeployed[i].Health = &h
+			}
+		}
 	}
 	if r.Health != nil {
 		h := *r.Health
@@ -301,610 +359,6 @@ func mustExist(ctx context.Context, v Vault, names ...string) string {
 
 func noCheck(context.Context, Vault) string { return "" }
 
-// ---- neon.project.create ----
-
-func (p *neonProjectCreate) roles() [2]string { r, _ := rotationRoles(p.Roles, ""); return r }
-
-func (p *neonProjectCreate) summary() string {
-	roles := p.roles()
-	s := "CREATE Neon project " + p.Name
-	if p.RegionID != "" {
-		s += " in region " + p.RegionID
-	}
-	if p.PGVersion != 0 {
-		s += " (Postgres " + strconv.Itoa(p.PGVersion) + ")"
-	}
-	return s + ", prepare rotation roles " + roles[0] + ", " + roles[1] + " under group role " + NeonGroupRole +
-		", and store " + roles[0] + "'s connection URIs in new records " + p.Records.Pooled + " (pooled) and " + p.Records.Direct + " (direct)" +
-		", bound to the new project with no deploy destination"
-}
-func (p *neonProjectCreate) controls() []string { return []string{ControlNeon} }
-func (p *neonProjectCreate) precheck(ctx context.Context, v Vault) string {
-	return mustNotExist(ctx, v, p.Records.Pooled, p.Records.Direct)
-}
-
-// execute creates the project, prepares the rotation roles as the owner
-// role, then stores the first rotation role's URIs. The owner URIs the
-// adapter returns on create go to discarding sinks and are never stored. A
-// failure after create leaves project_id in the result for cleanup.
-func (p *neonProjectCreate) execute(r *run) error {
-	roles := p.roles()
-	var info NeonProject
-	if err := r.step(StepNeonCreateProject, CodeProviderFailed, func() error {
-		var err error
-		info, err = r.neon.CreateProject(r.ctx, NeonProjectSpec{Name: p.Name, RegionID: p.RegionID, PGVersion: p.PGVersion}, discardSink(), discardSink())
-		if neonProjectRe.MatchString(info.ProjectID) {
-			r.res.ProjectID = info.ProjectID // reported even on a later failure, for cleanup
-		}
-		if err != nil {
-			return err
-		}
-		if !neonProjectRe.MatchString(info.ProjectID) || !neonBranchRe.MatchString(info.BranchID) || !pgIdentRe.MatchString(info.Role) || !pgIdentRe.MatchString(info.Database) {
-			return fail(CodeProviderResponse)
-		}
-		// The app records must never hold the owner's credentials.
-		for _, role := range roles {
-			if strings.EqualFold(role, info.Role) {
-				return fail(CodeProviderResponse)
-			}
-		}
-		r.res.BranchID, r.res.Role, r.res.Database = info.BranchID, info.Role, info.Database
-		return nil
-	}); err != nil {
-		return err
-	}
-	if err := r.step(StepNeonPrepareRoles, CodeProviderFailed, func() error {
-		if err := r.neon.PrepareRotationRoles(r.ctx, info.ProjectID, info.BranchID, info.Database, info.Role, roles, false); err != nil {
-			return err
-		}
-		r.res.PreparedRoles = []string{roles[0], roles[1]}
-		return nil
-	}); err != nil {
-		return err
-	}
-	if err := r.step(StepNeonResetActive, CodeProviderFailed, func() error {
-		w := r.recorder()
-		if err := r.neon.ResetRolePassword(r.ctx, info.ProjectID, info.BranchID, roles[0], info.Database, w.sink(p.Records.Pooled), w.sink(p.Records.Direct)); err != nil {
-			return err
-		}
-		return w.require(r.res, p.Records.Pooled, p.Records.Direct)
-	}); err != nil {
-		return err
-	}
-	r.res.ActiveRole = roles[0]
-	return r.step(StepBindingSave, agentbroker.CodeVaultFailed, func() error {
-		res := BindingResource{ProjectID: info.ProjectID, BranchID: info.BranchID}
-		if err := replaceBinding(r.ctx, r.vault, newBinding(p.Records.Pooled, ProviderNeon, KindNeonPooled, res, r.res.Records[p.Records.Pooled])); err != nil {
-			return err
-		}
-		return replaceBinding(r.ctx, r.vault, newBinding(p.Records.Direct, ProviderNeon, KindNeonDirect, res, r.res.Records[p.Records.Direct]))
-	})
-}
-
-// ---- neon.roles.prepare ----
-
-func (p *neonRolesPrepare) roles() [2]string { r, _ := rotationRoles(p.Roles, p.OwnerRole); return r }
-
-func (p *neonRolesPrepare) summary() string {
-	roles := p.roles()
-	s := "PREPARE Neon rotation roles " + roles[0] + ", " + roles[1] + " in project " + p.ProjectID + " branch " + p.BranchID + " database " + p.Database +
-		", connected as owner role " + p.OwnerRole + ": create them and no-login group role " + NeonGroupRole +
-		" if missing, make both members acting as it, and transfer ownership of the public schema to it"
-	if p.Adopt {
-		return s + ", and CHANGE OWNERSHIP of all existing public-schema objects to " + NeonGroupRole
-	}
-	return s + " (existing public-schema objects keep their owners)"
-}
-func (p *neonRolesPrepare) controls() []string                           { return []string{ControlNeon} }
-func (p *neonRolesPrepare) precheck(ctx context.Context, v Vault) string { return noCheck(ctx, v) }
-func (p *neonRolesPrepare) execute(r *run) error {
-	roles := p.roles()
-	return r.step(StepNeonPrepareRoles, CodeProviderFailed, func() error {
-		if err := r.neon.PrepareRotationRoles(r.ctx, p.ProjectID, p.BranchID, p.Database, p.OwnerRole, roles, p.Adopt); err != nil {
-			return err
-		}
-		r.res.PreparedRoles = []string{roles[0], roles[1]}
-		return nil
-	})
-}
-
-// ---- neon.project.delete ----
-
-func (p *neonProjectDelete) summary() string {
-	return "DELETE Neon project " + p.ProjectID + " and all its data, and revoke the bindings of its records (the records stay in the vault)"
-}
-func (p *neonProjectDelete) controls() []string                           { return []string{ControlNeon} }
-func (p *neonProjectDelete) precheck(ctx context.Context, v Vault) string { return noCheck(ctx, v) }
-func (p *neonProjectDelete) execute(r *run) error {
-	err := r.step(StepNeonDeleteProject, CodeProviderFailed, func() error { return r.neon.DeleteProject(r.ctx, p.ProjectID) })
-	r.res.Deleted = err == nil
-	if err != nil {
-		return err
-	}
-	return r.step(StepBindingRevoke, agentbroker.CodeVaultFailed, func() error {
-		names, err := revokeBindings(r.ctx, r.vault, func(b Binding) bool {
-			return b.Provider == ProviderNeon && b.Resource.ProjectID == p.ProjectID
-		})
-		r.res.RevokedBindings = names
-		return err
-	})
-}
-
-// ---- neon.rotate ----
-
-func (p *neonRotate) summary() string {
-	old, next := p.Roles[0], p.Roles[1]
-	return "ROTATE Neon role " + next + " to active in project " + p.ProjectID + " branch " + p.BranchID + " database " + p.Database +
-		" (roles checked as " + p.OwnerRole + "): store its new URIs in bound records " + p.Records.Pooled + ", " + p.Records.Direct + ", push them to " + p.Vercel.text() +
-		deployText(p.Vercel, p.HealthPath) + ", then invalidate role " + old
-}
-func (p *neonRotate) controls() []string { return []string{ControlNeon, ControlVercel} }
-
-// check: both records are bound to this exact project and branch with the
-// matching kinds, and may be deployed to the target project.
-func (p *neonRotate) check(ctx context.Context, v Vault) (pooled, direct bound, code string) {
-	if pooled, code = boundToNeon(ctx, v, p.Records.Pooled, KindNeonPooled, p.ProjectID, p.BranchID); code != "" {
-		return
-	}
-	if direct, code = boundToNeon(ctx, v, p.Records.Direct, KindNeonDirect, p.ProjectID, p.BranchID); code != "" {
-		return
-	}
-	if _, code = boundForPush(ctx, v, p.Vercel.dest(), p.Records.Pooled, p.Records.Direct); code != "" {
-		return
-	}
-	return pooled, direct, ""
-}
-func (p *neonRotate) precheck(ctx context.Context, v Vault) string {
-	_, _, code := p.check(ctx, v)
-	return code
-}
-
-// execute is the zero-downtime dual-role rotation. The role the deployment
-// uses (Roles[0]) keeps working until the new role's URIs are stored,
-// pushed, deployed and healthy; only then is its password reset.
-func (p *neonRotate) execute(r *run) error {
-	old, next := p.Roles[0], p.Roles[1]
-	var pooled, direct bound
-	if err := r.step(StepBindingCheck, agentbroker.CodeVaultFailed, func() error {
-		var code string
-		if pooled, direct, code = p.check(r.ctx, r.vault); code != "" {
-			return fail(code)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	// Read-only: both roles must already act as the group owner, or the new
-	// role could not use the old role's tables. Not ready fails with no
-	// side effects.
-	if err := r.step(StepNeonCheckRoles, CodeProviderFailed, func() error {
-		ready, err := r.neon.RotationRolesReady(r.ctx, p.ProjectID, p.BranchID, p.Database, p.OwnerRole, [2]string{old, next})
-		if err != nil {
-			return err
-		}
-		if !ready {
-			return fail(CodeRolesNotPrepared)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	// Production: read the deployment serving production now (the rollback
-	// target) before anything changes.
-	if err := r.productionBaseline(p.Vercel); err != nil {
-		return err
-	}
-	if err := r.step(StepNeonResetNewRole, CodeProviderFailed, func() error {
-		w := r.recorder()
-		if err := r.neon.ResetRolePassword(r.ctx, p.ProjectID, p.BranchID, next, p.Database, w.sink(p.Records.Pooled), w.sink(p.Records.Direct)); err != nil {
-			return err
-		}
-		return w.require(r.res, p.Records.Pooled, p.Records.Direct) // stored durably before any destination is written
-	}); err != nil {
-		return err
-	}
-	// The bindings follow the new values (same project, same destinations).
-	if err := r.step(StepBindingSave, agentbroker.CodeVaultFailed, func() error {
-		for _, lb := range []bound{pooled, direct} {
-			b := lb.b.clone()
-			b.RecordRevision = r.res.Records[b.Record]
-			if err := saveBinding(r.ctx, r.vault, b, lb.objRev); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	if err := r.push(p.Vercel.env(), map[string]string{p.Records.Pooled: p.Records.Pooled, p.Records.Direct: p.Records.Direct}); err != nil {
-		return err
-	}
-	if err := r.redeployAndCheck(p.Vercel, p.HealthPath); err != nil {
-		return err
-	}
-	r.res.ActiveRole = next
-	// Only after health passed: the old role's password is reset and discarded.
-	if err := r.step(StepNeonInvalidateOld, CodeProviderFailed, func() error {
-		return r.neon.ResetRolePassword(r.ctx, p.ProjectID, p.BranchID, old, p.Database, nil, nil)
-	}); err != nil {
-		return err
-	}
-	r.res.InvalidatedRole = old
-	return nil
-}
-
-// deployText is a composite action's redeploy wording: for production, the
-// staged redeploy, the promote and the automatic rollback. It is terse
-// because the whole plan must fit the 600-byte Touch ID prompt.
-func deployText(ref VercelRef, healthPath string) string {
-	if ref.Target == TargetProduction {
-		from := ""
-		if ref.Deployment != "" {
-			from = " from " + ref.Deployment
-		}
-		return ", STAGED redeploy" + from + ", check health at " + healthPath + productionText
-	}
-	return ", redeploy" + fromDeployment(ref.Deployment) + ", check health at " + healthPath
-}
-
-// productionText follows a production release's staged health check.
-const productionText = ", PROMOTE, verify production serves it and recheck, auto ROLL BACK on failure"
-
-func fromDeployment(d string) string {
-	if d == "" {
-		return " from the current deployment"
-	}
-	return " from " + d
-}
-
-// ---- vercel.project.create / delete ----
-
-func (p *vercelProjectCreate) summary() string {
-	s := "CREATE Vercel project " + p.Name + " in " + p.TeamID
-	if p.GitRepo != "" {
-		s += " linked to git repo " + p.GitRepo
-	}
-	if p.Framework != "" {
-		s += " (framework " + p.Framework + ")"
-	}
-	return s + " (no vault record may be deployed to it until binding.allow)"
-}
-func (p *vercelProjectCreate) controls() []string                           { return []string{ControlVercel} }
-func (p *vercelProjectCreate) precheck(ctx context.Context, v Vault) string { return noCheck(ctx, v) }
-func (p *vercelProjectCreate) execute(r *run) error {
-	if err := r.step(StepVercelCreateProject, CodeProviderFailed, func() error {
-		id, err := r.vercel.CreateProject(r.ctx, p.TeamID, p.Name, p.GitRepo, p.Framework)
-		if err != nil {
-			return err
-		}
-		if !vercelProjectRe.MatchString(id) {
-			return fail(CodeProviderResponse)
-		}
-		r.res.TeamID, r.res.ProjectID = p.TeamID, id
-		return nil
-	}); err != nil {
-		return err
-	}
-	// Provenance only: it allows no record to be deployed there.
-	return r.step(StepProvenanceSave, agentbroker.CodeVaultFailed, func() error {
-		if err := r.vault.SaveVercelProject(r.ctx, VercelProject{V: BindingVersion, TeamID: p.TeamID, ProjectID: r.res.ProjectID, Name: p.Name}); err != nil {
-			return fail(agentbroker.CodeVaultFailed)
-		}
-		return nil
-	})
-}
-
-func (p *vercelProjectDelete) summary() string {
-	return "DELETE Vercel project " + p.ProjectID + " in " + p.TeamID + " with its deployments and env vars"
-}
-func (p *vercelProjectDelete) controls() []string                           { return []string{ControlVercel} }
-func (p *vercelProjectDelete) precheck(ctx context.Context, v Vault) string { return noCheck(ctx, v) }
-func (p *vercelProjectDelete) execute(r *run) error {
-	err := r.step(StepVercelDeleteProject, CodeProviderFailed, func() error { return r.vercel.DeleteProject(r.ctx, p.TeamID, p.ProjectID) })
-	r.res.Deleted = err == nil
-	return err
-}
-
-// ---- vercel.env.push ----
-
-func (p *vercelEnvPush) summary() string {
-	var parts []string
-	for _, env := range p.envNames() {
-		parts = append(parts, env+" from record "+p.Variables[env])
-	}
-	return "PUSH vault records to " + p.ref().text() + " as sensitive env vars: " + strings.Join(parts, ", ")
-}
-func (p *vercelEnvPush) controls() []string { return []string{ControlVercel} }
-func (p *vercelEnvPush) recordNames() []string {
-	var recs []string
-	for _, env := range p.envNames() {
-		recs = append(recs, p.Variables[env])
-	}
-	return recs
-}
-
-// precheck: every record exists, has a live binding, and may be deployed
-// to this project. Unbound records (owner-entered secrets) are never pushed.
-func (p *vercelEnvPush) precheck(ctx context.Context, v Vault) string {
-	if code := mustExist(ctx, v, p.recordNames()...); code != "" {
-		return code
-	}
-	_, code := boundForPush(ctx, v, p.ref().dest(), p.recordNames()...)
-	return code
-}
-func (p *vercelEnvPush) execute(r *run) error {
-	if err := r.step(StepVaultReadRevisions, agentbroker.CodeVaultFailed, func() error {
-		checked, code := boundForPush(r.ctx, r.vault, p.ref().dest(), p.recordNames()...)
-		if code != "" {
-			return fail(code)
-		}
-		// Each push reads exactly the bound revision.
-		for rec, lb := range checked {
-			r.res.record(rec, lb.b.RecordRevision)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	return r.push(p.ref().env(), p.Variables)
-}
-
-// ---- vercel.redeploy ----
-
-func (p *vercelRedeploy) healthPath() string {
-	if p.HealthPath == "" {
-		return "/"
-	}
-	return p.HealthPath
-}
-func (p *vercelRedeploy) summary() string {
-	if p.Target == TargetProduction {
-		return "REDEPLOY " + p.ref().text() + fromDeployment(p.Deployment) + " as STAGED, check health at " + p.healthPath() + productionText
-	}
-	return "REDEPLOY " + p.ref().text() + fromDeployment(p.Deployment) + ", then check health at " + p.healthPath()
-}
-func (p *vercelRedeploy) controls() []string                           { return []string{ControlVercel} }
-func (p *vercelRedeploy) precheck(ctx context.Context, v Vault) string { return noCheck(ctx, v) }
-func (p *vercelRedeploy) execute(r *run) error {
-	if err := r.productionBaseline(p.ref()); err != nil {
-		return err
-	}
-	return r.redeployAndCheck(p.ref(), p.healthPath())
-}
-
-// ---- stripe.webhook.create / delete ----
-
-func (p *stripeWebhookCreate) summary() string {
-	return "CREATE Stripe test-mode webhook endpoint for " + p.URL + " with " + strconv.Itoa(len(p.Events)) + " event(s) " +
-		strings.Join(p.Events, ", ") + " and store its signing secret in new record " + p.Record + ", bound to the new endpoint with no deploy destination"
-}
-func (p *stripeWebhookCreate) controls() []string { return []string{ControlStripe} }
-func (p *stripeWebhookCreate) precheck(ctx context.Context, v Vault) string {
-	return mustNotExist(ctx, v, p.Record)
-}
-func (p *stripeWebhookCreate) execute(r *run) error {
-	if err := r.step(StepStripeCreate, CodeProviderFailed, func() error {
-		w := r.recorder()
-		id, err := r.stripe.CreateWebhook(r.ctx, p.URL, append([]string(nil), p.Events...), w.sink(p.Record))
-		if stripeEndpointRe.MatchString(id) {
-			r.res.EndpointID = id // reported even on a later failure, for cleanup
-		}
-		if err != nil {
-			return err
-		}
-		if !stripeEndpointRe.MatchString(id) {
-			return fail(CodeProviderResponse)
-		}
-		return w.require(r.res, p.Record)
-	}); err != nil {
-		return err
-	}
-	return r.step(StepBindingSave, agentbroker.CodeVaultFailed, func() error {
-		id := r.res.EndpointID
-		return replaceBinding(r.ctx, r.vault, newBinding(p.Record, ProviderStripe, KindStripeWebhookSecret, BindingResource{EndpointID: id, Lineage: id}, r.res.Records[p.Record]))
-	})
-}
-
-func (p *stripeWebhookDelete) summary() string {
-	return "DELETE Stripe webhook endpoint " + p.EndpointID + ", and revoke the bindings of its records (the records stay in the vault)"
-}
-func (p *stripeWebhookDelete) controls() []string                           { return []string{ControlStripe} }
-func (p *stripeWebhookDelete) precheck(ctx context.Context, v Vault) string { return noCheck(ctx, v) }
-func (p *stripeWebhookDelete) execute(r *run) error {
-	err := r.step(StepStripeDelete, CodeProviderFailed, func() error { return r.stripe.DeleteWebhook(r.ctx, p.EndpointID) })
-	r.res.Deleted = err == nil
-	if err != nil {
-		return err
-	}
-	// The endpoint's bindings are revoked; deleting a lineage's current
-	// endpoint also revokes the rest of that lineage (previous_record).
-	return r.step(StepBindingRevoke, agentbroker.CodeVaultFailed, func() error {
-		all, err := r.vault.ListBindings(r.ctx)
-		if err != nil {
-			return fail(agentbroker.CodeVaultFailed)
-		}
-		ended := map[string]bool{}
-		for _, sb := range all {
-			b := sb.Binding
-			if !b.Revoked && b.Provider == ProviderStripe && b.Kind == KindStripeWebhookSecret && b.Resource.EndpointID == p.EndpointID {
-				ended[b.Resource.Lineage] = true
-			}
-		}
-		names, err := revokeBindings(r.ctx, r.vault, func(b Binding) bool {
-			return b.Provider == ProviderStripe && (b.Resource.EndpointID == p.EndpointID || ended[b.Resource.Lineage])
-		})
-		r.res.RevokedBindings = names
-		return err
-	})
-}
-
-// ---- stripe.webhook.rotate ----
-
-func (p *stripeWebhookRotate) summary() string {
-	return "ROTATE Stripe webhook " + p.EndpointID + ": new endpoint, same URL and events; copy bound record " + p.Record +
-		" to " + p.PreviousRecord + " (bound as previous), new secret in " + p.Record + ", push both to " + p.Vercel.text() +
-		deployText(p.Vercel, p.HealthPath) + ", then delete " + p.EndpointID
-}
-func (p *stripeWebhookRotate) controls() []string { return []string{ControlStripe, ControlVercel} }
-
-// stripeChecked is a rotation's checked bindings. prevRev is the object
-// revision of previous_record's binding (0 when none); prevAbsent means
-// previous_record does not exist yet and will be created and bound.
-type stripeChecked struct {
-	cur        bound
-	prevRev    int64
-	prevAbsent bool
-}
-
-// check: record is bound to this endpoint (its lineage's current one) and
-// may be deployed to the target; previous_record is either absent or bound
-// as the previous secret of the same lineage.
-func (p *stripeWebhookRotate) check(ctx context.Context, v Vault) (stripeChecked, string) {
-	var c stripeChecked
-	if code := mustExist(ctx, v, p.Record); code != "" {
-		return c, code
-	}
-	cur, code := liveBinding(ctx, v, p.Record)
-	if code != "" {
-		return c, code
-	}
-	if cur.b.Provider != ProviderStripe || cur.b.Kind != KindStripeWebhookSecret || cur.b.Resource.EndpointID != p.EndpointID {
-		return c, CodeBindingMismatch
-	}
-	if !cur.b.allows(p.Vercel.dest()) {
-		return c, CodeDestinationNotAllowed
-	}
-	c.cur = cur
-	exists, err := v.Exists(ctx, p.PreviousRecord)
-	if err != nil {
-		return c, agentbroker.CodeVaultFailed
-	}
-	if !exists {
-		c.prevAbsent = true
-		_, rev, err := v.LoadBinding(ctx, p.PreviousRecord)
-		switch {
-		case errors.Is(err, ErrMissing):
-		case err != nil:
-			return c, agentbroker.CodeVaultFailed
-		default:
-			c.prevRev = rev // a stale object for an absent record is replaced
-		}
-		return c, ""
-	}
-	prev, code := liveBinding(ctx, v, p.PreviousRecord)
-	if code != "" {
-		return c, code
-	}
-	if prev.b.Provider != ProviderStripe || prev.b.Kind != KindStripeWebhookSecretPrevious || prev.b.Resource.Lineage != cur.b.Resource.Lineage {
-		return c, CodeBindingMismatch
-	}
-	c.prevRev = prev.objRev
-	return c, ""
-}
-func (p *stripeWebhookRotate) precheck(ctx context.Context, v Vault) string {
-	_, code := p.check(ctx, v)
-	return code
-}
-
-// execute keeps the old endpoint (and its secret, now also in
-// PreviousRecord) valid until the new secret is stored, pushed, deployed
-// and healthy; only then is the old endpoint deleted.
-func (p *stripeWebhookRotate) execute(r *run) error {
-	var checked stripeChecked
-	if err := r.step(StepBindingCheck, agentbroker.CodeVaultFailed, func() error {
-		var code string
-		if checked, code = p.check(r.ctx, r.vault); code != "" {
-			return fail(code)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	cur := checked.cur.b
-	var hook StripeWebhook
-	if err := r.step(StepStripeReadEndpoint, CodeProviderFailed, func() error {
-		var err error
-		if hook, err = r.stripe.Webhook(r.ctx, p.EndpointID); err != nil {
-			return err
-		}
-		if !validHTTPSURL(hook.URL) || !validEvents(hook.Events) {
-			return fail(CodeProviderResponse)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	if err := r.productionBaseline(p.Vercel); err != nil {
-		return err
-	}
-	// The current secret is copied to PreviousRecord before the new one is
-	// stored over it, so the vault never loses the secret in use.
-	if err := r.step(StepVaultMoveCurrent, agentbroker.CodeVaultFailed, func() error {
-		var current []byte
-		defer func() { wipe(current) }()
-		// Exactly the bound revision: anything else was not checked.
-		if err := r.vault.ReadSecret(r.ctx, p.Record, cur.RecordRevision, func(v []byte) error {
-			current = append([]byte(nil), v...)
-			return nil
-		}); err != nil || len(current) == 0 {
-			return fail(agentbroker.CodeVaultFailed)
-		}
-		rev, err := r.vault.StoreSecret(r.ctx, p.PreviousRecord, func(consume func([]byte) error) error {
-			view := append([]byte(nil), current...)
-			defer wipe(view)
-			return consume(view)
-		})
-		if err != nil || rev < 1 {
-			return fail(agentbroker.CodeVaultFailed)
-		}
-		r.res.record(p.PreviousRecord, rev)
-		// previous_record holds the value record held, so it inherits its
-		// lineage and allowed destinations.
-		prev := cur.clone()
-		prev.Record, prev.Kind, prev.RecordRevision, prev.Revoked = p.PreviousRecord, KindStripeWebhookSecretPrevious, rev, false
-		return saveBinding(r.ctx, r.vault, prev, checked.prevRev)
-	}); err != nil {
-		return err
-	}
-	if err := r.step(StepStripeCreate, CodeProviderFailed, func() error {
-		w := r.recorder()
-		id, err := r.stripe.CreateWebhook(r.ctx, hook.URL, append([]string(nil), hook.Events...), w.sink(p.Record))
-		if stripeEndpointRe.MatchString(id) {
-			r.res.EndpointID = id
-		}
-		if err != nil {
-			return err
-		}
-		if !stripeEndpointRe.MatchString(id) || id == p.EndpointID {
-			return fail(CodeProviderResponse)
-		}
-		return w.require(r.res, p.Record)
-	}); err != nil {
-		return err
-	}
-	// The record's binding moves to the new endpoint (same lineage).
-	if err := r.step(StepBindingSave, agentbroker.CodeVaultFailed, func() error {
-		b := cur.clone()
-		b.Resource.EndpointID, b.RecordRevision = r.res.EndpointID, r.res.Records[p.Record]
-		return saveBinding(r.ctx, r.vault, b, checked.cur.objRev)
-	}); err != nil {
-		return err
-	}
-	if err := r.push(p.Vercel.env(), map[string]string{p.Record: p.Record, p.PreviousRecord: p.PreviousRecord}); err != nil {
-		return err
-	}
-	if err := r.redeployAndCheck(p.Vercel, p.HealthPath); err != nil {
-		return err
-	}
-	if err := r.step(StepStripeDeleteOld, CodeProviderFailed, func() error {
-		return r.stripe.DeleteWebhook(r.ctx, p.EndpointID)
-	}); err != nil {
-		return err
-	}
-	r.res.DeletedEndpointID = p.EndpointID
-	return nil
-}
-
 // ---- shared steps ----
 
 // push writes each env var from the exact record revision stored earlier in
@@ -956,7 +410,9 @@ func (r *run) redeployAndCheck(ref VercelRef, healthPath string) error {
 		}
 	} else if source == "" {
 		if err := r.step(StepVercelCurrent, CodeProviderFailed, func() error {
-			id, err := r.vercel.CurrentDeployment(r.ctx, ref.TeamID, ref.ProjectID, ref.Target)
+			// Branch-scoped preview: the newest deployment of that branch,
+			// proven by the port.
+			id, err := r.vercel.CurrentDeployment(r.ctx, ref.env())
 			if err != nil {
 				return err
 			}
@@ -971,7 +427,7 @@ func (r *run) redeployAndCheck(ref VercelRef, healthPath string) error {
 	}
 	var deployment, deploymentURL string
 	if err := r.step(StepVercelRedeploy, CodeProviderFailed, func() error {
-		id, err := r.vercel.Redeploy(r.ctx, ref.TeamID, ref.ProjectID, ref.Target, source)
+		id, err := r.vercel.Redeploy(r.ctx, ref.env(), source)
 		if err != nil {
 			return err
 		}
@@ -999,8 +455,19 @@ func (r *run) redeployAndCheck(ref VercelRef, healthPath string) error {
 	if err := r.step(StepHealth, CodeHealthFailed, func() error { return r.checkHealth(deploymentURL, healthPath, &r.res.Health) }); err != nil {
 		return err
 	}
-	if !production {
-		return nil
+	done := Redeployed{DeployTarget: ref.deployTarget(), DeploymentID: deployment}
+	if production {
+		if err := r.promoteAndVerify(ref, deployment, deploymentURL, healthPath); err != nil {
+			return err
+		}
+		done.Health = r.res.ProductionHealth
+	} else {
+		done.Health = r.res.Health
 	}
-	return r.promoteAndVerify(ref, deployment, deploymentURL, healthPath)
+	if done.Health != nil {
+		h := *done.Health
+		done.Health = &h
+	}
+	r.res.Redeployed = append(r.res.Redeployed, done)
+	return nil
 }

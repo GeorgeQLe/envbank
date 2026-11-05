@@ -42,6 +42,8 @@ const (
 	maxEvents      = 16
 	maxVariables   = 16
 	maxRecordName  = 64
+	// maxRotationTargets bounds the Vercel scopes one rotation rewrites.
+	maxRotationTargets = 8
 )
 
 // Targets.
@@ -154,6 +156,72 @@ func (v VercelRef) env() VercelEnv {
 	return VercelEnv{TeamID: v.TeamID, ProjectID: v.ProjectID, Target: v.Target, GitBranch: v.GitBranch}
 }
 
+func (v VercelRef) deployTarget() DeployTarget {
+	return DeployTarget{TeamID: v.TeamID, ProjectID: v.ProjectID, Target: v.Target, GitBranch: v.GitBranch}
+}
+
+// VercelRefs are the Vercel scopes a rotation pushes to and redeploys.
+type VercelRefs []VercelRef
+
+// valid: 1 to maxRotationTargets distinct scopes, at most one production.
+func (vs VercelRefs) valid() bool {
+	if len(vs) == 0 || len(vs) > maxRotationTargets {
+		return false
+	}
+	seen := map[DeployTarget]bool{}
+	production := 0
+	for _, v := range vs {
+		if !v.valid(true) || seen[v.deployTarget()] {
+			return false
+		}
+		seen[v.deployTarget()] = true
+		if v.Target == TargetProduction {
+			production++
+		}
+	}
+	return production <= 1
+}
+
+// ordered returns the scopes in rotation order: preview scopes sorted, then
+// production last (it goes through the promote flow, after every preview
+// is healthy).
+func (vs VercelRefs) ordered() []VercelRef {
+	out := append([]VercelRef(nil), vs...)
+	sort.SliceStable(out, func(i, j int) bool {
+		pi, pj := out[i].Target == TargetProduction, out[j].Target == TargetProduction
+		if pi != pj {
+			return pj
+		}
+		a, b := out[i].deployTarget(), out[j].deployTarget()
+		if a.TeamID != b.TeamID {
+			return a.TeamID < b.TeamID
+		}
+		if a.ProjectID != b.ProjectID {
+			return a.ProjectID < b.ProjectID
+		}
+		return a.GitBranch < b.GitBranch
+	})
+	return out
+}
+
+func (vs VercelRefs) production() (VercelRef, bool) {
+	for _, v := range vs {
+		if v.Target == TargetProduction {
+			return v, true
+		}
+	}
+	return VercelRef{}, false
+}
+
+// text lists every scope, in rotation order.
+func (vs VercelRefs) text() string {
+	var parts []string
+	for _, v := range vs.ordered() {
+		parts = append(parts, v.text())
+	}
+	return strings.Join(parts, "; ")
+}
+
 // text describes the destination; a production target says PRODUCTION.
 func (v VercelRef) text() string {
 	t := "preview"
@@ -192,19 +260,35 @@ type (
 		OwnerRole string   `json:"owner_role"`
 		Roles     []string `json:"roles,omitempty"` // default ["app_a","app_b"]
 		Adopt     bool     `json:"adopt"`
+		// AdoptExistingRoles lets roles that already exist and that this
+		// broker did not create become rotation roles (the approval text
+		// names each one).
+		AdoptExistingRoles bool `json:"adopt_existing_roles,omitempty"`
+		// Set by the prechecks: the project's provenance (nil: not created by
+		// this broker) and the roles that already exist and were not created
+		// by this broker.
+		prov     *NeonProjectProvenance
+		existing []string
 	}
 	neonProjectDelete struct {
 		ProjectID string `json:"project_id"`
+		// set by precheck from the project's provenance
+		name string
 	}
 	neonRotate struct {
-		ProjectID  string     `json:"project_id"`
-		BranchID   string     `json:"branch_id"`
-		Roles      []string   `json:"roles"` // [currently active, to become active]
+		ProjectID string `json:"project_id"`
+		BranchID  string `json:"branch_id"`
+		// Roles, optional, asserts [in use now, to become active]; the
+		// broker derives the order from the records' bindings and refuses a
+		// mismatch (NEON_ACTIVE_ROLE_MISMATCH).
+		Roles      []string   `json:"roles,omitempty"`
 		OwnerRole  string     `json:"owner_role"`
 		Database   string     `json:"database"`
 		Records    RecordPair `json:"records"`
-		Vercel     VercelRef  `json:"vercel"`
+		Vercel     VercelRefs `json:"vercel"`
 		HealthPath string     `json:"health_path"`
+		// Set by precheck from the bindings (never from params).
+		derived neonRoleOrder
 	}
 	vercelProjectCreate struct {
 		TeamID    string `json:"team_id"`
@@ -215,6 +299,8 @@ type (
 	vercelProjectDelete struct {
 		TeamID    string `json:"team_id"`
 		ProjectID string `json:"project_id"`
+		// set by precheck from the project's provenance
+		name string
 	}
 	vercelEnvPush struct {
 		TeamID     string            `json:"team_id"`
@@ -229,6 +315,7 @@ type (
 		ProjectID  string `json:"project_id"`
 		Target     string `json:"target"`
 		Production bool   `json:"production,omitempty"`
+		GitBranch  string `json:"git_branch,omitempty"`
 		Deployment string `json:"deployment,omitempty"`
 		HealthPath string `json:"health_path,omitempty"`
 	}
@@ -238,14 +325,18 @@ type (
 		Record string   `json:"record"`
 	}
 	stripeWebhookRotate struct {
-		EndpointID     string    `json:"endpoint_id"`
-		Record         string    `json:"record"`
-		PreviousRecord string    `json:"previous_record"`
-		Vercel         VercelRef `json:"vercel"`
-		HealthPath     string    `json:"health_path"`
+		EndpointID     string     `json:"endpoint_id"`
+		Record         string     `json:"record"`
+		PreviousRecord string     `json:"previous_record"`
+		Vercel         VercelRefs `json:"vercel"`
+		HealthPath     string     `json:"health_path"`
+		// set by precheck: the endpoint a live previous_record is bound to
+		prevEndpoint string
 	}
 	stripeWebhookDelete struct {
 		EndpointID string `json:"endpoint_id"`
+		// set by precheck from the endpoint's provenance
+		url string
 	}
 )
 
@@ -284,10 +375,14 @@ func (p *neonRolesPrepare) validate() bool {
 func (p *neonProjectDelete) validate() bool { return neonProjectRe.MatchString(p.ProjectID) }
 
 func (p *neonRotate) validate() bool {
-	_, ok := rotationRoles(p.Roles, p.OwnerRole)
-	return ok && len(p.Roles) == 2 && neonProjectRe.MatchString(p.ProjectID) && neonBranchRe.MatchString(p.BranchID) &&
+	if p.Roles != nil {
+		if _, ok := rotationRoles(p.Roles, p.OwnerRole); !ok || len(p.Roles) != 2 {
+			return false
+		}
+	}
+	return neonProjectRe.MatchString(p.ProjectID) && neonBranchRe.MatchString(p.BranchID) &&
 		pgIdentRe.MatchString(p.OwnerRole) && !strings.EqualFold(p.OwnerRole, NeonGroupRole) &&
-		pgIdentRe.MatchString(p.Database) && p.Records.valid() && p.Vercel.valid(true) && validHealthPath(p.HealthPath)
+		pgIdentRe.MatchString(p.Database) && p.Records.valid() && p.Vercel.valid() && validHealthPath(p.HealthPath)
 }
 
 func (p *vercelProjectCreate) validate() bool {
@@ -326,7 +421,7 @@ func (p *vercelEnvPush) envNames() []string {
 }
 
 func (p *vercelRedeploy) ref() VercelRef {
-	return VercelRef{TeamID: p.TeamID, ProjectID: p.ProjectID, Target: p.Target, Production: p.Production, Deployment: p.Deployment}
+	return VercelRef{TeamID: p.TeamID, ProjectID: p.ProjectID, Target: p.Target, Production: p.Production, GitBranch: p.GitBranch, Deployment: p.Deployment}
 }
 
 func (p *vercelRedeploy) validate() bool {
@@ -339,7 +434,7 @@ func (p *stripeWebhookCreate) validate() bool {
 
 func (p *stripeWebhookRotate) validate() bool {
 	return stripeEndpointRe.MatchString(p.EndpointID) && validRecord(p.Record) && validRecord(p.PreviousRecord) &&
-		p.Record != p.PreviousRecord && p.Vercel.valid(true) && validHealthPath(p.HealthPath)
+		p.Record != p.PreviousRecord && p.Vercel.valid() && validHealthPath(p.HealthPath)
 }
 
 func (p *stripeWebhookDelete) validate() bool { return stripeEndpointRe.MatchString(p.EndpointID) }

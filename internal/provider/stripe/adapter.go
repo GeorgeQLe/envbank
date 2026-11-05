@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -38,13 +39,9 @@ func New(controlCredential []byte, options Options) (*Adapter, error) {
 		// v1 automates test mode and sandboxes only (docs/provider-actions.md).
 		return nil, errors.New("Stripe live-mode control credentials are refused")
 	}
-	endpoint := options.Endpoint
-	if endpoint == "" {
-		endpoint = DefaultEndpoint
-	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" || parsed.Scheme != "https" && !(parsed.Scheme == "http" && (parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "localhost")) {
-		return nil, errors.New("Stripe API endpoint is invalid")
+	endpoint, err := endpointBase(options.Endpoint)
+	if err != nil {
+		return nil, err
 	}
 	client := options.Client
 	if client == nil {
@@ -56,6 +53,36 @@ func New(controlCredential []byte, options Options) (*Adapter, error) {
 	}
 	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Adapter{endpoint: endpoint, client: &copy, control: append([]byte(nil), controlCredential...)}, nil
+}
+
+// endpointBase pins the API endpoint, as the Neon and Vercel adapters do:
+// exactly https://api.stripe.com, or (tests) an http or https literal
+// loopback IP address. A host name such as localhost is refused, so the
+// control key never goes to a name resolution can redirect.
+func endpointBase(endpoint string) (string, error) {
+	if endpoint == "" {
+		endpoint = DefaultEndpoint
+	}
+	invalid := errors.New("Stripe API endpoint is invalid")
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" ||
+		(parsed.Path != "" && parsed.Path != "/") {
+		return "", invalid
+	}
+	host := parsed.Hostname()
+	switch {
+	case parsed.Scheme == "https" && host == "api.stripe.com" && parsed.Port() == "":
+		return DefaultEndpoint, nil
+	case (parsed.Scheme == "http" || parsed.Scheme == "https") && literalLoopback(host):
+		return parsed.Scheme + "://" + parsed.Host, nil
+	default:
+		return "", invalid
+	}
+}
+
+func literalLoopback(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // LiveModeKey reports whether credential is a Stripe live-mode secret or

@@ -32,9 +32,16 @@ func (g *Gate) providerAction(ctx context.Context, s Session, req Request) agent
 	if !g.Provider.Available() {
 		return refuse(provideraction.CodeUnavailable)
 	}
-	prep, code := g.Provider.Prepare(ctx, req.Action, req.Params)
+	prep, code, detail := g.Provider.PrepareDetail(ctx, req.Action, req.Params)
 	if code != "" {
-		return refuse(code)
+		resp := refuse(code)
+		if detail != nil {
+			// Value-free IDs for cleanup (STRIPE_ORPHAN_ENDPOINT).
+			if raw, err := json.Marshal(detail); err == nil && string(raw) != "{}" {
+				resp.Result = raw
+			}
+		}
+		return resp
 	}
 	defer prep.Release()
 	reason, fits := providerReason(s, prep.Summary())
@@ -78,9 +85,51 @@ func (g *Gate) providerAction(ctx context.Context, s Session, req Request) agent
 }
 
 // providerReason is the Touch ID text: the plan in full, then the session
-// (authoritative), then the label last.
+// (authoritative), then the label last, ASCII-only inside fixed delimiters
+// so it cannot read as plan text. Nothing is clipped: a reason that does not
+// fit is refused.
 func providerReason(s Session, summary string) (string, bool) {
-	return approval.WithLabel("perform a provider action: "+summary+", for "+s.Ident(), s.DisplayLabel())
+	authoritative := "perform a provider action: " + summary + ", for " + s.Ident()
+	if authoritative == "" || approval.Clean(authoritative, approval.MaxReasonBytes) != authoritative {
+		return "", false
+	}
+	reason := authoritative
+	if label := asciiLabel(s.Label); label != "" {
+		reason += `; [agent label: "` + label + `"]`
+	}
+	if len(reason) > approval.MaxReasonBytes {
+		return "", false
+	}
+	return reason, true
+}
+
+// maxLabelRunes bounds the label shown in a provider approval.
+const maxLabelRunes = 80
+
+// asciiLabel renders the agent-influenced label for a provider approval:
+// cleaned to one line without quote-like characters (approval.Plain), then
+// every rune that is not printable ASCII, and the delimiters '"', '[' and
+// ']', become '?'. A label too long is clipped with "..." (ASCII): the
+// label is never authoritative, and the whole reason is refused, never
+// clipped, if it does not fit.
+func asciiLabel(label string) string {
+	clean := approval.Plain(label, 1<<10)
+	var b strings.Builder
+	n := 0
+	for _, r := range clean {
+		if n == maxLabelRunes {
+			b.WriteString("...")
+			break
+		}
+		switch {
+		case r < 0x20 || r > 0x7e || r == '"' || r == '[' || r == ']' || r == '\\':
+			b.WriteByte('?')
+		default:
+			b.WriteRune(r)
+		}
+		n++
+	}
+	return b.String()
 }
 
 // providerStatus answers only the session that started the operation. An

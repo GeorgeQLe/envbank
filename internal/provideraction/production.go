@@ -40,6 +40,11 @@ type release struct {
 	promoting bool
 }
 
+// productionEnv is ref's production scope.
+func productionEnv(ref VercelRef) VercelEnv {
+	return VercelEnv{TeamID: ref.TeamID, ProjectID: ref.ProjectID, Target: TargetProduction}
+}
+
 // productionBaseline reads, for a production target, the deployment serving
 // production now. It runs before the operation changes anything, so a
 // project whose production cannot be proven (no verified domain, split
@@ -49,7 +54,7 @@ func (r *run) productionBaseline(ref VercelRef) error {
 		return nil
 	}
 	return r.step(StepVercelCurrent, CodeProviderFailed, func() error {
-		id, err := r.vercel.CurrentDeployment(r.ctx, ref.TeamID, ref.ProjectID, TargetProduction)
+		id, err := r.vercel.CurrentDeployment(r.ctx, productionEnv(ref))
 		if err != nil {
 			return err
 		}
@@ -80,7 +85,7 @@ func (r *run) promoteSteps(rel *release, deploymentURL, healthPath string) error
 	if err := r.step(StepVercelPromote, CodeProviderFailed, func() error {
 		// Production must still be on the deployment read at the start:
 		// otherwise the rollback target would be stale.
-		cur, err := r.vercel.CurrentDeployment(r.ctx, ref.TeamID, ref.ProjectID, TargetProduction)
+		cur, err := r.vercel.CurrentDeployment(r.ctx, productionEnv(ref))
 		if err != nil {
 			return err
 		}
@@ -119,7 +124,7 @@ func (r *run) promoteSteps(rel *release, deploymentURL, healthPath string) error
 	// Once more, immediately before the caller invalidates the old
 	// credential: production must not have moved during the health window.
 	return r.step(StepVercelConfirmProduction, CodeProviderFailed, func() error {
-		cur, err := r.vercel.CurrentDeployment(r.ctx, ref.TeamID, ref.ProjectID, TargetProduction)
+		cur, err := r.vercel.CurrentDeployment(r.ctx, productionEnv(ref))
 		if err != nil {
 			return err
 		}
@@ -141,7 +146,7 @@ func (r *run) awaitProduction(rel *release, want string) error {
 				return fail(CodeProductionNotServing)
 			}
 		}
-		cur, err := r.vercel.CurrentDeployment(r.ctx, ref.TeamID, ref.ProjectID, TargetProduction)
+		cur, err := r.vercel.CurrentDeployment(r.ctx, productionEnv(ref))
 		if err != nil {
 			continue
 		}
@@ -170,7 +175,7 @@ func (r *run) rollBack(rel *release) {
 					return err
 				}
 			}
-			cur, err := r.vercel.CurrentDeployment(r.ctx, ref.TeamID, ref.ProjectID, TargetProduction)
+			cur, err := r.vercel.CurrentDeployment(r.ctx, productionEnv(ref))
 			if err != nil {
 				continue // alias job running: read again
 			}

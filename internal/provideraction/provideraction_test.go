@@ -51,11 +51,13 @@ func newEnv(t *testing.T, values map[string]string, opts ...func(*pa.Options)) *
 	e.vault = provideractiontest.NewVault(e.log, all)
 	dest := []pa.Destination{{TeamID: "team_abc123", ProjectID: "prj_abc123"}}
 	neonRes := pa.BindingResource{ProjectID: "calm-sky-123456", BranchID: "br-main-1"}
-	e.vault.Bind(pa.Binding{Record: "DATABASE_URL", Provider: pa.ProviderNeon, Kind: pa.KindNeonPooled, Resource: neonRes, AllowedDestinations: dest})
-	e.vault.Bind(pa.Binding{Record: "DATABASE_URL_UNPOOLED", Provider: pa.ProviderNeon, Kind: pa.KindNeonDirect, Resource: neonRes, AllowedDestinations: dest})
+	roles := []string{"app_a", "app_b"}
+	e.vault.Bind(pa.Binding{Record: "DATABASE_URL", Provider: pa.ProviderNeon, Kind: pa.KindNeonPooled, Resource: neonRes, AllowedDestinations: dest, Roles: roles, ActiveRole: "app_a"})
+	e.vault.Bind(pa.Binding{Record: "DATABASE_URL_UNPOOLED", Provider: pa.ProviderNeon, Kind: pa.KindNeonDirect, Resource: neonRes, AllowedDestinations: dest, Roles: roles, ActiveRole: "app_a"})
 	if _, ok := all["STRIPE_WEBHOOK_SECRET"]; ok {
 		e.vault.Bind(pa.Binding{Record: "STRIPE_WEBHOOK_SECRET", Provider: pa.ProviderStripe, Kind: pa.KindStripeWebhookSecret,
 			Resource: pa.BindingResource{EndpointID: "we_old1", Lineage: "we_old1"}, AllowedDestinations: dest})
+		e.vault.CreatedEndpoint("we_old1", "we_old1")
 	}
 	e.fake = provideractiontest.NewProviders(e.log)
 	o := pa.Options{Vault: e.vault, Factory: e.fake, Clock: e.clock}
@@ -86,17 +88,28 @@ func vercelRef(target string) map[string]any {
 
 func rotateParams(t *testing.T) json.RawMessage {
 	return js(t, map[string]any{
-		"project_id": "calm-sky-123456", "branch_id": "br-main-1", "roles": []string{"app_a", "app_b"}, "owner_role": "neondb_owner", "database": "appdb",
+		"project_id": "calm-sky-123456", "branch_id": "br-main-1", "owner_role": "neondb_owner", "database": "appdb",
 		"records": map[string]string{"pooled": "DATABASE_URL", "direct": "DATABASE_URL_UNPOOLED"},
-		"vercel":  vercelRef("preview"), "health_path": "/api/health",
+		"vercel":  []any{vercelRef("preview")}, "health_path": "/api/health",
 	})
 }
 
 func stripeRotateParams(t *testing.T) json.RawMessage {
 	return js(t, map[string]any{
 		"endpoint_id": "we_old1", "record": "STRIPE_WEBHOOK_SECRET", "previous_record": "STRIPE_WEBHOOK_SECRET_PREVIOUS",
-		"vercel": vercelRef("preview"), "health_path": "/api/health",
+		"vercel": []any{vercelRef("preview")}, "health_path": "/api/health",
 	})
+}
+
+// prepared runs Prepare and returns the approval plan text.
+func (e *env) summary(t *testing.T, action string, params json.RawMessage) string {
+	t.Helper()
+	prep, code := e.svc.Prepare(context.Background(), action, params)
+	if code != "" {
+		t.Fatalf("prepare %s: %s", action, code)
+	}
+	defer prep.Release()
+	return prep.Summary()
 }
 
 // run prepares and starts an action and waits for it to finish.
@@ -198,16 +211,22 @@ func TestParamValidationIsStrict(t *testing.T) {
 		{pa.ActionStripeWebhookCreate, `{"url":"https://shop.example.com/x","events":["invoice.paid","invoice.paid"],"record":"W"}`},
 		{pa.ActionStripeWebhookCreate, `{"url":"https://shop.example.com/x","events":["Invoice Paid"],"record":"W"}`},
 		{pa.ActionStripeWebhookCreate, `{"url":"https://shop.example.com/x","events":["invoice.paid"],"record":"CONTROL_STRIPE_KEY"}`},
-		{pa.ActionStripeWebhookRotate, `{"endpoint_id":"we_a","record":"W","previous_record":"W","vercel":{"team_id":"team_a","project_id":"prj_a","target":"preview"},"health_path":"/"}`},
+		{pa.ActionStripeWebhookRotate, `{"endpoint_id":"we_a","record":"W","previous_record":"W","vercel":[{"team_id":"team_a","project_id":"prj_a","target":"preview"}],"health_path":"/"}`},
+		{pa.ActionStripeWebhookRotate, `{"endpoint_id":"we_a","record":"W","previous_record":"P","vercel":{"team_id":"team_a","project_id":"prj_a","target":"preview"},"health_path":"/"}`}, // vercel is a list
+		{pa.ActionStripeWebhookRotate, `{"endpoint_id":"we_a","record":"W","previous_record":"P","vercel":[],"health_path":"/"}`},
+		{pa.ActionStripeWebhookRotate, `{"endpoint_id":"we_a","record":"W","previous_record":"P","vercel":[{"team_id":"team_a","project_id":"prj_a","target":"preview"},{"team_id":"team_a","project_id":"prj_a","target":"preview"}],"health_path":"/"}`}, // duplicate scope
+		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `[{`, `[{"team_id":"team_b","project_id":"prj_b","target":"production","production":true},{"team_id":"team_c","project_id":"prj_c","target":"production","production":true},{`, 1)}, // two production scopes
+		{pa.ActionNeonRolesPrepare, `{"project_id":"calm","branch_id":"br-x","database":"d","owner_role":"o","adopt":false,"adopt_existing_roles":"yes"}`},
+		{pa.ActionVercelRedeploy, `{"team_id":"team_abc","project_id":"prj_abc","target":"production","production":true,"git_branch":"main"}`},
 		{pa.ActionStripeWebhookDelete, `{"endpoint_id":"acct_abc"}`},
-		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"app_b"`, `"app_a"`, 1)},            // same role twice
-		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"br-main-1"`, `"main"`, 1)},         // br-
-		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"/api/health"`, `"api/health"`, 1)}, // path
+		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"database"`, `"roles":["app_a","app_a"],"database"`, 1)}, // same role twice
+		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"br-main-1"`, `"main"`, 1)},                              // br-
+		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"/api/health"`, `"api/health"`, 1)},                      // path
 		{pa.ActionNeonProjectCreate, `{"name":"x","pg_version":9,"records":{"pooled":"A","direct":"B"}}`},
 		{pa.ActionNeonProjectCreate, `{"name":"x","roles":["app_a"],"records":{"pooled":"A","direct":"B"}}`},
 		{pa.ActionNeonProjectCreate, `{"name":"x","roles":["app_a","envbank_app_owner"],"records":{"pooled":"A","direct":"B"}}`},
 		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"owner_role":"neondb_owner",`, ``, 1)},
-		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"neondb_owner"`, `"app_a"`, 1)},
+		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"database"`, `"roles":["neondb_owner","app_a"],"database"`, 1)}, // owner as a rotation role
 		{pa.ActionNeonRotate, strings.Replace(string(rotateParams(t)), `"neondb_owner"`, `"envbank_app_owner"`, 1)},
 		{pa.ActionNeonRolesPrepare, `{"project_id":"calm","branch_id":"br-x","database":"d","owner_role":"o","roles":["a","b","c"],"adopt":false}`},
 		{pa.ActionNeonRolesPrepare, `{"project_id":"calm","branch_id":"br-x","database":"d","owner_role":"o","roles":["a","A"],"adopt":false}`},
@@ -230,8 +249,10 @@ func TestParamValidationIsStrict(t *testing.T) {
 }
 
 func TestPlanTextIsDeterministicAndNamesEverything(t *testing.T) {
-	a, _ := pa.Parse(pa.ActionNeonRotate, rotateParams(t))
-	b, _ := pa.Parse(pa.ActionNeonRotate, rotateParams(t))
+	e := newEnv(t, nil)
+	// The role order comes from the bindings (app_a active), not params.
+	a := e.summary(t, pa.ActionNeonRotate, rotateParams(t))
+	b := e.summary(t, pa.ActionNeonRotate, rotateParams(t))
 	if a != b || a == "" {
 		t.Fatalf("plan text not deterministic: %q %q", a, b)
 	}
@@ -245,7 +266,7 @@ func TestPlanTextIsDeterministicAndNamesEverything(t *testing.T) {
 	}
 	var p map[string]any
 	_ = json.Unmarshal(rotateParams(t), &p)
-	p["vercel"] = vercelRef("production")
+	p["vercel"] = []any{vercelRef("production")}
 	prod, ok := pa.Parse(pa.ActionNeonRotate, js(t, p))
 	if !ok || !strings.Contains(prod, "Vercel prj_abc123 (team_abc123) PRODUCTION") {
 		t.Fatalf("production plan must say PRODUCTION: %s", prod)
@@ -265,6 +286,8 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 		t.Fatalf("status %+v", st)
 	}
 	want := []string{
+		"neon.database_owner appdb", // before the prompt: owner_role is the database owner
+		"neon.database_owner appdb", // again when running
 		"neon.roles_ready neondb_owner app_a,app_b",
 		"neon.reset app_b",
 		"vault.store DATABASE_URL",
@@ -282,7 +305,7 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 	if got := e.log.Calls(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("call order:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	wantSteps := []string{pa.StepControl, pa.StepBindingCheck, pa.StepNeonCheckRoles, pa.StepNeonResetNewRole, pa.StepBindingSave, pa.StepVercelEnvPush, pa.StepVercelCurrent, pa.StepVercelRedeploy, pa.StepVercelWaitReady, pa.StepHealth, pa.StepNeonInvalidateOld}
+	wantSteps := []string{pa.StepControl, pa.StepBindingCheck, pa.StepNeonCheckRoles, pa.StepNeonResetNewRole, pa.StepBindingSave, pa.StepVercelEnvPush, pa.StepVercelCurrent, pa.StepVercelRedeploy, pa.StepVercelWaitReady, pa.StepHealth, pa.StepNeonInvalidateOld, pa.StepBindingFinish}
 	if strings.Join(st.Steps, ",") != strings.Join(wantSteps, ",") {
 		t.Fatalf("steps %v", st.Steps)
 	}
@@ -295,9 +318,13 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 	}
 	for _, rec := range []string{"DATABASE_URL", "DATABASE_URL_UNPOOLED"} {
 		b, _ := e.vault.Binding(rec)
-		if _, rev := e.vault.Value(rec); b.RecordRevision != rev || len(b.AllowedDestinations) != 1 || b.Resource.ProjectID != "calm-sky-123456" {
+		if _, rev := e.vault.Value(rec); b.RecordRevision != rev || len(b.AllowedDestinations) != 1 || b.Resource.ProjectID != "calm-sky-123456" ||
+			b.ActiveRole != "app_b" || b.RetiringRole != "" || len(b.DeployedTo) != 1 || b.DeployedTo[0].Env != rec || b.DeployedTo[0].Target != "preview" {
 			t.Fatalf("%s binding not moved to the new value: %+v", rec, b)
 		}
+	}
+	if len(st.Result.Redeployed) != 1 || st.Result.Redeployed[0].ProjectID != "prj_abc123" || st.Result.Redeployed[0].Health == nil {
+		t.Fatalf("redeployed %+v", st.Result.Redeployed)
 	}
 	r := st.Result
 	if r.ActiveRole != "app_b" || r.InvalidatedRole != "app_a" || r.DeploymentID == "" || r.Health == nil || r.Health.Checks < 3 || r.Health.WindowSeconds < 30 {
@@ -348,7 +375,7 @@ func TestNeonRotateFailureAtEachStepKeepsOldRole(t *testing.T) {
 		if st.State != pa.StateFailed || st.Step != pa.StepNeonCheckRoles || st.Code != pa.CodeRolesNotPrepared {
 			t.Fatalf("status %+v", st)
 		}
-		if got := e.log.Calls(); len(got) != 1 || got[0] != "neon.roles_ready neondb_owner app_a,app_b" {
+		if got := e.log.Calls(); strings.Join(got, ",") != "neon.database_owner appdb,neon.database_owner appdb,neon.roles_ready neondb_owner app_a,app_b" {
 			t.Fatalf("side effects with unprepared roles: %v", got)
 		}
 	})
@@ -493,7 +520,8 @@ func TestNeonRolesPrepare(t *testing.T) {
 	if st.State != pa.StateSucceeded || strings.Join(st.Result.PreparedRoles, ",") != "web_a,web_b" {
 		t.Fatalf("prepare %+v", st)
 	}
-	if got := e.log.Calls(); len(got) != 1 || got[0] != "neon.prepare_roles neondb_owner web_a,web_b adopt=true" {
+	check := "neon.database_owner appdb,neon.role_exists web_a,neon.role_exists web_b"
+	if got := strings.Join(e.log.Calls(), ","); got != check+","+check+",neon.prepare_roles neondb_owner web_a,web_b adopt=true" {
 		t.Fatalf("calls %v", got)
 	}
 	e.noLeak(t, "prepare", st)
@@ -551,6 +579,7 @@ func TestLiveStripeKeyRefused(t *testing.T) {
 	e := newEnv(t, nil)
 	live := provideractiontest.Sentinel("sk_live_")
 	e.vault.Set(pa.ControlStripe, live)
+	e.vault.CreatedEndpoint("we_abc", "we_abc")
 	e.controls = append(e.controls, live)
 	st := e.run(t, pa.ActionStripeWebhookDelete, js(t, map[string]any{"endpoint_id": "we_abc"}))
 	if st.State != pa.StateFailed || st.Step != pa.StepControl || st.Code != pa.CodeControlRefused || len(e.log.Calls()) != 0 {
@@ -574,6 +603,7 @@ func TestHealthNeedsThreeChecksOverThirtySeconds(t *testing.T) {
 
 func TestSessionOwnershipOfStatus(t *testing.T) {
 	e := newEnv(t, nil)
+	e.vault.CreatedNeonProject("abc", "br-main-1")
 	prep, _ := e.svc.Prepare(context.Background(), pa.ActionNeonProjectDelete, js(t, map[string]any{"project_id": "abc"}))
 	id, _ := e.svc.Start(prep, owner, scope, nil)
 	if len(id) != 32 || !pa.ValidOperationID(id) {
@@ -590,6 +620,9 @@ func TestSessionOwnershipOfStatus(t *testing.T) {
 
 func TestConcurrencyAndJournalBounds(t *testing.T) {
 	e := newEnv(t, nil, func(o *pa.Options) { o.MaxRunning = 2; o.MaxJournal = 3 })
+	for _, id := range []string{"abc", "abd", "abe"} {
+		e.vault.CreatedNeonProject(id, "br-main-1")
+	}
 	e.fake.Block = make(chan struct{})
 	params := js(t, map[string]any{"project_id": "abc"})
 	ctx := context.Background()

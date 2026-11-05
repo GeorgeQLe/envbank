@@ -255,7 +255,7 @@ func TestSyntheticEndToEnd(t *testing.T) {
 	rot := h.mustSucceed(provideraction.ActionNeonRotate, map[string]any{"project_id": np.ProjectID, "branch_id": np.BranchID,
 		"roles": []string{"app_a", "app_b"}, "owner_role": np.Role, "database": np.Database,
 		"records": map[string]string{"pooled": "DATABASE_URL", "direct": "DATABASE_URL_UNPOOLED"},
-		"vercel":  preview(project), "health_path": "/api/health"})
+		"vercel":  []any{preview(project)}, "health_path": "/api/health"})
 	if rot.ActiveRole != "app_b" || rot.InvalidatedRole != "app_a" {
 		t.Fatalf("rotate result %+v", rot)
 	}
@@ -289,11 +289,11 @@ func TestSyntheticEndToEnd(t *testing.T) {
 		t.Fatal("webhook secret not stored from the create response")
 	}
 	h.refusedWithoutPrompt(provideraction.CodeDestinationNotAllowed, provideraction.ActionStripeWebhookRotate, map[string]any{"endpoint_id": first,
-		"record": "STRIPE_WEBHOOK_SECRET", "previous_record": "STRIPE_WEBHOOK_SECRET_PREVIOUS", "vercel": preview(project), "health_path": "/api/health"})
+		"record": "STRIPE_WEBHOOK_SECRET", "previous_record": "STRIPE_WEBHOOK_SECRET_PREVIOUS", "vercel": []any{preview(project)}, "health_path": "/api/health"})
 	h.mustSucceed(provideraction.ActionBindingAllow, map[string]any{"records": []string{"STRIPE_WEBHOOK_SECRET"}, "team_id": team, "project_id": project})
 	oldSecret := value(h.vault, "STRIPE_WEBHOOK_SECRET")
 	sr := h.mustSucceed(provideraction.ActionStripeWebhookRotate, map[string]any{"endpoint_id": first,
-		"record": "STRIPE_WEBHOOK_SECRET", "previous_record": "STRIPE_WEBHOOK_SECRET_PREVIOUS", "vercel": preview(project), "health_path": "/api/health"})
+		"record": "STRIPE_WEBHOOK_SECRET", "previous_record": "STRIPE_WEBHOOK_SECRET_PREVIOUS", "vercel": []any{preview(project)}, "health_path": "/api/health"})
 	second := sr.EndpointID
 	if second == first || sr.DeletedEndpointID != first || !h.fx.stripe.endpoint(first).deleted {
 		t.Fatalf("stripe rotate result %+v", sr)
@@ -367,7 +367,7 @@ func TestDeploymentProtectionStopsRotationBeforeInvalidation(t *testing.T) {
 	r := h.act(provideraction.ActionNeonRotate, map[string]any{"project_id": np.ProjectID, "branch_id": np.BranchID,
 		"roles": []string{"app_a", "app_b"}, "owner_role": np.Role, "database": np.Database,
 		"records": map[string]string{"pooled": "DATABASE_URL", "direct": "DATABASE_URL_UNPOOLED"},
-		"vercel":  map[string]any{"team_id": team, "project_id": project, "target": "preview"}, "health_path": "/api/health"})
+		"vercel":  []any{map[string]any{"team_id": team, "project_id": project, "target": "preview"}}, "health_path": "/api/health"})
 	if r.resp.State != provideraction.StateFailed || r.resp.Step != provideraction.StepHealth || r.resp.Code != provideraction.CodeHealthProtected {
 		t.Fatalf("status %+v", r.resp)
 	}

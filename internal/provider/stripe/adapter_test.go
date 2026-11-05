@@ -39,7 +39,7 @@ func TestWebhookCreateStreamsSecretToSink(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"we_123","secret":"` + sentinel + `"}`)), Header: http.Header{}}, nil
 	})}
-	adapter, err := New([]byte("sk_test_control"), Options{Endpoint: "http://localhost", Client: client})
+	adapter, err := New([]byte("sk_test_control"), Options{Endpoint: "http://127.0.0.1", Client: client})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestWebhookCreateNeverReturnsResponseSecretInError(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 500, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"` + sentinel + `"}}`)), Header: http.Header{}}, nil
 	})}
-	adapter, _ := New([]byte("sk_test_control"), Options{Endpoint: "http://localhost", Client: client})
+	adapter, _ := New([]byte("sk_test_control"), Options{Endpoint: "http://127.0.0.1", Client: client})
 	defer adapter.Close()
 	sink, _ := lifecycle.NewSecretSink(&writer{}, "TOKEN")
 	_, err := adapter.Create(context.Background(), lifecycle.CredentialRequest{ProviderIdentity: "acct_123", CredentialType: "webhook-signing-secret", DestinationRecord: "TOKEN", IdempotencyKey: "operation-error", Parameters: map[string][]string{"url": {"https://example.test/webhook"}, "enabled_events": {"*"}}}, sink)
@@ -72,7 +72,7 @@ func TestWebhookCreateNeverReturnsResponseSecretInError(t *testing.T) {
 func TestWebhookCreateRequiresStableIdempotencyKey(t *testing.T) {
 	called := false
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { called = true; return nil, nil })}
-	adapter, _ := New([]byte("sk_test_control"), Options{Endpoint: "http://localhost", Client: client})
+	adapter, _ := New([]byte("sk_test_control"), Options{Endpoint: "http://127.0.0.1", Client: client})
 	defer adapter.Close()
 	sink, _ := lifecycle.NewSecretSink(&writer{}, "TOKEN")
 	_, err := adapter.Create(context.Background(), lifecycle.CredentialRequest{ProviderIdentity: "acct_123", CredentialType: "webhook-signing-secret", DestinationRecord: "TOKEN", Parameters: map[string][]string{"url": {"https://example.test/webhook"}, "enabled_events": {"*"}}}, sink)
@@ -83,7 +83,7 @@ func TestWebhookCreateRequiresStableIdempotencyKey(t *testing.T) {
 
 func TestNewRefusesLiveModeControlKeys(t *testing.T) {
 	for _, key := range []string{"sk_live_unique_live_sentinel", "rk_live_unique_live_sentinel"} {
-		adapter, err := New([]byte(key), Options{Endpoint: "http://localhost"})
+		adapter, err := New([]byte(key), Options{Endpoint: "http://127.0.0.1"})
 		if err == nil || adapter != nil {
 			t.Fatalf("live-mode key accepted")
 		}
@@ -92,7 +92,7 @@ func TestNewRefusesLiveModeControlKeys(t *testing.T) {
 		}
 	}
 	for _, key := range []string{"sk_test_control", "rk_test_control"} {
-		adapter, err := New([]byte(key), Options{Endpoint: "http://localhost"})
+		adapter, err := New([]byte(key), Options{Endpoint: "http://127.0.0.1"})
 		if err != nil {
 			t.Fatalf("test-mode key refused: %v", err)
 		}
@@ -103,5 +103,19 @@ func TestNewRefusesLiveModeControlKeys(t *testing.T) {
 	}
 	if !LiveModeKey([]byte("sk_live_x")) || !LiveModeKey([]byte("rk_live_x")) || LiveModeKey([]byte("sk_test_x")) || LiveModeKey([]byte("pk_live_x")) {
 		t.Fatal("live-mode classification is wrong")
+	}
+}
+
+func TestEndpointIsPinned(t *testing.T) {
+	for _, ok := range []string{"", "https://api.stripe.com", "https://api.stripe.com/", "http://127.0.0.1:8080", "https://[::1]:9"} {
+		if _, err := New([]byte("sk_test_control"), Options{Endpoint: ok}); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"http://localhost", "https://localhost", "http://api.stripe.com", "https://api.stripe.com:444", "https://api.stripe.com.evil.test",
+		"https://evil.test", "https://user@api.stripe.com", "https://api.stripe.com/v1", "https://api.stripe.com?x=1", "http://10.0.0.1", "http://0.0.0.0"} {
+		if _, err := New([]byte("sk_test_control"), Options{Endpoint: bad}); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
 	}
 }

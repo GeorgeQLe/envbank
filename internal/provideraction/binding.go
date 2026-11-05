@@ -49,6 +49,9 @@ const BindingVersion = 1
 // MaxAllowedDestinations bounds a binding's allowed_destinations.
 const MaxAllowedDestinations = 16
 
+// MaxDeployedTo bounds a binding's deployed_to entries.
+const MaxDeployedTo = 32
+
 // maxAllowRecords bounds the records one binding.allow names.
 const maxAllowRecords = 16
 
@@ -74,6 +77,42 @@ type BindingResource struct {
 	Lineage    string `json:"lineage,omitempty"`
 }
 
+// DeployTarget is one Vercel env-var scope: a project's target, and for
+// preview optionally one git branch (empty: every preview branch).
+type DeployTarget struct {
+	TeamID    string `json:"team_id"`
+	ProjectID string `json:"project_id"`
+	Target    string `json:"target"`
+	GitBranch string `json:"git_branch,omitempty"`
+}
+
+func (d DeployTarget) dest() Destination {
+	return Destination{TeamID: d.TeamID, ProjectID: d.ProjectID}
+}
+
+func (d DeployTarget) valid() bool {
+	if !d.dest().valid() {
+		return false
+	}
+	switch d.Target {
+	case TargetPreview:
+		return d.GitBranch == "" || validGitBranch(d.GitBranch)
+	case TargetProduction:
+		return d.GitBranch == ""
+	}
+	return false
+}
+
+// Deployed is one env var the broker wrote a bound record's value to: the
+// scope and the variable name. A rotation must rewrite (and redeploy) every
+// one of them before it invalidates the old credential.
+type Deployed struct {
+	DeployTarget
+	Env string `json:"env"`
+}
+
+func (d Deployed) valid() bool { return d.DeployTarget.valid() && validRecord(d.Env) }
+
 // Binding is one record's provenance (value-free).
 type Binding struct {
 	V                   int             `json:"v"`
@@ -83,7 +122,19 @@ type Binding struct {
 	Resource            BindingResource `json:"resource"`
 	RecordRevision      int64           `json:"record_revision"`
 	AllowedDestinations []Destination   `json:"allowed_destinations"`
-	Revoked             bool            `json:"revoked,omitempty"`
+	// DeployedTo lists every env var this broker wrote the record's value
+	// to (recorded before the write, so it may over-approximate after a
+	// failed push, never under-approximate).
+	DeployedTo []Deployed `json:"deployed_to,omitempty"`
+	// Neon kinds only. Roles are the two rotation roles; ActiveRole is the
+	// role whose URIs the record holds; RetiringRole, while a rotation is
+	// incomplete, is the previous role: still valid and possibly still used
+	// by a deployment, so the next rotation completes the interrupted one
+	// instead of resetting a role in use.
+	Roles        []string `json:"roles,omitempty"`
+	ActiveRole   string   `json:"active_role,omitempty"`
+	RetiringRole string   `json:"retiring_role,omitempty"`
+	Revoked      bool     `json:"revoked,omitempty"`
 }
 
 // Valid reports whether b is a well-formed binding.
@@ -95,11 +146,13 @@ func (b Binding) Valid() bool {
 	r := b.Resource
 	switch b.Kind {
 	case KindNeonPooled, KindNeonDirect:
-		if b.Provider != ProviderNeon || !neonProjectRe.MatchString(r.ProjectID) || !neonBranchRe.MatchString(r.BranchID) || r.EndpointID != "" || r.Lineage != "" {
+		if b.Provider != ProviderNeon || !neonProjectRe.MatchString(r.ProjectID) || !neonBranchRe.MatchString(r.BranchID) || r.EndpointID != "" || r.Lineage != "" ||
+			!b.validRoles() {
 			return false
 		}
 	case KindStripeWebhookSecret, KindStripeWebhookSecretPrevious:
-		if b.Provider != ProviderStripe || !stripeEndpointRe.MatchString(r.EndpointID) || !stripeEndpointRe.MatchString(r.Lineage) || r.ProjectID != "" || r.BranchID != "" {
+		if b.Provider != ProviderStripe || !stripeEndpointRe.MatchString(r.EndpointID) || !stripeEndpointRe.MatchString(r.Lineage) || r.ProjectID != "" || r.BranchID != "" ||
+			b.Roles != nil || b.ActiveRole != "" || b.RetiringRole != "" {
 			return false
 		}
 	default:
@@ -112,7 +165,85 @@ func (b Binding) Valid() bool {
 		}
 		seen[d] = true
 	}
+	if len(b.DeployedTo) > MaxDeployedTo {
+		return false
+	}
+	deployed := map[Deployed]bool{}
+	for _, d := range b.DeployedTo {
+		// Only an allowed destination can have been written.
+		if !d.valid() || deployed[d] || !seen[d.dest()] {
+			return false
+		}
+		deployed[d] = true
+	}
 	return true
+}
+
+// validRoles: Neon role state is either absent (no rotation possible) or two
+// distinct rotation roles with the active one among them and, during an
+// incomplete rotation, the other one retiring.
+func (b Binding) validRoles() bool {
+	if b.Roles == nil {
+		return b.ActiveRole == "" && b.RetiringRole == ""
+	}
+	if len(b.Roles) != 2 {
+		return false
+	}
+	if _, ok := rotationRoles(b.Roles, ""); !ok {
+		return false
+	}
+	other := ""
+	switch b.ActiveRole {
+	case b.Roles[0]:
+		other = b.Roles[1]
+	case b.Roles[1]:
+		other = b.Roles[0]
+	default:
+		return false
+	}
+	return b.RetiringRole == "" || b.RetiringRole == other
+}
+
+// inactiveRole is the rotation role the record does not hold.
+func (b Binding) inactiveRole() string {
+	if len(b.Roles) != 2 {
+		return ""
+	}
+	if b.ActiveRole == b.Roles[0] {
+		return b.Roles[1]
+	}
+	return b.Roles[0]
+}
+
+// deployedAt returns the env names the record was written to in t.
+func (b Binding) deployedAt(t DeployTarget) []string {
+	var out []string
+	for _, d := range b.DeployedTo {
+		if d.DeployTarget == t {
+			out = append(out, d.Env)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// withDeployed returns a copy that also lists d (no-op if present), or
+// false when that would exceed MaxDeployedTo.
+func (b Binding) withDeployed(ds ...Deployed) (Binding, bool) {
+	c := b.clone()
+	for _, d := range ds {
+		present := false
+		for _, x := range c.DeployedTo {
+			if x == d {
+				present = true
+				break
+			}
+		}
+		if !present {
+			c.DeployedTo = append(c.DeployedTo, d)
+		}
+	}
+	return c, len(c.DeployedTo) <= MaxDeployedTo
 }
 
 func (b Binding) allows(d Destination) bool {
@@ -127,6 +258,12 @@ func (b Binding) allows(d Destination) bool {
 func (b Binding) clone() Binding {
 	c := b
 	c.AllowedDestinations = append([]Destination{}, b.AllowedDestinations...)
+	if b.DeployedTo != nil {
+		c.DeployedTo = append([]Deployed{}, b.DeployedTo...)
+	}
+	if b.Roles != nil {
+		c.Roles = append([]string{}, b.Roles...)
+	}
 	return c
 }
 
@@ -165,6 +302,74 @@ func DecodeVercelProject(raw []byte) (VercelProject, error) {
 // VercelProjectKey is the vault-object key of a project's provenance.
 func VercelProjectKey(teamID, projectID string) string { return teamID + "/" + projectID }
 
+// NeonProjectProvenance records that this broker created a Neon project, with the
+// rotation roles it created on its default branch (provenance: deletes
+// need it, and neon.roles.prepare treats those roles as its own).
+type NeonProjectProvenance struct {
+	V         int      `json:"v"`
+	ProjectID string   `json:"project_id"`
+	Name      string   `json:"name"`
+	BranchID  string   `json:"branch_id"`
+	Database  string   `json:"database"`
+	OwnerRole string   `json:"owner_role"`
+	Roles     []string `json:"roles"`
+}
+
+// Valid reports whether p is well formed.
+func (p NeonProjectProvenance) Valid() bool {
+	if p.V != BindingVersion || !neonProjectRe.MatchString(p.ProjectID) || !neonNameRe.MatchString(p.Name) || !neonBranchRe.MatchString(p.BranchID) ||
+		!pgIdentRe.MatchString(p.Database) || !pgIdentRe.MatchString(p.OwnerRole) {
+		return false
+	}
+	_, ok := rotationRoles(p.Roles, p.OwnerRole)
+	return ok && len(p.Roles) == 2
+}
+
+// createdRole reports whether this broker created role on branchID.
+func (p NeonProjectProvenance) createdRole(branchID, role string) bool {
+	if p.BranchID != branchID {
+		return false
+	}
+	for _, r := range p.Roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+// DecodeNeonProject strictly decodes and validates a stored provenance payload.
+func DecodeNeonProject(raw []byte) (NeonProjectProvenance, error) {
+	var p NeonProjectProvenance
+	if decodeStrictBytes(raw, &p) != nil || !p.Valid() {
+		return NeonProjectProvenance{}, errors.New("neon project provenance is invalid")
+	}
+	return p, nil
+}
+
+// StripeEndpointProvenance records that this broker created a Stripe
+// webhook endpoint (by stripe.webhook.create or a rotation).
+type StripeEndpointProvenance struct {
+	V          int    `json:"v"`
+	EndpointID string `json:"endpoint_id"`
+	URL        string `json:"url"`
+	Lineage    string `json:"lineage"`
+}
+
+// Valid reports whether p is well formed.
+func (p StripeEndpointProvenance) Valid() bool {
+	return p.V == BindingVersion && stripeEndpointRe.MatchString(p.EndpointID) && validHTTPSURL(p.URL) && stripeEndpointRe.MatchString(p.Lineage)
+}
+
+// DecodeStripeEndpoint strictly decodes and validates a stored provenance payload.
+func DecodeStripeEndpoint(raw []byte) (StripeEndpointProvenance, error) {
+	var p StripeEndpointProvenance
+	if decodeStrictBytes(raw, &p) != nil || !p.Valid() {
+		return StripeEndpointProvenance{}, errors.New("stripe endpoint provenance is invalid")
+	}
+	return p, nil
+}
+
 // StoredBinding is a binding with its vault-object revision.
 type StoredBinding struct {
 	Binding  Binding
@@ -185,6 +390,14 @@ type BindingStore interface {
 	// LoadVercelProject returns a project's provenance, or ErrMissing.
 	LoadVercelProject(ctx context.Context, teamID, projectID string) (VercelProject, error)
 	SaveVercelProject(ctx context.Context, p VercelProject) error
+	// LoadNeonProject returns a Neon project's provenance, or ErrMissing.
+	LoadNeonProject(ctx context.Context, projectID string) (NeonProjectProvenance, error)
+	// SaveNeonProject creates a project's provenance (create only).
+	SaveNeonProject(ctx context.Context, p NeonProjectProvenance) error
+	// LoadStripeEndpoint returns an endpoint's provenance, or ErrMissing.
+	LoadStripeEndpoint(ctx context.Context, endpointID string) (StripeEndpointProvenance, error)
+	// SaveStripeEndpoint creates an endpoint's provenance (create only).
+	SaveStripeEndpoint(ctx context.Context, p StripeEndpointProvenance) error
 }
 
 func decodeStrictBytes(raw []byte, v any) error {
@@ -220,7 +433,8 @@ func liveBinding(ctx context.Context, v Vault, record string) (bound, string) {
 	if b.Revoked {
 		return bound{}, CodeRecordNotBound
 	}
-	rev, err := v.Latest(ctx, record, func([]byte) error { return nil })
+	// Revision only: no value is read for a check.
+	rev, err := v.Revision(ctx, record)
 	if errors.Is(err, ErrMissing) {
 		return bound{}, agentbroker.CodeUnknownSecret
 	}
@@ -276,13 +490,20 @@ func replaceBinding(ctx context.Context, v Vault, b Binding) error {
 }
 
 func saveBinding(ctx context.Context, v Vault, b Binding, expected int64) error {
+	_, err := saveBindingRev(ctx, v, b, expected)
+	return err
+}
+
+// saveBindingRev saves b and returns its new object revision.
+func saveBindingRev(ctx context.Context, v Vault, b Binding, expected int64) (int64, error) {
 	if !b.Valid() {
-		return fail(agentbroker.CodeVaultFailed)
+		return 0, fail(agentbroker.CodeVaultFailed)
 	}
-	if _, err := v.SaveBinding(ctx, b, expected); err != nil {
-		return fail(agentbroker.CodeVaultFailed)
+	rev, err := v.SaveBinding(ctx, b, expected)
+	if err != nil || rev < 1 {
+		return 0, fail(agentbroker.CodeVaultFailed)
 	}
-	return nil
+	return rev, nil
 }
 
 // newBinding is a fresh binding with no allowed destination.

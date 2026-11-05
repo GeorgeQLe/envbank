@@ -45,6 +45,37 @@ func TestProviderBindingsPersistInTheVault(t *testing.T) {
 	if err := first.SaveVercelProject(ctx, provideraction.VercelProject{V: 1, TeamID: "team_abc123", ProjectID: "prj_abc123", Name: "throwaway"}); err != nil {
 		t.Fatal(err)
 	}
+	neonProv := provideraction.NeonProjectProvenance{V: 1, ProjectID: "calm-sky-123456", Name: "throwaway", BranchID: "br-main-1", Database: "neondb",
+		OwnerRole: "neondb_owner", Roles: []string{"app_a", "app_b"}}
+	if err := first.SaveNeonProject(ctx, neonProv); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.SaveNeonProject(ctx, neonProv); err == nil {
+		t.Fatal("Neon provenance overwritten")
+	}
+	if err := first.SaveStripeEndpoint(ctx, provideraction.StripeEndpointProvenance{V: 1, EndpointID: "we_abc", URL: "https://shop.example.com/x", Lineage: "we_abc"}); err != nil {
+		t.Fatal(err)
+	}
+	// Revision-only and single-record reads.
+	if r, err := first.Revision(ctx, "DATABASE_URL"); err != nil || r != rev {
+		t.Fatalf("revision %d: %v", r, err)
+	}
+	if _, err := first.Revision(ctx, "MISSING"); !errors.Is(err, provideraction.ErrMissing) {
+		t.Fatalf("missing revision: %v", err)
+	}
+	if ok, err := first.Exists(ctx, "DATABASE_URL"); err != nil || !ok {
+		t.Fatalf("exists: %v %v", ok, err)
+	}
+	if ok, err := first.Exists(ctx, "MISSING"); err != nil || ok {
+		t.Fatalf("missing exists: %v %v", ok, err)
+	}
+	var read []byte
+	if r, err := first.Latest(ctx, "DATABASE_URL", func(v []byte) error { read = append([]byte(nil), v...); return nil }); err != nil || r != rev || string(read) != value {
+		t.Fatalf("latest %d: %v", r, err)
+	}
+	if err := first.ReadSecret(ctx, "DATABASE_URL", rev+1, func([]byte) error { return nil }); err == nil {
+		t.Fatal("wrong revision read")
+	}
 	first.wipe()
 
 	// Restart: a fresh unlock and a fresh service.
@@ -63,17 +94,26 @@ func TestProviderBindingsPersistInTheVault(t *testing.T) {
 	if _, err := second.LoadVercelProject(ctx, "team_abc123", "prj_other"); !errors.Is(err, provideraction.ErrMissing) {
 		t.Fatalf("absent provenance: %v", err)
 	}
+	if p, err := second.LoadNeonProject(ctx, "calm-sky-123456"); err != nil || p.Name != "throwaway" {
+		t.Fatalf("neon provenance %+v: %v", p, err)
+	}
+	if _, err := second.LoadNeonProject(ctx, "other-1"); !errors.Is(err, provideraction.ErrMissing) {
+		t.Fatalf("absent neon provenance: %v", err)
+	}
+	if p, err := second.LoadStripeEndpoint(ctx, "we_abc"); err != nil || p.Lineage != "we_abc" {
+		t.Fatalf("stripe provenance %+v: %v", p, err)
+	}
 	names, err := second.Names(ctx)
 	if err != nil || strings.Join(names, ",") != "CONTROL_VERCEL_TOKEN,DATABASE_URL" {
 		t.Fatalf("records: %v %v", names, err)
 	}
 	// The objects are encrypted on the server: no plaintext in the listing.
 	encrypted, err := api2.ListVaultObjects()
-	if err != nil || len(encrypted) != 2 {
+	if err != nil || len(encrypted) != 4 {
 		t.Fatalf("objects %d: %v", len(encrypted), err)
 	}
 	rawObjects, _ := json.Marshal(encrypted)
-	for _, plain := range []string{"DATABASE_URL", "calm-sky-123456", "prj_abc123", vaultobject.KindProviderBinding} {
+	for _, plain := range []string{"DATABASE_URL", "calm-sky-123456", "prj_abc123", "we_abc", vaultobject.KindProviderBinding, vaultobject.KindProviderNeonProject} {
 		if strings.Contains(string(rawObjects), plain) {
 			t.Fatalf("object listing exposes %q", plain)
 		}

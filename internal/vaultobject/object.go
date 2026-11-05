@@ -32,9 +32,12 @@ const (
 	KindDeploymentOperation  = "deployment-operation"
 	// Provider-action provenance (internal/provideraction binding.go): one
 	// binding per record, keyed by record name, and one object per Vercel
-	// project the broker created, keyed by team/project.
-	KindProviderBinding       = "provider-binding"
-	KindProviderVercelProject = "provider-vercel-project"
+	// project (keyed team/project), Neon project (keyed project ID) and
+	// Stripe webhook endpoint (keyed endpoint ID) the broker created.
+	KindProviderBinding        = "provider-binding"
+	KindProviderVercelProject  = "provider-vercel-project"
+	KindProviderNeonProject    = "provider-neon-project"
+	KindProviderStripeEndpoint = "provider-stripe-endpoint"
 
 	MaxKindBytes    = 64
 	MaxKeyBytes     = 512

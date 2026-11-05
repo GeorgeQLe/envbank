@@ -844,3 +844,31 @@ func TestReadsRetryOnlyRetrySafeFailuresBounded(t *testing.T) {
 		t.Fatalf("mutation transport retry=%s", safe.Retry)
 	}
 }
+
+func TestRoleExistsAndDatabaseOwnerAreReadOnly(t *testing.T) {
+	fake := newFake(t)
+	adapter := fake.adapter(t, Options{})
+	ctx := context.Background()
+	fake.json(http.MethodGet, rolePath("app_a"), http.StatusOK, `{"role":{"name":"app_a","branch_id":"`+testBranch+`"}}`)
+	fake.json(http.MethodGet, rolePath("app_b"), http.StatusNotFound, `{"message":"not found"}`)
+	dbPath := "/projects/" + testProject + "/branches/" + testBranch + "/databases/"
+	fake.json(http.MethodGet, dbPath+testDB, http.StatusOK, `{"database":{"name":"neondb","branch_id":"`+testBranch+`","owner_name":"neondb_owner"}}`)
+	fake.json(http.MethodGet, dbPath+"other", http.StatusOK, `{"database":{"name":"wrong","owner_name":"neondb_owner"}}`)
+	if ok, err := adapter.RoleExists(ctx, testProject, testBranch, "app_a"); err != nil || !ok {
+		t.Fatalf("app_a: %v %v", ok, err)
+	}
+	if ok, err := adapter.RoleExists(ctx, testProject, testBranch, "app_b"); err != nil || ok {
+		t.Fatalf("app_b: %v %v", ok, err)
+	}
+	if owner, err := adapter.DatabaseOwner(ctx, testProject, testBranch, testDB); err != nil || owner != "neondb_owner" {
+		t.Fatalf("owner %q: %v", owner, err)
+	}
+	if _, err := adapter.DatabaseOwner(ctx, testProject, testBranch, "missing"); !IsNotFound(err) {
+		t.Fatalf("missing database: %v", err)
+	}
+	expectCode(t, func() error { _, err := adapter.DatabaseOwner(ctx, testProject, testBranch, "other"); return err }(), "INVALID_RESPONSE")
+	expectCode(t, func() error { _, err := adapter.RoleExists(ctx, testProject, testBranch, "bad role"); return err }(), "INVALID_REQUEST")
+	for _, c := range fake.callsTo(http.MethodPost, rolePath("app_a")) {
+		t.Fatalf("a read sent a mutation: %+v", c)
+	}
+}

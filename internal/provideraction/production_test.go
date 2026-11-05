@@ -12,7 +12,7 @@ import (
 func prodRotateParams(t *testing.T) json.RawMessage {
 	var p map[string]any
 	_ = json.Unmarshal(rotateParams(t), &p)
-	p["vercel"] = vercelRef("production")
+	p["vercel"] = []any{vercelRef("production")}
 	return js(t, p)
 }
 
@@ -24,11 +24,11 @@ func TestProductionApprovalTexts(t *testing.T) {
 	cases := map[string]json.RawMessage{
 		pa.ActionVercelRedeploy: js(t, map[string]any{"team_id": long["team_id"], "project_id": long["project_id"], "target": "production", "production": true,
 			"deployment": "dpl_" + strings.Repeat("C", 24), "health_path": "/api/health"}),
-		pa.ActionNeonRotate: js(t, map[string]any{"project_id": "polished-forest-12345678", "branch_id": "br-polished-forest-12345678", "roles": []string{"app_a", "app_b"},
+		pa.ActionNeonRotate: js(t, map[string]any{"project_id": "polished-forest-12345678", "branch_id": "br-polished-forest-12345678", "roles": []string{"app_a", "app_b"}, // as derived
 			"owner_role": "neondb_owner", "database": "neondb", "records": map[string]string{"pooled": "DATABASE_URL", "direct": "DATABASE_URL_UNPOOLED"},
-			"vercel": long, "health_path": "/api/health"}),
+			"vercel": []any{long}, "health_path": "/api/health"}),
 		pa.ActionStripeWebhookRotate: js(t, map[string]any{"endpoint_id": "we_" + strings.Repeat("D", 24), "record": "STRIPE_WEBHOOK_SECRET",
-			"previous_record": "STRIPE_WEBHOOK_SECRET_PREVIOUS", "vercel": long, "health_path": "/api/health"}),
+			"previous_record": "STRIPE_WEBHOOK_SECRET_PREVIOUS", "vercel": []any{long}, "health_path": "/api/health"}),
 	}
 	ident := "claude agent session 3f2a9c1e in workspace ws-main"
 	for action, params := range cases {
@@ -41,8 +41,9 @@ func TestProductionApprovalTexts(t *testing.T) {
 				t.Errorf("%s plan lacks %q: %s", action, want, text)
 			}
 		}
-		reason, fits := approval.WithLabel("perform a provider action: "+text+", for "+ident, "Rotate prod")
-		if !fits || !strings.HasSuffix(reason, "; session label: Rotate prod") {
+		// As authz renders it: the label last, in fixed delimiters.
+		reason := "perform a provider action: " + text + ", for " + ident + `; [agent label: "Rotate prod"]`
+		if len(reason) > approval.MaxReasonBytes {
 			t.Errorf("%s: %d-byte plan does not fit with its label: %s", action, len(text), reason)
 		}
 	}
@@ -59,6 +60,8 @@ func TestProductionNeonRotateOrder(t *testing.T) {
 		t.Fatalf("status %+v", st)
 	}
 	want := []string{
+		"neon.database_owner appdb",
+		"neon.database_owner appdb",
 		"neon.roles_ready neondb_owner app_a,app_b",
 		"vercel.current", // the deployment serving production: the rollback target
 		"neon.reset app_b",
@@ -81,7 +84,7 @@ func TestProductionNeonRotateOrder(t *testing.T) {
 	}
 	wantSteps := []string{pa.StepControl, pa.StepBindingCheck, pa.StepNeonCheckRoles, pa.StepVercelCurrent, pa.StepNeonResetNewRole, pa.StepBindingSave,
 		pa.StepVercelEnvPush, pa.StepVercelRedeploy, pa.StepVercelWaitReady, pa.StepHealth, pa.StepVercelPromote, pa.StepVercelVerifyProduction,
-		pa.StepHealthProduction, pa.StepVercelConfirmProduction, pa.StepNeonInvalidateOld}
+		pa.StepHealthProduction, pa.StepVercelConfirmProduction, pa.StepNeonInvalidateOld, pa.StepBindingFinish}
 	if strings.Join(st.Steps, ",") != strings.Join(wantSteps, ",") {
 		t.Fatalf("steps %v", st.Steps)
 	}

@@ -469,6 +469,43 @@ func (adapter *Adapter) DeleteProject(ctx context.Context, projectID string) err
 	return nil
 }
 
+// RoleExists reports, read-only, whether role exists on branchID.
+func (adapter *Adapter) RoleExists(ctx context.Context, projectID, branchID, role string) (bool, error) {
+	const operation = "role_exists"
+	if !ValidProjectID(projectID) || !ValidBranchID(branchID) || !ValidRoleName(role) {
+		return false, safeError(operation, "INVALID_REQUEST", provider.RetryNever)
+	}
+	return adapter.roleExists(ctx, operation, projectID, branchID, role)
+}
+
+// DatabaseOwner returns, read-only, the role that owns database on branchID
+// (Neon's owner_name). A missing database is NOT_FOUND.
+func (adapter *Adapter) DatabaseOwner(ctx context.Context, projectID, branchID, database string) (string, error) {
+	const operation = "database_owner"
+	if !ValidProjectID(projectID) || !ValidBranchID(branchID) || !ValidDatabaseName(database) {
+		return "", safeError(operation, "INVALID_REQUEST", provider.RetryNever)
+	}
+	var response struct {
+		Database struct {
+			Name      string `json:"name"`
+			BranchID  string `json:"branch_id"`
+			OwnerName string `json:"owner_name"`
+		} `json:"database"`
+	}
+	path := "/projects/" + url.PathEscape(projectID) + "/branches/" + url.PathEscape(branchID) + "/databases/" + url.PathEscape(database)
+	if err := adapter.get(ctx, operation, path, nil, func(raw []byte) error { return json.Unmarshal(raw, &response) }); err != nil {
+		return "", err
+	}
+	d := response.Database
+	if d.Name != database || (d.BranchID != "" && d.BranchID != branchID) || !ValidRoleName(d.OwnerName) {
+		return "", safeError(operation, "INVALID_RESPONSE", provider.RetryNever)
+	}
+	return d.OwnerName, nil
+}
+
+// IsNotFound reports whether err is the adapter's NOT_FOUND (HTTP 404).
+func IsNotFound(err error) bool { return hasCode(err, "NOT_FOUND") }
+
 func rolesPath(projectID, branchID string) string {
 	return "/projects/" + url.PathEscape(projectID) + "/branches/" + url.PathEscape(branchID) + "/roles"
 }

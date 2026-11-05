@@ -77,6 +77,9 @@ func TestResourceLockRefusesSecondOperationBeforeItsPrompt(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			e := newEnv(t, map[string]string{"STRIPE_WEBHOOK_SECRET": whsec}, func(o *pa.Options) { o.MaxRunning = 4 })
+			e.vault.CreatedNeonProject("calm-sky-123456", "br-main-1")
+			e.vault.CreatedNeonProject("other-project-1", "br-main-1")
+			e.vault.CreatedEndpoint("we_unrelated", "we_unrelated")
 			a1, p1 := c.first(t)
 			a2, p2 := c.second(t)
 			ao, po := c.other(t)
@@ -141,6 +144,7 @@ func TestResourceLockRefusesSecondOperationBeforeItsPrompt(t *testing.T) {
 // A failed operation releases its lock too.
 func TestResourceLockReleasedOnFailure(t *testing.T) {
 	e := newEnv(t, nil)
+	e.vault.CreatedNeonProject("abc", "br-main-1")
 	e.fake.Fail = "neon.delete_project abc"
 	params := js(t, map[string]any{"project_id": "abc"})
 	if st := e.run(t, pa.ActionNeonProjectDelete, params); st.State != pa.StateFailed {
@@ -159,12 +163,13 @@ func TestPortsClosedWhenOperationEnds(t *testing.T) {
 	if st := e.run(t, pa.ActionNeonRotate, rotateParams(t)); st.State != pa.StateSucceeded {
 		t.Fatalf("status %+v", st)
 	}
-	if n := e.fake.Closes(); n != 2 {
-		t.Fatalf("closed %d ports, want 2 (Neon and Vercel)", n)
+	if n := e.fake.Closes(); n != 3 {
+		t.Fatalf("closed %d ports, want 3 (the precheck's Neon port, then Neon and Vercel)", n)
 	}
+	e.vault.CreatedNeonProject("abc", "br-main-1")
 	e.fake.Fail = "neon.delete_project abc"
 	e.run(t, pa.ActionNeonProjectDelete, js(t, map[string]any{"project_id": "abc"}))
-	if n := e.fake.Closes(); n != 3 {
+	if n := e.fake.Closes(); n != 4 {
 		t.Fatalf("failed operation's port not closed: %d", n)
 	}
 }

@@ -114,24 +114,31 @@ func (p *Prepared) Action() string { return p.action }
 func (p *Prepared) Summary() string { return p.plan.summary() }
 
 // Prepare validates params strictly, checks what can be checked without
-// side effects (control credentials present, record preconditions) and
-// reserves a run slot. It returns a fixed code on refusal. Nothing it does
-// prompts the owner or calls a provider.
+// side effects (control credentials present, record preconditions, then
+// read-only provider prechecks) and reserves a run slot. It returns a fixed
+// code on refusal. Nothing it does prompts the owner or changes a provider.
 func (s *Service) Prepare(ctx context.Context, action string, params json.RawMessage) (*Prepared, string) {
+	p, code, _ := s.PrepareDetail(ctx, action, params)
+	return p, code
+}
+
+// PrepareDetail is Prepare, and on some refusals also a value-free detail
+// for the agent (STRIPE_ORPHAN_ENDPOINT: orphan_endpoint_id).
+func (s *Service) PrepareDetail(ctx context.Context, action string, params json.RawMessage) (*Prepared, string, *Result) {
 	if !s.Available() {
-		return nil, CodeUnavailable
+		return nil, CodeUnavailable, nil
 	}
 	pl, ok := parsePlan(action, params)
 	if !ok {
-		return nil, agentbroker.CodeInvalidRequest
+		return nil, agentbroker.CodeInvalidRequest, nil
 	}
 	for _, c := range pl.controls() {
 		ok, err := s.vault.Exists(ctx, c)
 		if err != nil {
-			return nil, agentbroker.CodeVaultFailed
+			return nil, agentbroker.CodeVaultFailed, nil
 		}
 		if !ok {
-			return nil, CodeControlMissing
+			return nil, CodeControlMissing, nil
 		}
 	}
 	// The resources this action changes are locked before the record
@@ -139,18 +146,57 @@ func (s *Service) Prepare(ctx context.Context, action string, params json.RawMes
 	// a second operation on the same resource is refused before its prompt.
 	l, code := s.exec.lock(pl.resources(ctx, s.vault))
 	if code != "" {
-		return nil, code
+		return nil, code, nil
 	}
 	if code := pl.precheck(ctx, s.vault); code != "" {
 		l.release()
-		return nil, code
+		return nil, code, nil
 	}
 	sl, code := s.exec.reserve(l)
 	if code != "" {
 		l.release()
-		return nil, code
+		return nil, code, nil
 	}
-	return &Prepared{action: action, plan: pl, slot: sl}, ""
+	// Read-only provider prechecks, with ports built for this check only
+	// (no operation authority: they cannot mutate), closed and wiped here.
+	if lc, ok := pl.(liveChecker); ok {
+		if code, detail := s.liveCheck(ctx, lc); code != "" {
+			sl.release()
+			return nil, code, detail
+		}
+	}
+	return &Prepared{action: action, plan: pl, slot: sl}, "", nil
+}
+
+// liveCheckTimeout bounds a plan's read-only provider prechecks.
+const liveCheckTimeout = 30 * time.Second
+
+// liveChecker is a plan with read-only provider prechecks that must refuse
+// before the prompt (the plan text may depend on them).
+type liveChecker interface {
+	liveControls() []string
+	liveCheck(ctx context.Context, p *ports) (code string, detail *Result)
+}
+
+func (s *Service) liveCheck(ctx context.Context, lc liveChecker) (string, *Result) {
+	ctx, cancel := context.WithTimeout(ctx, liveCheckTimeout)
+	defer cancel()
+	var bufs [][]byte
+	var p ports
+	defer func() {
+		for _, b := range bufs {
+			wipe(b)
+		}
+	}()
+	defer p.close()
+	if err := s.openPorts(ctx, lc.liveControls(), &p, &bufs); err != nil {
+		var f *failure
+		if errors.As(err, &f) {
+			return f.code, nil
+		}
+		return CodeControlRefused, nil
+	}
+	return lc.liveCheck(ctx, &p)
 }
 
 // Release frees an unstarted preparation's slot (safe to call always).
@@ -204,6 +250,26 @@ func (s *Service) Close() {
 	}
 }
 
+// ports are one operation's (or one precheck's) provider ports.
+type ports struct {
+	neon   NeonPort
+	vercel VercelPort
+	stripe StripePort
+}
+
+// close closes every port (its adapters wipe their credential copies).
+func (p *ports) close() {
+	if p.neon != nil {
+		_ = p.neon.Close()
+	}
+	if p.vercel != nil {
+		_ = p.vercel.Close()
+	}
+	if p.stripe != nil {
+		_ = p.stripe.Close()
+	}
+}
+
 // execute reads the control credentials, builds the ports and runs the
 // action. When it returns, every port is closed (its adapters wipe their
 // credential copies) and then the credential buffers are wiped.
@@ -214,70 +280,67 @@ func (s *Service) execute(r *run, pl plan) error {
 			wipe(b)
 		}
 	}()
-	defer func() {
-		if r.neon != nil {
-			_ = r.neon.Close()
-		}
-		if r.vercel != nil {
-			_ = r.vercel.Close()
-		}
-		if r.stripe != nil {
-			_ = r.stripe.Close()
-		}
-	}()
+	defer r.ports.close()
 	if err := r.step(StepControl, CodeControlRefused, func() error {
-		for _, name := range pl.controls() {
-			var cred []byte
-			if _, err := s.vault.Latest(r.ctx, name, func(v []byte) error {
-				cred = append([]byte(nil), v...)
-				return nil
-			}); err != nil {
-				wipe(cred)
-				if errors.Is(err, ErrMissing) {
-					return fail(CodeControlMissing)
-				}
-				return fail(agentbroker.CodeVaultFailed)
-			}
-			bufs = append(bufs, cred)
-			if len(cred) == 0 {
-				return fail(CodeControlMissing)
-			}
-			var err error
-			switch name {
-			// A port is kept only when the factory succeeded, so a nil
-			// interface (never a typed nil) is what the closer skips.
-			case ControlNeon:
-				var p NeonPort
-				if p, err = s.factory.Neon(cred); err == nil && p != nil {
-					r.neon = p
-				}
-			case ControlVercel:
-				var p VercelPort
-				if p, err = s.factory.Vercel(cred); err == nil && p != nil {
-					r.vercel = p
-				}
-			case ControlStripe:
-				// v1 refuses live-mode Stripe keys.
-				if !bytes.HasPrefix(cred, []byte("sk_test_")) && !bytes.HasPrefix(cred, []byte("rk_test_")) {
-					return fail(CodeControlRefused)
-				}
-				var p StripePort
-				if p, err = s.factory.Stripe(cred); err == nil && p != nil {
-					r.stripe = p
-				}
-			}
-			if err != nil {
-				return fail(CodeControlRefused)
-			}
-		}
-		if (r.neon == nil && has(pl.controls(), ControlNeon)) || (r.vercel == nil && has(pl.controls(), ControlVercel)) || (r.stripe == nil && has(pl.controls(), ControlStripe)) {
-			return fail(CodeControlRefused)
-		}
-		return nil
+		return s.openPorts(r.ctx, pl.controls(), &r.ports, &bufs)
 	}); err != nil {
 		return err
 	}
 	return pl.execute(r)
+}
+
+// openPorts reads each control credential inside a vault callback into a
+// buffer appended to bufs (the caller wipes them after closing p) and
+// builds its port.
+func (s *Service) openPorts(ctx context.Context, controls []string, p *ports, bufs *[][]byte) error {
+	for _, name := range controls {
+		var cred []byte
+		if _, err := s.vault.Latest(ctx, name, func(v []byte) error {
+			cred = append([]byte(nil), v...)
+			return nil
+		}); err != nil {
+			wipe(cred)
+			if errors.Is(err, ErrMissing) {
+				return fail(CodeControlMissing)
+			}
+			return fail(agentbroker.CodeVaultFailed)
+		}
+		*bufs = append(*bufs, cred)
+		if len(cred) == 0 {
+			return fail(CodeControlMissing)
+		}
+		var err error
+		switch name {
+		// A port is kept only when the factory succeeded, so a nil
+		// interface (never a typed nil) is what the closer skips.
+		case ControlNeon:
+			var port NeonPort
+			if port, err = s.factory.Neon(cred); err == nil && port != nil {
+				p.neon = port
+			}
+		case ControlVercel:
+			var port VercelPort
+			if port, err = s.factory.Vercel(cred); err == nil && port != nil {
+				p.vercel = port
+			}
+		case ControlStripe:
+			// v1 refuses live-mode Stripe keys.
+			if !bytes.HasPrefix(cred, []byte("sk_test_")) && !bytes.HasPrefix(cred, []byte("rk_test_")) {
+				return fail(CodeControlRefused)
+			}
+			var port StripePort
+			if port, err = s.factory.Stripe(cred); err == nil && port != nil {
+				p.stripe = port
+			}
+		}
+		if err != nil {
+			return fail(CodeControlRefused)
+		}
+	}
+	if (p.neon == nil && has(controls, ControlNeon)) || (p.vercel == nil && has(controls, ControlVercel)) || (p.stripe == nil && has(controls, ControlStripe)) {
+		return fail(CodeControlRefused)
+	}
+	return nil
 }
 
 func has(list []string, v string) bool {
@@ -298,16 +361,14 @@ func fail(code string) error { return &failure{code: code} }
 
 // run is one executing operation.
 type run struct {
-	ctx    context.Context
-	svc    *Service
-	vault  Vault
-	h      *opHandle
-	valid  func() bool
-	neon   NeonPort
-	vercel VercelPort
-	stripe StripePort
-	res    *Result
-	prod   *release // production release state (production.go)
+	ctx   context.Context
+	svc   *Service
+	vault Vault
+	h     *opHandle
+	valid func() bool
+	ports
+	res  *Result
+	prod *release // production release state (production.go)
 }
 
 func (r *run) res0() *Result {

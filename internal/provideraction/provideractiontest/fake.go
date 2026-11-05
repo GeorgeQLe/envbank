@@ -89,18 +89,22 @@ type Vault struct {
 	FailStore map[string]bool
 	// FailBinding makes SaveBinding fail for these records.
 	FailBinding map[string]bool
+	// reads lists every record whose value was read (Latest, ReadSecret).
+	reads []string
 
 	// Bindings and Vercel provenance, as encoded JSON (the shape the real
 	// store encrypts), with optimistic object revisions.
 	bindings    map[string][]byte
 	bindingRevs map[string]int64
 	projects    map[string][]byte
+	neonProjs   map[string][]byte
+	endpoints   map[string][]byte
 }
 
 // NewVault returns a vault holding values (revision 1 each).
 func NewVault(log *Log, values map[string]string) *Vault {
 	v := &Vault{Log: log, vals: map[string][]byte{}, revs: map[string]int64{}, FailStore: map[string]bool{}, FailBinding: map[string]bool{},
-		bindings: map[string][]byte{}, bindingRevs: map[string]int64{}, projects: map[string][]byte{}}
+		bindings: map[string][]byte{}, bindingRevs: map[string]int64{}, projects: map[string][]byte{}, neonProjs: map[string][]byte{}, endpoints: map[string][]byte{}}
 	for k, val := range values {
 		v.vals[k], v.revs[k] = []byte(val), 1
 	}
@@ -144,8 +148,16 @@ func (v *Vault) StoreSecret(_ context.Context, name string, fill func(func([]byt
 	return rev, nil
 }
 
+// ValueReads returns the records whose values were read so far.
+func (v *Vault) ValueReads() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]string(nil), v.reads...)
+}
+
 func (v *Vault) ReadSecret(_ context.Context, name string, revision int64, consume func([]byte) error) error {
 	v.mu.Lock()
+	v.reads = append(v.reads, name)
 	val, ok := v.vals[name]
 	rev := v.revs[name]
 	val = append([]byte(nil), val...)
@@ -158,6 +170,7 @@ func (v *Vault) ReadSecret(_ context.Context, name string, revision int64, consu
 
 func (v *Vault) Latest(_ context.Context, name string, consume func([]byte) error) (int64, error) {
 	v.mu.Lock()
+	v.reads = append(v.reads, name)
 	val, ok := v.vals[name]
 	rev := v.revs[name]
 	val = append([]byte(nil), val...)
@@ -166,6 +179,16 @@ func (v *Vault) Latest(_ context.Context, name string, consume func([]byte) erro
 		return 0, provideraction.ErrMissing
 	}
 	return rev, consume(val)
+}
+
+// Revision implements provideraction.Vault (no value is read).
+func (v *Vault) Revision(_ context.Context, name string) (int64, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if _, ok := v.vals[name]; !ok {
+		return 0, provideraction.ErrMissing
+	}
+	return v.revs[name], nil
 }
 
 func (v *Vault) Exists(_ context.Context, name string) (bool, error) {
@@ -288,6 +311,90 @@ func (v *Vault) SaveVercelProject(_ context.Context, p provideraction.VercelProj
 	return nil
 }
 
+// LoadNeonProject implements provideraction.BindingStore.
+func (v *Vault) LoadNeonProject(_ context.Context, projectID string) (provideraction.NeonProjectProvenance, error) {
+	v.mu.Lock()
+	raw, ok := v.neonProjs[projectID]
+	v.mu.Unlock()
+	if !ok {
+		return provideraction.NeonProjectProvenance{}, provideraction.ErrMissing
+	}
+	return provideraction.DecodeNeonProject(raw)
+}
+
+// SaveNeonProject implements provideraction.BindingStore (create only).
+func (v *Vault) SaveNeonProject(_ context.Context, p provideraction.NeonProjectProvenance) error {
+	if !p.Valid() {
+		return errors.New("invalid provenance")
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if _, ok := v.neonProjs[p.ProjectID]; ok {
+		return errors.New("revision conflict")
+	}
+	v.neonProjs[p.ProjectID] = raw
+	return nil
+}
+
+// LoadStripeEndpoint implements provideraction.BindingStore.
+func (v *Vault) LoadStripeEndpoint(_ context.Context, id string) (provideraction.StripeEndpointProvenance, error) {
+	v.mu.Lock()
+	raw, ok := v.endpoints[id]
+	v.mu.Unlock()
+	if !ok {
+		return provideraction.StripeEndpointProvenance{}, provideraction.ErrMissing
+	}
+	return provideraction.DecodeStripeEndpoint(raw)
+}
+
+// SaveStripeEndpoint implements provideraction.BindingStore (create only).
+func (v *Vault) SaveStripeEndpoint(_ context.Context, p provideraction.StripeEndpointProvenance) error {
+	if !p.Valid() {
+		return errors.New("invalid provenance")
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if _, ok := v.endpoints[p.EndpointID]; ok {
+		return errors.New("revision conflict")
+	}
+	v.endpoints[p.EndpointID] = raw
+	return nil
+}
+
+// CreatedNeonProject records a Neon project as created by the broker (test
+// setup), with rotation roles app_a and app_b on branch.
+func (v *Vault) CreatedNeonProject(projectID, branchID string) {
+	if err := v.SaveNeonProject(context.Background(), provideraction.NeonProjectProvenance{V: provideraction.BindingVersion, ProjectID: projectID,
+		Name: "throwaway", BranchID: branchID, Database: "neondb", OwnerRole: "neondb_owner", Roles: []string{"app_a", "app_b"}}); err != nil {
+		panic(err)
+	}
+}
+
+// CreatedEndpoint records a Stripe endpoint as created by the broker (test
+// setup).
+func (v *Vault) CreatedEndpoint(id, lineage string) {
+	if err := v.SaveStripeEndpoint(context.Background(), provideraction.StripeEndpointProvenance{V: provideraction.BindingVersion, EndpointID: id,
+		URL: "https://shop.example.com/api/stripe/webhook", Lineage: lineage}); err != nil {
+		panic(err)
+	}
+}
+
+// CreatedVercelProject records a Vercel project as created by the broker
+// (test setup).
+func (v *Vault) CreatedVercelProject(teamID, projectID string) {
+	if err := v.SaveVercelProject(context.Background(), provideraction.VercelProject{V: provideraction.BindingVersion, TeamID: teamID, ProjectID: projectID, Name: "throwaway-app"}); err != nil {
+		panic(err)
+	}
+}
+
 // Bind stores a binding directly (test setup), pinned to the record's
 // current revision.
 func (v *Vault) Bind(b provideraction.Binding) {
@@ -333,7 +440,9 @@ type Providers struct {
 	// Fail makes the call with this exact log entry fail (with an error
 	// whose text carries a secret, which must never surface).
 	Fail string
-	// Block, if set, makes every port call wait for it to close (or ctx).
+	// Block, if set, makes every port call of a running operation wait for
+	// it to close (or ctx). Read-only prechecks before the prompt (no
+	// operation authority) are not blocked.
 	Block chan struct{}
 	// Secret is put into provider error texts.
 	Secret string
@@ -344,6 +453,13 @@ type Providers struct {
 	FailAfter map[string]int
 	// StuckPromotion makes Promote succeed without production moving.
 	StuckPromotion bool
+	// ExistingRoles are the Neon roles RoleExists reports (besides those
+	// PrepareRotationRoles created); DBOwner is DatabaseOwner's answer
+	// (default neondb_owner).
+	ExistingRoles map[string]bool
+	DBOwner       string
+	// Deleted are Stripe endpoints deleted (Webhook answers ErrNotFound).
+	Deleted map[string]bool
 
 	mu        sync.Mutex
 	Creds     [][]byte          // credential slices the factory was given
@@ -386,12 +502,13 @@ func (p *Providers) close() error {
 
 // NewProviders returns a fake factory.
 func NewProviders(log *Log) *Providers {
-	return &Providers{Log: log, Secret: Sentinel("provider_error_"), Pushed: map[string]string{}, Endpoints: map[string]provideraction.StripeWebhook{}}
+	return &Providers{Log: log, Secret: Sentinel("provider_error_"), Pushed: map[string]string{}, Endpoints: map[string]provideraction.StripeWebhook{},
+		ExistingRoles: map[string]bool{}, Deleted: map[string]bool{}}
 }
 
 func (p *Providers) call(ctx context.Context, c string) error {
 	p.Log.Add(c)
-	if p.Block != nil {
+	if p.Block != nil && provideraction.OperationAuthority(ctx) == nil {
 		select {
 		case <-p.Block:
 		case <-ctx.Done():
@@ -490,7 +607,34 @@ func (n neon) DeleteProject(ctx context.Context, id string) error {
 }
 
 func (n neon) PrepareRotationRoles(ctx context.Context, _, _, _, owner string, roles [2]string, adopt bool) error {
-	return n.p.call(ctx, fmt.Sprintf("neon.prepare_roles %s %s,%s adopt=%v", owner, roles[0], roles[1], adopt))
+	if err := n.p.call(ctx, fmt.Sprintf("neon.prepare_roles %s %s,%s adopt=%v", owner, roles[0], roles[1], adopt)); err != nil {
+		return err
+	}
+	n.p.mu.Lock()
+	n.p.ExistingRoles[roles[0]], n.p.ExistingRoles[roles[1]] = true, true
+	n.p.mu.Unlock()
+	return nil
+}
+
+func (n neon) RoleExists(ctx context.Context, _, _, role string) (bool, error) {
+	if err := n.p.call(ctx, "neon.role_exists "+role); err != nil {
+		return false, err
+	}
+	n.p.mu.Lock()
+	defer n.p.mu.Unlock()
+	return n.p.ExistingRoles[role], nil
+}
+
+func (n neon) DatabaseOwner(ctx context.Context, _, _, db string) (string, error) {
+	if err := n.p.call(ctx, "neon.database_owner "+db); err != nil {
+		return "", err
+	}
+	n.p.mu.Lock()
+	defer n.p.mu.Unlock()
+	if n.p.DBOwner != "" {
+		return n.p.DBOwner, nil
+	}
+	return "neondb_owner", nil
 }
 
 func (n neon) RotationRolesReady(ctx context.Context, _, _, _, owner string, roles [2]string) (bool, error) {
@@ -541,11 +685,15 @@ func (v vercel) UpsertSensitiveEnv(ctx context.Context, env provideraction.Verce
 	})
 }
 
-func (v vercel) CurrentDeployment(ctx context.Context, _, _, target string) (string, error) {
-	if err := v.p.call(ctx, "vercel.current"); err != nil {
+func (v vercel) CurrentDeployment(ctx context.Context, env provideraction.VercelEnv) (string, error) {
+	c := "vercel.current"
+	if env.GitBranch != "" {
+		c += " branch=" + env.GitBranch
+	}
+	if err := v.p.call(ctx, c); err != nil {
 		return "", err
 	}
-	if target == "production" {
+	if env.Target == "production" {
 		return v.p.Production(), nil
 	}
 	return "dpl_current", nil
@@ -573,7 +721,7 @@ func (v vercel) Rollback(ctx context.Context, _, _, id string) error {
 	return nil
 }
 
-func (v vercel) Redeploy(ctx context.Context, _, _, _, source string) (string, error) {
+func (v vercel) Redeploy(ctx context.Context, _ provideraction.VercelEnv, source string) (string, error) {
 	if err := v.p.call(ctx, "vercel.redeploy "+source); err != nil {
 		return "", err
 	}
@@ -615,6 +763,9 @@ func (s stripe) Webhook(ctx context.Context, id string) (provideraction.StripeWe
 	}
 	s.p.mu.Lock()
 	defer s.p.mu.Unlock()
+	if s.p.Deleted[id] {
+		return provideraction.StripeWebhook{}, provideraction.ErrNotFound
+	}
 	if w, ok := s.p.Endpoints[id]; ok {
 		return w, nil
 	}
@@ -622,5 +773,11 @@ func (s stripe) Webhook(ctx context.Context, id string) (provideraction.StripeWe
 }
 
 func (s stripe) DeleteWebhook(ctx context.Context, id string) error {
-	return s.p.call(ctx, "stripe.delete "+id)
+	if err := s.p.call(ctx, "stripe.delete "+id); err != nil {
+		return err
+	}
+	s.p.mu.Lock()
+	s.p.Deleted[id] = true
+	s.p.mu.Unlock()
+	return nil
 }
