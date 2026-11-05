@@ -188,6 +188,41 @@ static int ae_hello(ae_chan *c, const char *version, int64_t timeout_ms, char *o
 	return rc;
 }
 
+// ae_request sends one dictionary built from instructions (see ae_build) on
+// the long-lived connection and waits at most timeout_ms for its reply. On
+// AE_MESSAGE *reply_out holds the reply dictionary (the caller releases it).
+static int ae_build(xpc_object_t root, const char **types, const char **keys, const char **vals, int n);
+static int ae_request(ae_chan *c, const char **types, const char **keys, const char **vals, int n, int64_t timeout_ms, xpc_object_t *reply_out) {
+	*reply_out = NULL;
+	xpc_object_t msg = xpc_dictionary_create(NULL, NULL, 0);
+	if (!ae_build(msg, types, keys, vals, n)) {
+		xpc_release(msg);
+		return AE_INVALID;
+	}
+	__block xpc_object_t reply = NULL;
+	dispatch_semaphore_t done = dispatch_semaphore_create(0);
+	xpc_connection_send_message_with_reply(c->conn, msg, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(xpc_object_t r) {
+		reply = xpc_retain(r);
+		dispatch_semaphore_signal(done);
+	});
+	xpc_release(msg);
+	if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, timeout_ms * NSEC_PER_MSEC)) != 0) {
+		xpc_connection_cancel(c->conn); // the pending reply handler then runs with an error
+		if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0) {
+			dispatch_release(done);
+			if (reply) xpc_release(reply);
+		}
+		return AE_TIMEOUT;
+	}
+	dispatch_release(done);
+	if (xpc_get_type(reply) != XPC_TYPE_DICTIONARY) {
+		xpc_release(reply);
+		return AE_PEER;
+	}
+	*reply_out = reply;
+	return AE_MESSAGE;
+}
+
 static int ae_put(uint8_t *buf, size_t *len, char type, const char *key, const char *val, size_t vl) {
 	size_t kl = strlen(key);
 	if (*len + 1 + kl + 1 + vl + 1 > AE_FLAT_MAX) return 0;
@@ -288,37 +323,41 @@ static uint8_t *ae_flatten(xpc_object_t msg, size_t *out_len, int *overflow) {
 	return buf;
 }
 
-// ae_reply builds the reply from instructions (see xpcField in agent.go),
-// sends it and releases msg.
+// ae_build fills root from instructions (see xpcField in agent.go). It
+// returns 0 on unbalanced or too deeply nested instructions.
+static int ae_build(xpc_object_t root, const char **types, const char **keys, const char **vals, int n) {
+	xpc_object_t stack[8];
+	int top = 0;
+	stack[0] = root;
+	for (int i = 0; i < n; i++) {
+		char t = types[i][0];
+		xpc_object_t cur = stack[top];
+		int in_array = xpc_get_type(cur) == XPC_TYPE_ARRAY;
+		if (t == '}') { if (top == 0) return 0; top--; continue; }
+		if (t == '{' || t == '[') {
+			if (top == 7) return 0;
+			xpc_object_t child = t == '{' ? xpc_dictionary_create(NULL, NULL, 0) : xpc_array_create(NULL, 0);
+			if (in_array) xpc_array_append_value(cur, child); else xpc_dictionary_set_value(cur, keys[i], child);
+			xpc_release(child); // the parent holds it
+			stack[++top] = child;
+			continue;
+		}
+		xpc_object_t v;
+		if (t == 'U') v = xpc_uint64_create(strtoull(vals[i], NULL, 10));
+		else if (t == 'I') v = xpc_int64_create(strtoll(vals[i], NULL, 10));
+		else if (t == 'B') v = xpc_bool_create(vals[i][0] == '1');
+		else v = xpc_string_create(vals[i]);
+		if (in_array) xpc_array_append_value(cur, v); else xpc_dictionary_set_value(cur, keys[i], v);
+		xpc_release(v);
+	}
+	return top == 0;
+}
+
+// ae_reply builds the reply from instructions, sends it and releases msg.
 static void ae_reply(xpc_object_t msg, const char **types, const char **keys, const char **vals, int n) {
 	xpc_object_t reply = xpc_dictionary_create_reply(msg);
 	if (reply) {
-		xpc_object_t stack[8];
-		int top = 0;
-		stack[0] = reply;
-		int ok = 1;
-		for (int i = 0; i < n && ok; i++) {
-			char t = types[i][0];
-			xpc_object_t cur = stack[top];
-			int in_array = xpc_get_type(cur) == XPC_TYPE_ARRAY;
-			if (t == '}') { if (top == 0) ok = 0; else top--; continue; }
-			if (t == '{' || t == '[') {
-				if (top == 7) { ok = 0; continue; }
-				xpc_object_t child = t == '{' ? xpc_dictionary_create(NULL, NULL, 0) : xpc_array_create(NULL, 0);
-				if (in_array) xpc_array_append_value(cur, child); else xpc_dictionary_set_value(cur, keys[i], child);
-				xpc_release(child); // the parent holds it
-				stack[++top] = child;
-				continue;
-			}
-			xpc_object_t v;
-			if (t == 'U') v = xpc_uint64_create(strtoull(vals[i], NULL, 10));
-			else if (t == 'I') v = xpc_int64_create(strtoll(vals[i], NULL, 10));
-			else if (t == 'B') v = xpc_bool_create(vals[i][0] == '1');
-			else v = xpc_string_create(vals[i]);
-			if (in_array) xpc_array_append_value(cur, v); else xpc_dictionary_set_value(cur, keys[i], v);
-			xpc_release(v);
-		}
-		if (ok && top == 0) xpc_connection_send_message(xpc_dictionary_get_remote_connection(msg), reply);
+		if (ae_build(reply, types, keys, vals, n)) xpc_connection_send_message(xpc_dictionary_get_remote_connection(msg), reply);
 		xpc_release(reply);
 	}
 	xpc_release(msg);
@@ -359,30 +398,7 @@ static xpc_object_t ae_selftest_message(void) {
 // a plain dictionary and renders it as JSON (tests only; sends nothing).
 static char *ae_selftest_build(const char **types, const char **keys, const char **vals, int n) {
 	xpc_object_t root = xpc_dictionary_create(NULL, NULL, 0);
-	xpc_object_t stack[8];
-	int top = 0;
-	stack[0] = root;
-	for (int i = 0; i < n; i++) {
-		char t = types[i][0];
-		xpc_object_t cur = stack[top];
-		int in_array = xpc_get_type(cur) == XPC_TYPE_ARRAY;
-		if (t == '}') { if (top > 0) top--; continue; }
-		if (t == '{' || t == '[') {
-			if (top == 7) break;
-			xpc_object_t child = t == '{' ? xpc_dictionary_create(NULL, NULL, 0) : xpc_array_create(NULL, 0);
-			if (in_array) xpc_array_append_value(cur, child); else xpc_dictionary_set_value(cur, keys[i], child);
-			xpc_release(child);
-			stack[++top] = child;
-			continue;
-		}
-		xpc_object_t v;
-		if (t == 'U') v = xpc_uint64_create(strtoull(vals[i], NULL, 10));
-		else if (t == 'I') v = xpc_int64_create(strtoll(vals[i], NULL, 10));
-		else if (t == 'B') v = xpc_bool_create(vals[i][0] == '1');
-		else v = xpc_string_create(vals[i]);
-		if (in_array) xpc_array_append_value(cur, v); else xpc_dictionary_set_value(cur, keys[i], v);
-		xpc_release(v);
-	}
+	if (!ae_build(root, types, keys, vals, n)) { xpc_release(root); return NULL; }
 	char *js = malloc(AE_FLAT_MAX);
 	ae_js j = { js, 0, AE_FLAT_MAX - 1, 1 };
 	js_value(&j, root, 0);
@@ -431,6 +447,33 @@ func (x *xpcAgentConn) Hello(timeout time.Duration) (string, error) {
 	default:
 		return "", errors.New(CodePeerUnverified)
 	}
+}
+
+func (x *xpcAgentConn) Request(fields []xpcField, timeout time.Duration) ([]xpcField, error) {
+	types, keys, vals, free := cFields(fields)
+	defer free()
+	var reply C.xpc_object_t
+	switch C.ae_request(x.c, &types[0], &keys[0], &vals[0], C.int(len(fields)), C.int64_t(timeout.Milliseconds()), &reply) {
+	case C.AE_MESSAGE:
+	case C.AE_TIMEOUT:
+		return nil, errors.New(CodeUnavailable)
+	case C.AE_INVALID:
+		return nil, errors.New(CodeProtocol)
+	default:
+		return nil, errors.New(CodePeerUnverified)
+	}
+	defer C.ae_release(reply)
+	var n C.size_t
+	var overflow C.int
+	buf := C.ae_flatten(reply, &n, &overflow)
+	if buf == nil || overflow != 0 {
+		if buf != nil {
+			C.free(unsafe.Pointer(buf))
+		}
+		return nil, errors.New(CodeProtocol)
+	}
+	defer C.free(unsafe.Pointer(buf))
+	return parseFlat(C.GoBytes(unsafe.Pointer(buf), C.int(n))), nil
 }
 
 func (x *xpcAgentConn) Next(timeout time.Duration) agentEvent {

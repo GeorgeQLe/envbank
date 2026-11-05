@@ -253,15 +253,44 @@ func TestPromptShowsEveryArgumentInFullAndMarksPadding(t *testing.T) {
 	}
 }
 
-func TestRunReasonIsBoundedAndNamesTheAction(t *testing.T) {
-	cmd := Command{Executable: "/usr/bin/vercel", ExecutableSHA256: strings.Repeat("ab", 32), Args: []string{"deploy", strings.Repeat("x", 2000)}, Dir: "/work", Secrets: []string{"VERCEL_TOKEN"}}
-	r := runReason(cmd, "session \u201cdemo\u201d (claude, workspace ws1)", false)
-	for _, want := range []string{"/usr/bin/vercel deploy", "VERCEL_TOKEN", "/work", "demo", "once", "full command in the broker terminal", "abababababab"} {
+func TestRunReasonShowsTheWholeCommandOrRefuses(t *testing.T) {
+	caller := Caller{Who: "claude agent session 0a1b2c3d in workspace ws1", Label: "Fix “billing” now"}
+	cmd := Command{Executable: "/usr/local/bin/deploy-tool", Interpreter: "/usr/bin/python3", ExecutableSHA256: strings.Repeat("ab", 32),
+		Args: []string{"deploy", "--env", "prod", "a\u202eb", "x“y"}, Dir: "/work", Secrets: []string{"VERCEL_TOKEN"}}
+	r, ok := runReason(cmd, caller, false)
+	if !ok {
+		t.Fatal("short command refused")
+	}
+	for _, want := range []string{"run /usr/local/bin/deploy-tool (script run by interpreter /usr/bin/python3) with 5 argument(s): deploy --env prod",
+		`"a\\x{202e}b"`, `x\x{201c}y`, "in /work", "VERCEL_TOKEN", "once", "abababababab", "for claude agent session 0a1b2c3d in workspace ws1; session label: Fix billing now"} {
 		if !strings.Contains(r, want) {
 			t.Fatalf("reason missing %q: %s", want, r)
 		}
 	}
-	if len(r) > approval.MaxReasonBytes+8 {
-		t.Fatalf("reason too long: %d", len(r))
+	if r != approval.Clean(r, approval.MaxReasonBytes) || len(r) > approval.MaxReasonBytes {
+		t.Fatalf("reason altered by cleaning or too long: %s", r)
+	}
+	// Padding cannot push the dangerous tail out of the prompt: the run is
+	// refused instead of clipped.
+	for _, args := range [][]string{
+		{"deploy", strings.Repeat("x", 2000), "--delete-everything"},
+		append(strings.Fields(strings.Repeat("pad ", 150)), "--delete-everything"),
+	} {
+		cmd.Args = args
+		if r, ok := runReason(cmd, caller, false); ok || r != "" {
+			t.Fatalf("padded command accepted (%d bytes): %s", len(r), r)
+		}
+	}
+	// Whitespace padding is shown as a visible count, with the tail in full.
+	cmd.Args = []string{"deploy", strings.Repeat(" ", 590) + "; rm -rf ~", "a  b"}
+	if r, ok := runReason(cmd, caller, false); !ok || !strings.Contains(r, "×590; rm -rf ~") || !strings.Contains(r, `"a \x{20}b"`) {
+		t.Fatalf("padding hidden: %v %s", ok, r)
+	}
+	// Only the label is clipped.
+	cmd.Args = []string{strings.Repeat("y", 300)}
+	caller.Label = strings.Repeat("L", 80)
+	r, ok = runReason(cmd, caller, false)
+	if !ok || !strings.Contains(r, strings.Repeat("y", 300)) || !strings.HasSuffix(r, "…") {
+		t.Fatalf("label not the part clipped: %v %s", ok, r)
 	}
 }

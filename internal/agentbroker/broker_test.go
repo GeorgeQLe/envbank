@@ -11,8 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -538,4 +540,88 @@ type cancellingPrompter struct {
 func (p *cancellingPrompter) ReadSecret(context.Context, Ingest) ([]byte, bool, error) {
 	p.cancel() // the agent hangs up while the owner is typing
 	return append([]byte(nil), p.value...), true, nil
+}
+
+// A command whose full text does not fit the Touch ID prompt is refused with
+// a fixed code and the owner is never prompted.
+func TestRunTooLongToApproveIsRefusedWithoutPrompting(t *testing.T) {
+	dir := t.TempDir()
+	p := &fakePrompter{decision: approval.Approved}
+	b := newBroker(t, &fakeVault{values: map[string]string{"TOKEN": randomValue(t)}}, p)
+	resp := b.Handle(context.Background(), Request{V: 1, Op: OpRun, Secrets: []string{"TOKEN"}, Argv: []string{"/bin/echo", strings.Repeat("pad", 200), "--then-something-else"}, Dir: dir})
+	if resp.OK || resp.Code != CodeCommandTooLong {
+		t.Fatalf("resp %+v", resp)
+	}
+	if p.prompts() != 0 || len(p.reasons) != 0 {
+		t.Fatal("owner prompted for a command that cannot be shown in full")
+	}
+	resp = b.Handle(context.Background(), Request{V: 1, Op: OpRun, Secrets: []string{"TOKEN"}, Argv: []string{"/bin/echo", "short", "--tail"}, Dir: dir})
+	if !resp.OK || len(p.reasons) != 1 || !strings.Contains(p.reasons[0], "/bin/echo with 2 argument(s): short --tail") {
+		t.Fatalf("resp %+v reasons %q", resp, p.reasons)
+	}
+}
+
+// Ending a grant's scope kills its running command's whole process group at
+// once, and the run returns no output.
+func TestEndScopeKillsRunningCommands(t *testing.T) {
+	dir, tool := script(t, "sleep 60 &\necho $! > \"$0.child\"\necho $$ > \"$0.pid\"\necho started\nwait\n")
+	b := newBroker(t, &fakeVault{values: map[string]string{"TOKEN": randomValue(t)}}, &fakePrompter{decision: approval.Approved})
+	caller := Caller{Who: "test", Scope: "grant:abc"}
+	done := make(chan Response, 1)
+	start := time.Now()
+	go func() {
+		done <- b.HandleFor(context.Background(), caller, Request{V: 1, Op: OpRun, Secrets: []string{"TOKEN"}, Argv: []string{tool}, Dir: dir, TimeoutSeconds: 60})
+	}()
+	pids := waitPids(t, tool+".pid", tool+".child")
+	b.EndScope("grant:other") // another grant's end leaves it running
+	time.Sleep(100 * time.Millisecond)
+	if !alive(pids[0]) {
+		t.Fatal("run killed by another scope")
+	}
+	b.EndScope("grant:abc")
+	var resp Response
+	select {
+	case resp = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run survived the end of its grant")
+	}
+	if resp.OK || resp.Code != CodeNotAuthorized || resp.Stdout != "" || time.Since(start) > 10*time.Second {
+		t.Fatalf("resp %+v", resp)
+	}
+	assertDead(t, pids...)
+}
+
+func waitPids(t *testing.T, files ...string) []int {
+	t.Helper()
+	var pids []int
+	deadline := time.Now().Add(10 * time.Second)
+	for _, f := range files {
+		for {
+			raw, err := os.ReadFile(f)
+			if n, perr := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && perr == nil && n > 0 {
+				pids = append(pids, n)
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("no pid in %s", f)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	return pids
+}
+
+func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }
+
+func assertDead(t *testing.T, pids ...int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for _, pid := range pids {
+		for alive(pid) {
+			if time.Now().After(deadline) {
+				t.Fatalf("process %d outlived its grant", pid)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
 }

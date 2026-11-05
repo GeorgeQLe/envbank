@@ -106,7 +106,7 @@ type-checked. Unknown keys mean the message is dropped and the reply is
 | Key | Type | Notes |
 | --- | --- | --- |
 | `v` | string | `envbank.owner-input-xpc/v1` |
-| `kind` | string | `pairing` or `entry` |
+| `kind` | string | `pairing` or `entry` (agent-channel kinds are in authorized-agents.md) |
 | `nonce` | string | 32 lowercase hex |
 | `expires_at` | string | RFC 3339, at most 120 s ahead |
 | `pairing_code` | string | pairing only, 6 digits |
@@ -121,10 +121,30 @@ only when the outcome is `entered`, `value` (data). Possible outcomes:
 | Kind | Outcomes |
 | --- | --- |
 | entry | `entered`, `declined`, `cancelled`, `expired`, `busy`, `unavailable` |
-| pairing | `displayed`, `declined`, `cancelled`, `expired`, `busy`, `unavailable` |
+| pairing | `confirmed`, `declined`, `cancelled`, `expired`, `busy`, `unavailable` |
 
 Pairing replies also carry `provider` (a dictionary of the UI's
-self-report) and `service_cdhash` (string).
+self-report) and `service_cdhash` (string), and nothing else (no `value`).
+
+**Pairing is confirmed on the host (Unreleased; replaces `displayed`).** The
+service and UI show the pairing code and reply `confirmed` only after the
+owner confirmed that code **in Chromux with Touch ID**. Showing the code is
+no longer enough: the broker treats `displayed`, or any other outcome, as not
+paired. The broker then asks for the owner's Touch ID in its own terminal as
+well; both are required.
+
+**Pairing is per connection.** The broker sends `pairing` on the same
+long-lived connection it later registers on with `broker_hello`
+(authorized-agents.md), and sends `broker_hello` only after a `confirmed`
+pairing on that connection. The service must:
+
+- accept `broker_hello` (and route agent requests) only on a broker
+  connection that completed a host-confirmed pairing, and forget that
+  pairing when the connection closes or the service restarts (the broker
+  then pairs again before saying hello again);
+- warn the owner in Chromux whenever the registered broker connection
+  changes (a new broker, or the same broker after a reconnect), before
+  routing anything to it.
 
 ### Service ↔ UI messages (implemented in the provider)
 
@@ -145,10 +165,16 @@ self-report) and `service_cdhash` (string).
 
 ## Broker behavior
 
-- **Pairing.** Pair once per session, using the 6-digit code shown in
-  Chromux. The code is shown in the broker terminal and confirmed with
-  Touch ID; the reason names the code (Unreleased; previously a typed yes). The broker prints the
-  service's team, identifier and cdhash prefix.
+- **Pairing.** Pair at start, on the agent-channel connection, using the
+  6-digit code shown in Chromux. The service replies `confirmed` only after
+  the owner's Touch ID in Chromux; the broker then shows the code, the
+  service's team, identifier and cdhash in its terminal and asks for Touch ID
+  again (the reason names the code). Any other outcome, a wrong nonce, an
+  unknown key or a `value` pins nothing and closes the connection. A new
+  connection, or a service restart, pairs again (both Touch IDs) before
+  `broker_hello`; a re-pairing must report the same pinned build. After 3
+  declined pairings in a row the agent channel stops until the broker is
+  restarted; transport failures only back off (1 s to 30 s).
 - **Pinning.** For the rest of the session the broker pins the service build
   it paired with by appending `and cdhash H"<service cdhash>"` to its peer
   requirement. macOS then enforces the same build on every later message;

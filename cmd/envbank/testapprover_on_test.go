@@ -7,6 +7,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GeorgeQLe/envbank/internal/approval"
@@ -32,5 +33,36 @@ func TestFileApproverAnswersFromItsFile(t *testing.T) {
 	_ = os.Remove(path)
 	if a.Approve(context.Background(), "test") != approval.Denied {
 		t.Fatal("missing file must deny")
+	}
+}
+
+// The test-approver build refuses Chromux (any XPC agent channel) and any
+// config outside TMPDIR before touching a terminal, a config or a service.
+func TestTestApproverBuildRefusesChromuxAndRealConfigs(t *testing.T) {
+	answer := filepath.Join(t.TempDir(), "approve")
+	disposable := filepath.Join(t.TempDir(), "device.json")
+	for name, args := range map[string][]string{
+		"chromux":           {"--owner-input", "chromux", "--owner-input-unqualified", "--config", disposable},
+		"chromux+approver":  {"--test-approver-file", answer, "--owner-input", "chromux", "--owner-input-unqualified", "--legacy-socket", "--config", disposable},
+		"other channel":     {"--owner-input", "xpc", "--config", disposable},
+		"default config":    {"--test-approver-file", answer, "--legacy-socket"},
+		"home config":       {"--legacy-socket", "--config", filepath.Join(os.Getenv("HOME"), ".envbank-test-device.json")},
+		"escape via dotdot": {"--legacy-socket", "--config", filepath.Join(os.TempDir(), "..", "device.json")},
+		"tmpdir itself":     {"--legacy-socket", "--config", os.TempDir()},
+	} {
+		err := agentBrokerCommand(args)
+		if err == nil || !strings.HasPrefix(err.Error(), testBuildRefused+": ") {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// A disposable config under TMPDIR passes the guard (and then needs a terminal).
+	err := agentBrokerCommand([]string{"--test-approver-file", answer, "--legacy-socket", "--config", disposable})
+	if err == nil || strings.Contains(err.Error(), testBuildRefused) || !strings.Contains(err.Error(), "interactive terminal") {
+		t.Fatalf("disposable config: %v", err)
+	}
+	// A TMPDIR that is the home directory proves nothing.
+	t.Setenv("TMPDIR", os.Getenv("HOME"))
+	if err := testBuildGuard("terminal", filepath.Join(os.Getenv("HOME"), "x", "device.json")); err == nil {
+		t.Fatal("TMPDIR=$HOME accepted")
 	}
 }

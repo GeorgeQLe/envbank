@@ -217,17 +217,60 @@ type fakeConn struct {
 	outcome string
 	closed  bool
 	done    chan int
+	// Pairing on this connection: the service's outcome and build, and the
+	// order of pairing and hello calls ("pair", "hello").
+	pairOutcome   string
+	cdhash        string
+	extra         []xpcField
+	pairings      []map[string]string
+	order         []string
+	paired        bool // a confirmed pairing happened on this connection
+	helloUnpaired bool
 }
 
 func newFakeConn() *fakeConn {
-	return &fakeConn{events: make(chan agentEvent, 64), replies: map[int][]xpcField{}, outcome: OutcomeRegistered, done: make(chan int, 64)}
+	return &fakeConn{events: make(chan agentEvent, 64), replies: map[int][]xpcField{}, outcome: OutcomeRegistered, done: make(chan int, 64),
+		pairOutcome: OutcomeConfirmed, cdhash: strings.Repeat("ab", 20)}
+}
+
+func (f *fakeConn) Request(fields []xpcField, _ time.Duration) ([]xpcField, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m := map[string]string{}
+	for _, x := range fields {
+		m[x.Key] = x.Value
+	}
+	f.pairings = append(f.pairings, m)
+	f.order = append(f.order, "pair")
+	f.paired = f.pairOutcome == OutcomeConfirmed
+	r := []xpcField{{'S', "v", XPCVersion}, {'S', "nonce", m["nonce"]}, {'S', "outcome", f.pairOutcome}, {'S', "service_cdhash", f.cdhash},
+		{'D', "provider", `{"name":"Chromux"}`}}
+	return append(r, f.extra...), nil
 }
 
 func (f *fakeConn) Hello(time.Duration) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hellos++
+	f.order = append(f.order, "hello")
+	if !f.paired {
+		f.helloUnpaired = true
+	}
 	return f.outcome, nil
+}
+
+// interrupt simulates a service restart: the service forgets the pairing.
+func (f *fakeConn) interrupt() {
+	f.mu.Lock()
+	f.paired = false
+	f.mu.Unlock()
+	f.events <- agentEvent{Kind: evInterrupted}
+}
+
+func (f *fakeConn) sequence() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.order...)
 }
 func (f *fakeConn) Next(timeout time.Duration) agentEvent {
 	select {
@@ -314,7 +357,7 @@ func startChannel(t *testing.T, h AgentHandler, max int, conns ...*fakeConn) *di
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	ch := &AgentChannel{Provider: pinnedProvider(), Handler: h, MaxInFlight: max}
+	ch := &AgentChannel{Provider: pinnedProvider(), Handler: h, MaxInFlight: max, Confirm: func(Identity, string) bool { return true }}
 	go func() { _ = ch.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done; agentDial = old })
 	return log
@@ -398,14 +441,11 @@ func TestAgentChannelBoundsConcurrencyAndReregisters(t *testing.T) {
 	if peak.Load() > 2 {
 		t.Fatalf("peak in flight %d", peak.Load())
 	}
-	// Service restart: register again on the same connection.
-	conn.events <- agentEvent{Kind: evInterrupted}
+	// Service restart: pair again, then register again, on the same connection.
+	conn.interrupt()
 	time.Sleep(100 * time.Millisecond)
-	conn.mu.Lock()
-	hellos := conn.hellos
-	conn.mu.Unlock()
-	if hellos != 2 {
-		t.Fatalf("hellos %d", hellos)
+	if seq := strings.Join(conn.sequence(), ","); seq != "pair,hello,pair,hello" {
+		t.Fatalf("sequence %s", seq)
 	}
 	// Connection invalid: dial again with the pinned requirement.
 	conn.events <- agentEvent{Kind: evInvalid}
@@ -425,7 +465,7 @@ func TestAgentChannelBoundsConcurrencyAndReregisters(t *testing.T) {
 }
 
 func TestAgentChannelRequiresPairingAndRegistration(t *testing.T) {
-	ch := &AgentChannel{Provider: &XPCProvider{Service: "x", TeamID: "NC56VXK48K", Identifier: ServiceIdentifier}, Handler: handlerFunc(nil)}
+	ch := &AgentChannel{Provider: &XPCProvider{Service: "x", TeamID: "NC56VXK48K", Identifier: ServiceIdentifier}, Handler: handlerFunc(nil), Confirm: func(Identity, string) bool { return true }}
 	if err := ch.Run(context.Background()); err == nil {
 		t.Fatal("unpinned provider served agent requests")
 	}

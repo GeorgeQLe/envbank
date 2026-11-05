@@ -39,7 +39,11 @@ func (ExecRunner) Run(ctx context.Context, cmd Command, env []string) RunResult 
 	case err = <-done:
 	case <-ctx.Done():
 		timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
-		_ = syscall.Kill(-c.Process.Pid, syscall.SIGTERM)
+		sig := syscall.SIGTERM
+		if errors.Is(context.Cause(ctx), ErrScopeEnded) {
+			sig = syscall.SIGKILL // the grant ended: no grace period with the values
+		}
+		_ = syscall.Kill(-c.Process.Pid, sig)
 		select {
 		case err = <-done:
 		case <-time.After(3 * time.Second):

@@ -39,9 +39,13 @@ anything: the broker runs the biometric check itself.
 
 - **Broker registration.** At startup the broker connects to
   `dev.georgele.chromux.owner-input` (the peer requirement from
-  owner-input-xpc.md, cdhash-pinned after pairing) and sends
-  `{v, kind:"broker_hello"}`. The service keeps the newest broker
-  connection as the agent-request target.
+  owner-input-xpc.md, cdhash-pinned after pairing), pairs **on that
+  connection** (the service replies `confirmed` only after the owner's
+  Touch ID in Chromux; then the owner's Touch ID in the broker terminal), and
+  only then sends `{v, kind:"broker_hello"}` on it. Only the broker
+  connection that completed a host-confirmed pairing may register; the
+  service keeps it as the agent-request target and warns the owner in
+  Chromux whenever the registered broker connection changes.
 - **Forwarding.** Chromux sends `{v, kind:"agent_request", session, request}`
   on its `.ui` connection. The service forwards it, with a `route_id`, to the
   registered broker as a message expecting a reply. The broker's reply goes
@@ -62,6 +66,12 @@ anything: the broker runs the biometric check itself.
 | `workspace` | host workspace id |
 | `agent_kind` | e.g. `claude`, `codex` |
 | `label` | owner-visible session name, plain text, ≤80 characters |
+
+The broker identifies a session to the owner by its **fingerprint**: the
+first 8 lowercase hex characters of SHA-256 of the UTF-8 `session_id`. The
+host must show the same fingerprint next to the session (in its session list
+and "Granted agents" settings), so the owner can match a Touch ID prompt to
+the session that asked.
 
 `request` reuses the agent broker operations (`names`, `request`, `run`,
 `setup`, `relay_request`) with the same fields and the same value-free
@@ -87,9 +97,21 @@ The reply is the agent broker response (value-free, fixed codes) plus `route_id`
 - **Touch ID for every grant.** The broker calls LocalAuthentication
   (`LAPolicyDeviceOwnerAuthenticationWithBiometrics`). Biometrics only: no
   device-passcode fallback unless the owner starts the broker with
-  `--allow-password-fallback`. The reason string names the session label,
-  agent kind, workspace, secrets, scope and duration. A grant is created only
-  if this succeeds.
+  `--allow-password-fallback`. The reason string puts the authoritative
+  terms first and in full (action and scope, secrets, duration and expiry
+  time, agent kind, session fingerprint, workspace) and the agent-influenced
+  label last, after `; session label:`, with quote characters removed and
+  control, bidi and zero-width characters replaced. Only the label is ever
+  clipped; a request whose authoritative terms do not fit is refused. A
+  grant is created only if this succeeds.
+- **Grant-prompt limits.** Globally, at most one grant prompt is open at a
+  time and grant prompts start at least 10 s apart. Each declined (or
+  unapprovable) grant prompt, from any session, doubles a global backoff
+  (30 s, 1 min, 2 min, … up to 15 min) that only an approval resets; new or
+  churning sessions do not reset it. A declined session also waits 30 s. The
+  per-session cooldown table is capped at 1024 entries by dropping expired,
+  then oldest, entries; it is never cleared wholesale. Requests inside any
+  limit get `BROKER_BUSY` without a prompt.
 - **Touch ID for every approval.** Approvals that used to be a typed `y`
   (`run` once or always, ingest replace, setup plan, pairing confirmation) use
   the same Touch ID check, with the exact action in the reason string. The
@@ -125,8 +147,11 @@ What `envbank agent-broker` does today (`internal/authz`,
   one connection open and sends `{v, kind:"broker_hello"}` with a reply
   expected. The reply must be `{v, kind:"broker_hello", outcome}`; anything
   but `outcome:"registered"` (for example `declined`) closes the connection
-  and retries. If the connection is interrupted, the broker says hello again;
-  if it becomes invalid, it reconnects with backoff (1 s up to 30 s). The
+  and retries. `broker_hello` is sent only after a `confirmed` pairing on the
+  same connection. If the connection is interrupted (the service
+  restarted), the broker pairs again on it, then says hello again; if it
+  becomes invalid, it reconnects (pairing again) with backoff (1 s up to
+  30 s). The
   service makes the newest broker connection the agent-request target. At
   most 8 requests are handled at a time.
 - **`agent_request`, as received by the broker.** Every message carries
@@ -211,19 +236,38 @@ What `envbank agent-broker` does today (`internal/authz`,
   - `--allow-password-fallback` switches to
     `LAPolicyDeviceOwnerAuthentication`.
   - Reason strings are cleaned (control and bidi characters become `?`) and
-    bounded to 600 bytes.
-  - A grant request whose reason would not fit is refused. A run approval
-    names the command, secrets, directory, session and mode. A command too
-    long to fit is clipped, and the reason then points to the broker
-    terminal, which shows everything.
+    bounded to 600 bytes; authoritative terms come first, the session label
+    last (see Policy).
+  - A grant request whose authoritative terms would not fit is refused
+    (`INVALID_REQUEST`). A run approval names the resolved executable, its
+    script interpreter (shebang), every argument in full (invisible and
+    quote-like characters escaped, space runs counted), the directory, the
+    secrets, the mode, the executable hash prefix and the session. A run
+    whose full text does not fit is refused with
+    `COMMAND_TOO_LONG_TO_APPROVE` before any prompt; it is never clipped.
+  - The `LAContext` is invalidated (the prompt dismissed) as soon as the
+    request's context is cancelled or expires.
+  - The biometric enrollment state (`domainState.biometry.stateHash`, or
+    `evaluatedPolicyDomainState` before macOS 15) is recorded when the
+    broker starts. If it changes (a fingerprint added or removed), every
+    later approval is refused with `APPROVAL_ENROLLMENT_CHANGED`, before
+    prompting, until the broker is restarted.
 - **"Always".** A `run` sets `always: true` to ask for it, and the Touch ID
   text says so. It is offered only for fixed programs. It is stored under the
   grant and ends when that grant expires, is revoked or the broker locks.
   Grants are re-checked after every approval and right before the broker
   acts, so a revocation stops a request that is already in flight.
+- **Revocation kills running commands.** When a grant is revoked, expires or
+  ends with the broker, any command still running under it is killed (its
+  whole process group, with `SIGKILL`) and the run answers `NOT_AUTHORIZED`
+  with no output. A run's timeout is also capped at the time left in its
+  grant.
 - **Test seam.** A binary built with `-tags envbank_testapprover` adds
   `--test-approver-file PATH`, which answers approvals from a file, for
-  disposable end-to-end runs only. The default build has no such flag.
+  disposable end-to-end runs only. Such a build refuses
+  `--owner-input chromux` (so any XPC agent channel) and any `--config`
+  outside a dedicated `TMPDIR` with `TEST_APPROVER_BUILD_REFUSED`. The
+  default build has no such flag; a source/build test checks both.
 
 ## Not covered
 

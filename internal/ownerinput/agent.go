@@ -63,6 +63,9 @@ const (
 // agentConn is the long-lived XPC connection to the owner-input service. The
 // darwin implementation is thin C glue; tests use a fake.
 type agentConn interface {
+	// Request sends one message built from instructions and returns the
+	// flattened reply (pairing).
+	Request(fields []xpcField, timeout time.Duration) ([]xpcField, error)
 	// Hello sends broker_hello and returns the reply's outcome.
 	Hello(timeout time.Duration) (string, error)
 	// Next waits for the next event (evTimeout when none arrived in time).
@@ -85,12 +88,74 @@ type AgentHandler interface {
 
 // AgentChannel keeps the broker registered with the owner-input service as
 // the target for agent requests from host sessions.
+//
+// Registration needs a host-confirmed pairing ON THE SAME CONNECTION:
+// broker_hello is sent only on a connection that completed pairing (the
+// service's "confirmed", then the owner's Touch ID in the broker terminal).
+// A new connection, or a service restart on the same one, pairs again first.
 type AgentChannel struct {
-	Provider    *XPCProvider
-	Handler     AgentHandler
+	Provider *XPCProvider
+	Handler  AgentHandler
+	// Confirm asks the owner to confirm the pairing code in the broker
+	// terminal with Touch ID, after the service reported "confirmed".
+	Confirm     func(id Identity, code string) bool
 	MaxInFlight int          // default 8
 	Notify      func(string) // owner terminal status lines (no values)
 	Activity    func()       // called on every request (idle lock)
+
+	mu   sync.Mutex
+	conn agentConn // paired by Open, not yet registered
+}
+
+// maxPairRefusals is how many pairings in a row may be declined (in Chromux
+// or the broker terminal) before the channel stops; transport failures only
+// back off.
+const maxPairRefusals = 3
+
+// Open connects and pairs on the connection Run will register on, pinning the
+// service build. It does not register: no agent request reaches the broker
+// before Run.
+func (a *AgentChannel) Open(ctx context.Context) error {
+	if a.Provider == nil || a.Confirm == nil {
+		return errors.New(CodeNotPaired)
+	}
+	conn, err := a.connect(ctx)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	if a.conn != nil {
+		a.conn.Close()
+	}
+	a.conn = conn
+	a.mu.Unlock()
+	return nil
+}
+
+// connect dials and pairs; the connection is returned only if paired.
+func (a *AgentChannel) connect(ctx context.Context) (agentConn, error) {
+	req, err := a.Provider.Requirement()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := agentDial(a.Provider.Service, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Provider.pairOn(ctx, conn, a.Confirm); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// register says hello on a paired connection.
+func register(conn agentConn) error {
+	outcome, err := conn.Hello(10 * time.Second)
+	if err == nil && outcome != OutcomeRegistered {
+		err = errors.New(CodeProtocol)
+	}
+	return err
 }
 
 func (a *AgentChannel) notify(s string) {
@@ -99,10 +164,10 @@ func (a *AgentChannel) notify(s string) {
 	}
 }
 
-// Run serves agent requests until ctx ends, reconnecting with backoff. It
-// requires a paired (cdhash-pinned) provider.
+// Run serves agent requests until ctx ends, reconnecting (and pairing
+// again) with backoff. It requires a pinned provider (Open).
 func (a *AgentChannel) Run(ctx context.Context) error {
-	if a.Provider == nil || a.Handler == nil || !a.Provider.Pinned() {
+	if a.Provider == nil || a.Handler == nil || a.Confirm == nil || !a.Provider.Pinned() {
 		return errors.New(CodeNotPaired)
 	}
 	limit := a.MaxInFlight
@@ -111,50 +176,66 @@ func (a *AgentChannel) Run(ctx context.Context) error {
 	}
 	sem := make(chan struct{}, limit)
 	backoff := time.Second
-	registered := false
+	refusals := 0
+	a.mu.Lock()
+	conn := a.conn
+	a.conn = nil
+	a.mu.Unlock()
+	defer func() {
+		if conn != nil {
+			conn.Close()
+		}
+	}()
 	for ctx.Err() == nil {
-		req, err := a.Provider.Requirement()
-		if err != nil {
-			return err
+		var err error
+		if conn == nil {
+			conn, err = a.connect(ctx)
 		}
-		conn, err := agentDial(a.Provider.Service, req)
 		if err == nil {
-			var outcome string
-			outcome, err = conn.Hello(10 * time.Second)
-			if err == nil && outcome != OutcomeRegistered {
-				err = errors.New(CodeProtocol)
-			}
-			if err != nil {
-				conn.Close()
-			}
+			err = register(conn)
 		}
-		if err != nil {
-			if registered {
-				a.notify("Chromux agent channel lost (" + err.Error() + "); retrying")
-				registered = false
-			}
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(backoff):
-			}
-			backoff = min(2*backoff, 30*time.Second)
-			continue
-		}
-		backoff = time.Second
-		if !registered {
+		if err == nil {
+			refusals, backoff = 0, time.Second
 			a.notify("authorized-agent channel registered with the Chromux owner-input service")
-			registered = true
+			if a.serve(ctx, conn, sem) && ctx.Err() == nil {
+				// The service restarted and lost the pairing: pair again on
+				// this connection before saying hello on it.
+				a.notify("Chromux owner-input service restarted; pair again to continue")
+				if err = a.Provider.pairOn(ctx, conn, a.Confirm); err == nil {
+					continue
+				}
+			} else {
+				err = errors.New(CodeUnavailable)
+			}
 		}
-		a.serve(ctx, conn, sem)
-		conn.Close()
+		if conn != nil {
+			conn.Close()
+			conn = nil
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil && err.Error() == CodeNotPaired {
+			if refusals++; refusals >= maxPairRefusals {
+				a.notify("Chromux pairing was not confirmed " + strconv.Itoa(refusals) + " times; agent channel stopped (restart the broker to pair again)")
+				return errors.New(CodeNotPaired)
+			}
+		}
+		a.notify("Chromux agent channel not registered (" + err.Error() + "); retrying")
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		backoff = min(2*backoff, 30*time.Second)
 	}
 	return nil
 }
 
 // serve handles events until the connection fails or ctx ends; it waits for
-// in-flight requests (whose contexts it cancels) before returning.
-func (a *AgentChannel) serve(ctx context.Context, conn agentConn, sem chan struct{}) {
+// in-flight requests (whose contexts it cancels) before returning. It reports
+// whether the connection was interrupted (the service restarted).
+func (a *AgentChannel) serve(ctx context.Context, conn agentConn, sem chan struct{}) (interrupted bool) {
 	cctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -167,14 +248,12 @@ func (a *AgentChannel) serve(ctx context.Context, conn agentConn, sem chan struc
 		case evMessage:
 			a.dispatch(cctx, conn, ev, sem, &wg)
 		case evInterrupted:
-			// The service restarted: register again on the same connection.
-			if outcome, err := conn.Hello(10 * time.Second); err != nil || outcome != OutcomeRegistered {
-				return
-			}
+			return true
 		default: // evInvalid, evPeer
-			return
+			return false
 		}
 	}
+	return false
 }
 
 func (a *AgentChannel) dispatch(ctx context.Context, conn agentConn, ev agentEvent, sem chan struct{}, wg *sync.WaitGroup) {

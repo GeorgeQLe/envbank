@@ -107,15 +107,30 @@ type pairer interface {
 // pairProvider pairs a desktop provider for this broker session. The details
 // are shown in the terminal; the owner confirms the code with Touch ID.
 func pairProvider(ctx context.Context, p pairer, t *agentbroker.TerminalPrompter, a approval.Approver) error {
-	return p.Pair(ctx, func(id ownerinput.Identity, code string) bool {
+	return p.Pair(ctx, pairConfirm(ctx, t, a))
+}
+
+// pairConfirm is the broker-terminal half of pairing: Chromux has already
+// confirmed the code with the owner's Touch ID; the broker shows the code and
+// the service identity here and asks for Touch ID again. Each confirmation
+// gets its own approval deadline (re-pairing after a service restart happens
+// long after start-up), bounded by ctx only while ctx is live.
+func pairConfirm(ctx context.Context, t *agentbroker.TerminalPrompter, a approval.Approver) func(id ownerinput.Identity, code string) bool {
+	return func(id ownerinput.Identity, code string) bool {
 		t.ShowPlan("Pair Chromux secure input", []string{
 			fmt.Sprintf("service signed by team %s (Developer ID), identifier %s; verified by macOS on every message", id.TeamID, id.Identifier),
 			"service build cdhash " + id.CDHash + " (pinned for this session)",
-			"Chromux should now show pairing code " + code + ".",
-			"Touch ID only if the Chromux window shows exactly this code.",
+			"Chromux reports that you confirmed pairing code " + code + " there with Touch ID.",
+			"Touch ID here only if the Chromux window showed exactly this code.",
 		})
-		reason := approval.Reason("pair with Chromux secure input showing code %s (team %s, %s, build %.12s)",
+		reason := approval.Reason("pair with Chromux secure input that showed code %s (team %s, %s, build %.12s)",
 			code, approval.Clean(id.TeamID, 16), approval.Clean(id.Identifier, 64), approval.Clean(id.CDHash, 64))
-		return confirmWith(ctx, a, t, reason) == approval.Approved
-	})
+		actx := ctx
+		if ctx.Err() != nil {
+			actx = context.Background()
+		}
+		actx, cancel := context.WithTimeout(actx, approval.DefaultTimeout)
+		defer cancel()
+		return confirmWith(actx, a, t, reason) == approval.Approved
+	}
 }

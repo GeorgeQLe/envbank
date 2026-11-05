@@ -12,6 +12,7 @@ package authz
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -100,9 +101,28 @@ type tuple struct{ id, workspace, kind string }
 
 func (s Session) key() tuple { return tuple{s.ID, s.Workspace, s.AgentKind} }
 
-// Who describes the session for owner prompts (bounded, cleaned).
+// Fingerprint is the session's short fingerprint: the first 8 lowercase hex
+// characters of SHA-256(session_id). The host shows the same value next to
+// the session, so the owner can match a Touch ID prompt to the session.
+func (s Session) Fingerprint() string {
+	sum := sha256.Sum256([]byte(s.ID))
+	return hex.EncodeToString(sum[:4])
+}
+
+// Ident is the authoritative description of the session, built only from
+// strictly validated fields: agent kind, fingerprint and workspace.
+func (s Session) Ident() string {
+	return fmt.Sprintf("%s agent session %s in workspace %s", approval.Clean(s.AgentKind, 32), s.Fingerprint(), approval.Clean(s.Workspace, 128))
+}
+
+// DisplayLabel is the agent-influenced label, cleaned and without quote
+// characters. It is always shown last.
+func (s Session) DisplayLabel() string { return approval.Plain(s.Label, 80) }
+
+// Who describes the session for the broker terminal: authoritative terms
+// first, the label last.
 func (s Session) Who() string {
-	return fmt.Sprintf("agent session %s (%s, workspace %s)", approval.Quote(s.Label, 80), approval.Clean(s.AgentKind, 32), approval.Clean(s.Workspace, 64))
+	return s.Ident() + ", session label: " + s.DisplayLabel()
 }
 
 // Grant is one owner-approved grant.

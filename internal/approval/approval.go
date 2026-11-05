@@ -29,6 +29,10 @@ const (
 	// Unavailable means no biometry is enrolled or usable: every approval is
 	// refused (APPROVAL_UNAVAILABLE); there is no silent fallback.
 	Unavailable
+	// EnrollmentChanged means the enrolled biometrics (fingerprints) changed
+	// since the broker started: every approval is refused
+	// (APPROVAL_ENROLLMENT_CHANGED) until the owner restarts the broker.
+	EnrollmentChanged
 )
 
 func (o Outcome) String() string {
@@ -37,6 +41,8 @@ func (o Outcome) String() string {
 		return "approved"
 	case Unavailable:
 		return "unavailable"
+	case EnrollmentChanged:
+		return "enrollment_changed"
 	default:
 		return "denied"
 	}
@@ -117,3 +123,70 @@ func Reason(format string, args ...any) string {
 
 // Quote cleans and quotes a short untrusted field for a reason string.
 func Quote(s string, maxRunes int) string { return "“" + Clean(s, maxRunes) + "”" }
+
+// isQuoteLike reports quotation marks and initial/final punctuation of any
+// script (“ ” „ ‘ ’ ‚ « » ‹ › " ' ` and similar): agent-influenced text must
+// not be able to close a quotation the owner reads and continue with text that
+// looks authoritative.
+func isQuoteLike(r rune) bool {
+	return r == '`' || r == '"' || r == '\'' || unicode.Is(unicode.Quotation_Mark, r) || unicode.Is(unicode.Pi, r) || unicode.Is(unicode.Pf, r)
+}
+
+// Plain renders agent-influenced text (a session label) for a reason: Clean,
+// with every quote-like character removed. It is never quoted: it appears
+// last, after a fixed "session label:" marker.
+func Plain(s string, maxRunes int) string {
+	var b strings.Builder
+	for _, r := range s {
+		if !isQuoteLike(r) {
+			b.WriteRune(r)
+		}
+	}
+	return Clean(b.String(), maxRunes)
+}
+
+// EscapeQuotes makes quote-like characters in already-cleaned text visible
+// as \x{hex} escapes (for arguments the owner must read in full).
+func EscapeQuotes(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if isQuoteLike(r) && r != '"' && r != '\'' {
+			fmt.Fprintf(&b, "\\x{%x}", r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// minLabelBytes is the least room left for a label worth showing.
+const minLabelBytes = 16
+
+// WithLabel builds a reason from the authoritative text (action, scope,
+// secrets, duration, workspace, agent kind, fingerprint: built only from
+// validated or escaped fields) followed, LAST, by the agent-influenced label.
+// The authoritative part is never shortened: if cleaning would change it or
+// it does not fit in MaxReasonBytes, ok is false and the caller must refuse
+// rather than prompt. Only the label is clipped (or omitted) to fit.
+func WithLabel(authoritative, label string) (reason string, ok bool) {
+	if authoritative == "" || len(authoritative) > MaxReasonBytes || Clean(authoritative, MaxReasonBytes) != authoritative {
+		return "", false
+	}
+	label = Plain(label, 80)
+	if label == "" {
+		return authoritative, true
+	}
+	const marker = "; session label: "
+	room := MaxReasonBytes - len(authoritative) - len(marker)
+	if room < minLabelBytes {
+		return authoritative, true
+	}
+	if len(label) > room {
+		cut := room - len("…")
+		for cut > 0 && !utf8.RuneStart(label[cut]) {
+			cut--
+		}
+		label = strings.TrimSpace(label[:cut]) + "…"
+	}
+	return authoritative + marker + label, true
+}

@@ -2,20 +2,28 @@
 
 package approval
 
-import (
-	"context"
-	"time"
-)
+import "unsafe"
 
-// LocalAuth is unavailable off macOS (or without cgo): every approval is
-// refused with APPROVAL_UNAVAILABLE.
-type LocalAuth struct {
-	AllowPasscode bool
-	Timeout       time.Duration
+type laHandle = unsafe.Pointer
+
+type laBackend interface {
+	available(allowPasscode bool) bool
+	open(allowPasscode bool) (laHandle, bool)
+	state(h laHandle) ([]byte, bool)
+	evaluate(h laHandle, reason string, allowPasscode bool, timeoutMS int64) int
+	invalidate(h laHandle)
+	release(h laHandle)
 }
 
-// Available implements Approver.
-func (LocalAuth) Available() bool { return false }
+// noBackend: LocalAuthentication is unavailable off macOS (or without cgo),
+// so every approval is refused with APPROVAL_UNAVAILABLE.
+type noBackend struct{}
 
-// Approve implements Approver.
-func (LocalAuth) Approve(context.Context, string) Outcome { return Unavailable }
+func (noBackend) available(bool) bool                        { return false }
+func (noBackend) open(bool) (laHandle, bool)                 { return nil, false }
+func (noBackend) state(laHandle) ([]byte, bool)              { return nil, false }
+func (noBackend) evaluate(laHandle, string, bool, int64) int { return 2 }
+func (noBackend) invalidate(laHandle)                        {}
+func (noBackend) release(laHandle)                           {}
+
+var la laBackend = noBackend{}

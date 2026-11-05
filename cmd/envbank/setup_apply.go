@@ -96,19 +96,28 @@ func (a *setupApplier) Apply(ctx context.Context, raw json.RawMessage) (agentbro
 	for _, w := range plan.Warnings {
 		lines = append(lines, "WARNING: "+w)
 	}
-	who := "an agent"
+	who, label := "an agent", ""
 	if c, ok := agentbroker.CallerFrom(ctx); ok {
-		who = c.Who
+		who, label = c.Who, c.Label
 	}
 	where := plan.Layout.VaultDir
 	if where == "" {
 		where = plan.Layout.ServerURL
 	}
-	reason := approval.Reason("apply an EnvBank %s setup for %s: vault %s, identity %s, backups %s (%d steps; full plan in the broker terminal)",
+	// The plan's terms come first, the session label last. A plan too long
+	// for the prompt is shown clipped; the terminal shows it in full.
+	terms := fmt.Sprintf("apply an EnvBank %s setup for %s: vault %s, identity %s, backups %s (%d steps; full plan in the broker terminal)",
 		plan.Layout.Sync, who, where, plan.Layout.ConfigPath, plan.Layout.BackupDir, len(plan.Steps))
+	reason, fits := approval.WithLabel(approval.Clean(terms, 1<<12), label)
+	if !fits {
+		reason = approval.Reason("%s", terms)
+	}
 	if out := a.owner.Confirm(ctx, "EnvBank setup request", lines, reason); out != approval.Approved || ctx.Err() != nil {
 		if out == approval.Unavailable {
 			return nil, nil, setupRefusal{agentbroker.CodeApprovalUnavailable}
+		}
+		if out == approval.EnrollmentChanged {
+			return nil, nil, setupRefusal{agentbroker.CodeEnrollmentChanged}
 		}
 		return nil, nil, setupRefusal{CodeDeniedSetup}
 	}

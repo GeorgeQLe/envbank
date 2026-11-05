@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/GeorgeQLe/envbank/internal/approval"
@@ -48,13 +49,19 @@ type Prompter interface {
 // from a verified host session and an active grant; the development socket
 // uses LegacyCaller.
 type Caller struct {
-	// Who is an owner-visible, already-bounded description for prompts.
+	// Who is the authoritative, owner-visible description for prompts, built
+	// only from validated fields (agent kind, session fingerprint, workspace).
 	Who string
+	// Label is agent-influenced display text; reasons show it last, unquoted
+	// and without quote characters, and clip it before anything else.
+	Label string
 	// Scope namespaces "always" approvals (a grant id): they end with it.
 	Scope string
 	// Valid, when set, is re-checked after every approval and before acting,
 	// so a revoked or expired grant stops a request in flight.
 	Valid func() bool
+	// TimeLeft, when set, bounds a run to the rest of the grant.
+	TimeLeft func() time.Duration
 }
 
 // LegacyCaller is the unauthenticated development socket's caller.
@@ -103,8 +110,16 @@ type Broker struct {
 
 	mu     sync.Mutex
 	always map[string]bool
+	active map[string]map[*activeRun]struct{} // running commands by caller scope
 	closed bool
 }
+
+// activeRun is one running command; ending its scope kills it.
+type activeRun struct{ cancel context.CancelCauseFunc }
+
+// ErrScopeEnded is the cancellation cause of a run whose grant was revoked,
+// expired or ended with the broker: the runner kills its process group at once.
+var ErrScopeEnded = errors.New("grant ended")
 
 // Setup applies an agent-proposed setup request with the owner (setup mode).
 // It re-plans from the request itself, confirms with the owner, collects
@@ -134,15 +149,59 @@ func New(o Options) (*Broker, error) {
 	return &Broker{
 		vault: o.Vault, setup: o.Setup, prompter: o.Prompter, approver: o.Approver, runner: o.Runner, path: o.Path, baseEnv: append([]string(nil), o.BaseEnv...),
 		prompt: make(chan struct{}, 1), queued: make(chan struct{}, Limits.QueuedPrompts), runs: make(chan struct{}, Limits.ConcurrentRuns), always: map[string]bool{},
+		active: map[string]map[*activeRun]struct{}{},
 	}, nil
 }
 
-// Close refuses all later requests and forgets "always" approvals.
+// Close refuses all later requests, forgets "always" approvals and kills
+// every running command.
 func (b *Broker) Close() {
 	b.mu.Lock()
 	b.closed = true
 	b.always = map[string]bool{}
+	var runs []*activeRun
+	for _, set := range b.active {
+		for r := range set {
+			runs = append(runs, r)
+		}
+	}
 	b.mu.Unlock()
+	for _, r := range runs {
+		r.cancel(ErrScopeEnded)
+	}
+}
+
+// EndScope ends everything done under scope (a grant that was revoked,
+// expired or closed): its "always" approvals are forgotten and any command
+// still running for it is killed (its whole process group).
+func (b *Broker) EndScope(scope string) {
+	b.ForgetAlways(scope)
+	b.mu.Lock()
+	var runs []*activeRun
+	for r := range b.active[scope] {
+		runs = append(runs, r)
+	}
+	b.mu.Unlock()
+	for _, r := range runs {
+		r.cancel(ErrScopeEnded)
+	}
+}
+
+func (b *Broker) track(scope string, r *activeRun) (untrack func()) {
+	b.mu.Lock()
+	if b.active[scope] == nil {
+		b.active[scope] = map[*activeRun]struct{}{}
+	}
+	b.active[scope][r] = struct{}{}
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		delete(b.active[scope], r)
+		if len(b.active[scope]) == 0 {
+			delete(b.active, scope)
+		}
+		b.mu.Unlock()
+	}
 }
 
 func refuse(code string) Response { return Response{V: ProtocolVersion, Code: code} }
@@ -178,6 +237,9 @@ func (b *Broker) Approve(ctx context.Context, reason string) Response {
 	case approval.Unavailable:
 		b.prompter.Notify("Touch ID is unavailable: approval refused")
 		return refuse(CodeApprovalUnavailable)
+	case approval.EnrollmentChanged:
+		b.prompter.Notify("the enrolled fingerprints changed since this broker started: approval refused; restart the broker to continue")
+		return refuse(CodeEnrollmentChanged)
 	default:
 		b.prompter.Notify("not approved")
 		return refuse(CodeDenied)
@@ -271,7 +333,10 @@ func (b *Broker) ingest(ctx context.Context, caller Caller, req Request) Respons
 		if exists {
 			// Replacing a value is an approval: Touch ID with the exact action.
 			b.prompter.Notify(req.Name + " already exists; " + caller.Who + " asked to replace it (reason: " + Sanitize(req.Reason, Limits.ReasonBytes) + ")")
-			reason := approval.Reason("replace the existing EnvBank secret %s for %s", req.Name, caller.Who)
+			reason, fits := approval.WithLabel("replace the existing EnvBank secret "+req.Name+" for "+approval.Clean(caller.Who, 200), caller.Label)
+			if !fits {
+				return refuse(CodeInvalidRequest)
+			}
 			if r := b.Approve(ctx, reason); !r.OK {
 				if r.Code == CodeApprovalUnavailable {
 					return r
@@ -315,6 +380,13 @@ func (b *Broker) run(ctx context.Context, caller Caller, req Request) Response {
 	if req.TimeoutSeconds > 0 {
 		timeout = min(Limits.MaxTimeout, secondsDuration(req.TimeoutSeconds))
 	}
+	// The whole command must be shown in the Touch ID prompt; one that does
+	// not fit is refused before anything else, never clipped.
+	reason, fits := runReason(cmd, caller, req.Always && cmd.AlwaysAllowed)
+	if !fits {
+		b.prompter.Notify("refused: the full command does not fit in the Touch ID prompt (shorten its path, directory or arguments)")
+		return refuse(CodeCommandTooLong)
+	}
 	// Existence and redactability are checked before bothering the owner.
 	values, err := b.currentVault().Values(ctx, cmd.Secrets)
 	if errors.Is(err, ErrMissing) {
@@ -341,8 +413,12 @@ func (b *Broker) run(ctx context.Context, caller Caller, req Request) Response {
 			if req.Always && !cmd.AlwaysAllowed {
 				b.prompter.Notify("always is not available for commands that run project code; asking for this run only")
 			}
-			b.prompter.ShowRun(cmd, caller.Who, always)
-			r := b.Approve(ctx, runReason(cmd, caller.Who, always))
+			who := caller.Who
+			if caller.Label != "" {
+				who += ", session label: " + caller.Label
+			}
+			b.prompter.ShowRun(cmd, who, always)
+			r := b.Approve(ctx, reason)
 			if !r.OK {
 				return r
 			}
@@ -387,9 +463,24 @@ func (b *Broker) run(ctx context.Context, caller Caller, req Request) Response {
 	for _, name := range cmd.Secrets {
 		env = append(env, name+"="+values[name])
 	}
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	if caller.TimeLeft != nil {
+		timeout = min(timeout, caller.TimeLeft())
+	}
+	// Ending the grant (revoke, expiry, broker lock) kills the run.
+	scoped, end := context.WithCancelCause(ctx)
+	defer end(nil)
+	untrack := b.track(caller.Scope, &activeRun{cancel: end})
+	defer untrack()
+	if !caller.valid() || timeout <= 0 {
+		return refuse(CodeNotAuthorized)
+	}
+	runCtx, cancel := context.WithTimeout(scoped, timeout)
 	defer cancel()
 	result := b.runner.Run(runCtx, cmd, env)
+	if errors.Is(context.Cause(scoped), ErrScopeEnded) || !caller.valid() {
+		b.prompter.Notify("stopped " + cmd.Executable + ": its grant ended while it ran; no output returned")
+		return refuse(CodeNotAuthorized)
+	}
 	if !result.Started {
 		return refuse(CodeStartFailed)
 	}
@@ -446,28 +537,44 @@ func (b *Broker) applySetup(ctx context.Context, req Request) Response {
 	})
 }
 
-// runReason is the Touch ID text for a run: the exact action, bounded. The
-// broker terminal shows every argument and hash in full.
-func runReason(cmd Command, who string, always bool) string {
+// runReason is the Touch ID text for a run: the resolved executable, its
+// script interpreter, every argument in full, the directory, the secrets, the
+// mode and who asked, then the session label last. ok is false when that does
+// not fit the LocalAuthentication reason budget: the run is then refused
+// (COMMAND_TOO_LONG_TO_APPROVE), never shown clipped.
+func runReason(cmd Command, caller Caller, always bool) (string, bool) {
 	mode := "once"
 	if always {
 		mode = "always (this exact command, until the grant ends)"
 	}
-	args := make([]string, 0, len(cmd.Args))
-	for _, a := range cmd.Args {
-		args = append(args, quoteArg(a))
+	var b strings.Builder
+	b.WriteString("run " + reasonArg(cmd.Executable))
+	if cmd.Interpreter != "" {
+		b.WriteString(" (script run by interpreter " + reasonArg(cmd.Interpreter) + ")")
 	}
-	line := strings.TrimSpace(quoteArg(cmd.Executable) + " " + strings.Join(args, " "))
-	const room = 260
-	if len(line) > room {
-		cut := room
-		for cut > 0 && !utf8.RuneStart(line[cut]) {
-			cut--
+	if len(cmd.Args) == 0 {
+		b.WriteString(" with no arguments")
+	} else {
+		b.WriteString(" with " + itoa(len(cmd.Args)) + " argument(s):")
+		for _, a := range cmd.Args {
+			b.WriteString(" " + reasonArg(a))
 		}
-		line = line[:cut] + "… (full command in the broker terminal)"
 	}
-	return approval.Reason("run %s with %s in %s for %s, %s (exe sha256 %.12s)",
-		line, strings.Join(cmd.Secrets, ", "), quoteArg(cmd.Dir), who, mode, cmd.ExecutableSHA256)
+	b.WriteString(", in " + reasonArg(cmd.Dir) + ", with secrets " + strings.Join(cmd.Secrets, ", ") + ", " + mode)
+	if len(cmd.ExecutableSHA256) >= 12 {
+		b.WriteString(", exe sha256 " + cmd.ExecutableSHA256[:12])
+	}
+	b.WriteString(", for " + approval.Clean(caller.Who, 200))
+	return approval.WithLabel(b.String(), caller.Label)
+}
+
+// reasonArg renders one argument for a Touch ID reason: everything invisible
+// or confusable is escaped (control, bidi, zero-width, non-ASCII spaces, runs
+// of spaces, quote-like characters) and the result is quoted when needed, so
+// cleaning the reason changes nothing and no argument can pose as reason text.
+func reasonArg(a string) string {
+	s := approval.EscapeQuotes(quoteArg(a))
+	return strings.ReplaceAll(s, "  ", ` \x{20}`)
 }
 
 func clip(b []byte) ([]byte, bool) {

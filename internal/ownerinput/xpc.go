@@ -88,10 +88,24 @@ func (p *XPCProvider) exchange(ctx context.Context, msg xpcMessage, nonce string
 	return r, nil
 }
 
-// Pair asks the service to display a 6-digit code; confirm asks the owner (in
-// the broker terminal) whether Chromux shows it. On yes, the service build is
-// pinned by cdhash for the rest of the session.
-func (p *XPCProvider) Pair(ctx context.Context, confirm func(id Identity, code string) bool) error {
+// OutcomeConfirmed is the only pairing outcome that pairs: the service shows
+// the code in Chromux and replies "confirmed" only after the owner confirmed
+// it there with Touch ID. ("displayed" no longer pairs.)
+const OutcomeConfirmed = "confirmed"
+
+// pairingReplyKeys are the keys a pairing reply may carry, with their types
+// as flattened by the agent connection ('D' is a dictionary).
+var pairingReplyKeys = map[string]byte{"v": 'S', "nonce": 'S', "outcome": 'S', "service_cdhash": 'S', "provider": 'D'}
+
+// pairOn pairs on conn, the long-lived connection the broker will register
+// on. Both sides must confirm: the service replies "confirmed" only after the
+// owner confirmed the code in Chromux with Touch ID, and then confirm asks
+// the owner again in the broker terminal (Touch ID). On success the service
+// build is pinned by cdhash; a later pairing must be the same build.
+func (p *XPCProvider) pairOn(ctx context.Context, conn agentConn, confirm func(id Identity, code string) bool) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	nonce, err := newNonce()
 	if err != nil {
 		return err
@@ -102,19 +116,37 @@ func (p *XPCProvider) Pair(ctx context.Context, confirm func(id Identity, code s
 	}
 	code := fmt.Sprintf("%06d", n.Int64())
 	expires := time.Now().Add(requestTTL).UTC()
-	r, err := p.exchange(ctx, xpcMessage{strings: map[string]string{"v": XPCVersion, "kind": "pairing", "nonce": nonce, "pairing_code": code, "expires_at": expires.Format(time.RFC3339)}}, nonce, expires)
+	fields, err := conn.Request([]xpcField{{'S', "v", XPCVersion}, {'S', "kind", "pairing"}, {'S', "nonce", nonce},
+		{'S', "pairing_code", code}, {'S', "expires_at", expires.Format(time.RFC3339)}}, time.Until(expires)+responseWaitExtra)
 	if err != nil {
 		return err
 	}
-	if r.Outcome != "displayed" || r.HasValue || !cdhashRe.MatchString(r.ServiceCDHash) {
-		wipe(r.Value)
-		return errors.New(CodeNotPaired)
+	got := map[string]string{}
+	for _, f := range fields {
+		want, ok := pairingReplyKeys[f.Key]
+		if _, dup := got[f.Key]; !ok || want != f.Type || dup {
+			return errors.New(CodeProtocol) // unknown keys, wrong types or a value
+		}
+		got[f.Key] = f.Value
 	}
-	if !confirm(Identity{TeamID: p.TeamID, Identifier: p.Identifier, CDHash: r.ServiceCDHash, HardenedRuntime: true}, code) {
+	if got["v"] != XPCVersion || got["nonce"] != nonce || ctx.Err() != nil {
+		return errors.New(CodeProtocol)
+	}
+	cd := got["service_cdhash"]
+	if got["outcome"] != OutcomeConfirmed || !cdhashRe.MatchString(cd) {
 		return errors.New(CodeNotPaired)
 	}
 	p.mu.Lock()
-	p.cdhash = r.ServiceCDHash
+	pinned := p.cdhash
+	p.mu.Unlock()
+	if pinned != "" && pinned != cd {
+		return errors.New(CodePeerUnverified)
+	}
+	if !confirm(Identity{TeamID: p.TeamID, Identifier: p.Identifier, CDHash: cd, HardenedRuntime: true}, code) || ctx.Err() != nil {
+		return errors.New(CodeNotPaired)
+	}
+	p.mu.Lock()
+	p.cdhash = cd
 	p.mu.Unlock()
 	return nil
 }

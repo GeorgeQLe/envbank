@@ -134,6 +134,13 @@ const (
 	CodeApprovalUnavailable = "APPROVAL_UNAVAILABLE"
 	// CodeNotSupported: a granted operation this broker build does not offer.
 	CodeNotSupported = "NOT_SUPPORTED"
+	// CodeEnrollmentChanged: the enrolled biometrics changed since the broker
+	// started; every approval is refused until it is restarted.
+	CodeEnrollmentChanged = "APPROVAL_ENROLLMENT_CHANGED"
+	// CodeCommandTooLong: the full command (executable, interpreter, every
+	// argument, directory, secrets) does not fit in the Touch ID prompt, so it
+	// cannot be approved. The owner was not prompted.
+	CodeCommandTooLong = "COMMAND_TOO_LONG_TO_APPROVE"
 )
 
 // States for an ingest request.

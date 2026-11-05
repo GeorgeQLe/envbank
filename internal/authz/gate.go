@@ -72,35 +72,102 @@ type Gate struct {
 	mu     sync.Mutex
 	now    func() time.Time
 	denied map[tuple]time.Time // last declined grant request per session
+
+	// Global grant-prompt limits (never reset by sessions coming and going).
+	promptOpen   bool      // a grant prompt is queued or showing
+	lastPrompt   time.Time // when the last grant prompt was started
+	denials      int       // consecutive declined grant prompts, any session
+	backoffUntil time.Time // no grant prompt before this
 }
 
-// DeniedCooldown is how long a session must wait after the owner declined
-// (or could not approve) one of its grant requests before it may prompt
-// again. Requests inside it are BROKER_BUSY without a prompt.
-const DeniedCooldown = 30 * time.Second
+// Grant-prompt limits against prompt fatigue. Requests inside any of them are
+// BROKER_BUSY without a prompt.
+const (
+	// DeniedCooldown is how long a session must wait after the owner declined
+	// (or could not approve) one of its grant requests. It is also the first
+	// step of the global backoff.
+	DeniedCooldown = 30 * time.Second
+	// GrantPromptSpacing is the least time between two grant prompts from
+	// any sessions; at most one grant prompt is open at a time.
+	GrantPromptSpacing = 10 * time.Second
+	// MaxDenialBackoff caps the global backoff, which doubles with every
+	// consecutive declined grant prompt (30 s, 1 min, 2 min, …) from any
+	// session and resets only when the owner approves one.
+	MaxDenialBackoff = 15 * time.Minute
+	// maxCooldowns bounds the per-session cooldown map; when full, expired
+	// entries go first, then the oldest one. It is never cleared wholesale.
+	maxCooldowns = 1024
+)
 
-// NewGate wires a gate whose grants end their "always" approvals.
+// NewGate wires a gate whose grants, when they end, end their "always"
+// approvals and kill their running commands.
 func NewGate(b *agentbroker.Broker, d Display, now func() time.Time) *Gate {
 	if now == nil {
 		now = time.Now
 	}
-	return &Gate{Broker: b, Grants: NewStore(now, b.ForgetAlways), Display: d, now: now, denied: map[tuple]time.Time{}}
+	return &Gate{Broker: b, Grants: NewStore(now, func(id string) { b.EndScope(scopeOf(id)) }), Display: d, now: now, denied: map[tuple]time.Time{}}
 }
 
-func (g *Gate) coolingDown(s Session) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	t, ok := g.denied[s.key()]
-	return ok && g.now().Sub(t) < DeniedCooldown
-}
+func scopeOf(grantID string) string { return "grant:" + grantID }
 
-func (g *Gate) recordDenial(s Session) {
+// reservePrompt admits one grant prompt if no other is open, the spacing
+// since the last one has passed, the global backoff is over and this session
+// is not cooling down.
+func (g *Gate) reservePrompt(s Session) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if len(g.denied) > 1024 {
-		g.denied = map[tuple]time.Time{}
+	now := g.now()
+	if t, ok := g.denied[s.key()]; ok && now.Sub(t) < DeniedCooldown {
+		return false
 	}
-	g.denied[s.key()] = g.now()
+	if g.promptOpen || now.Before(g.backoffUntil) || (!g.lastPrompt.IsZero() && now.Sub(g.lastPrompt) < GrantPromptSpacing) {
+		return false
+	}
+	g.promptOpen, g.lastPrompt = true, now
+	return true
+}
+
+// releasePrompt ends the open grant prompt. A decline extends the global
+// backoff and the session's cooldown; an approval resets the backoff.
+func (g *Gate) releasePrompt(s Session, asked, approved bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.promptOpen = false
+	if !asked {
+		return
+	}
+	now := g.now()
+	if approved {
+		g.denials, g.backoffUntil = 0, time.Time{}
+		return
+	}
+	g.denials++
+	backoff := MaxDenialBackoff
+	if g.denials <= 16 {
+		backoff = min(MaxDenialBackoff, DeniedCooldown<<(g.denials-1))
+	}
+	g.backoffUntil = now.Add(backoff)
+	g.recordDenialLocked(s, now)
+}
+
+func (g *Gate) recordDenialLocked(s Session, now time.Time) {
+	if _, ok := g.denied[s.key()]; !ok && len(g.denied) >= maxCooldowns {
+		var oldest tuple
+		var oldestAt time.Time
+		for k, t := range g.denied {
+			if now.Sub(t) >= DeniedCooldown {
+				delete(g.denied, k)
+				continue
+			}
+			if oldestAt.IsZero() || t.Before(oldestAt) {
+				oldest, oldestAt = k, t
+			}
+		}
+		if len(g.denied) >= maxCooldowns {
+			delete(g.denied, oldest)
+		}
+	}
+	g.denied[s.key()] = now
 }
 
 // Close ends every grant (the broker is locking).
@@ -175,8 +242,10 @@ func onlyOp(r Request) bool {
 }
 
 func (g *Gate) caller(s Session, gr Grant) agentbroker.Caller {
-	id := gr.id
-	return agentbroker.Caller{Who: s.Who(), Scope: "grant:" + id, Valid: func() bool { return g.Grants.Valid(id, s) }}
+	id, expires := gr.id, gr.ExpiresAt
+	return agentbroker.Caller{Who: s.Ident(), Label: s.DisplayLabel(), Scope: scopeOf(id),
+		Valid:    func() bool { return g.Grants.Valid(id, s) },
+		TimeLeft: func() time.Duration { return expires.Sub(g.now()) }}
 }
 
 func (g *Gate) forward(ctx context.Context, s Session, req Request, scope string, secrets []string) agentbroker.Response {
@@ -264,16 +333,23 @@ func (g *Gate) grantRequest(ctx context.Context, s Session, req Request) agentbr
 	default:
 		return refuse(agentbroker.CodeInvalidRequest)
 	}
-	reason, ok := grantReason(s, req.Scope, secrets, d)
-	if !ok {
+	if _, ok := grantReason(s, req.Scope, secrets, d, g.now().Add(d)); !ok {
 		return refuse(agentbroker.CodeInvalidRequest) // cannot be shown in full in the Touch ID prompt
 	}
-	if n, total := g.Grants.Count(s); n >= MaxGrantsPerSession || total >= MaxGrants || g.coolingDown(s) {
+	if n, total := g.Grants.Count(s); n >= MaxGrantsPerSession || total >= MaxGrants || !g.reservePrompt(s) {
 		return refuse(agentbroker.CodeBusy)
 	}
+	asked, approved := false, false
+	defer func() { g.releasePrompt(s, asked, approved) }()
 	resp := g.Broker.WithOwnerPrompt(ctx, func() agentbroker.Response {
+		// The expiry shown is computed when the prompt is shown.
+		reason, ok := grantReason(s, req.Scope, secrets, d, g.now().Add(d))
+		if !ok {
+			return refuse(agentbroker.CodeInvalidRequest)
+		}
 		lines := []string{
-			"from: " + s.Who(),
+			"from: " + s.Ident(),
+			"session label (set by the agent's host session): " + s.DisplayLabel(),
 			"scope: " + req.Scope + " (" + scopeText(req.Scope) + ")",
 			"duration: " + humanDuration(d) + " (ends earlier if the broker locks or you revoke it in the host)",
 		}
@@ -284,16 +360,17 @@ func (g *Gate) grantRequest(ctx context.Context, s Session, req Request) agentbr
 			lines = append(lines, "agent's reason: "+agentbroker.Sanitize(req.Reason, agentbroker.Limits.ReasonBytes))
 		}
 		g.Display.ShowPlan("EnvBank grant request", lines)
+		asked = true
 		r := g.Broker.Approve(ctx, reason)
 		if !r.OK {
-			g.recordDenial(s)
 			return r
 		}
+		approved = true
 		gr, err := g.Grants.Add(s, req.Scope, secrets, d)
 		if err != nil {
 			return refuse(agentbroker.CodeBusy)
 		}
-		g.Display.Notify("granted " + req.Scope + " to " + s.Who() + " until " + gr.ExpiresAt.Format("15:04"))
+		g.Display.Notify("granted " + req.Scope + " to " + s.Ident() + " until " + gr.ExpiresAt.Format("15:04"))
 		return agentbroker.Response{V: agentbroker.ProtocolVersion, OK: true}
 	})
 	if !resp.OK {
@@ -318,9 +395,12 @@ func scopeText(scope string) string {
 	return scope
 }
 
-// grantReason is the Touch ID text: session label, agent kind, workspace,
-// secrets, scope and duration. It reports false if the full text does not fit.
-func grantReason(s Session, scope string, secrets []string, d time.Duration) (string, bool) {
+// grantReason is the Touch ID text. The authoritative terms come first, in
+// full: the action and scope, the secrets, the duration and expiry, then the
+// agent kind, session fingerprint and workspace. The agent-influenced label
+// comes last, without quote characters, and is the only part ever clipped.
+// It reports false if the authoritative part does not fit.
+func grantReason(s Session, scope string, secrets []string, d time.Duration, expires time.Time) (string, bool) {
 	var what string
 	switch scope {
 	case ScopeSetup:
@@ -330,9 +410,8 @@ func grantReason(s Session, scope string, secrets []string, d time.Duration) (st
 	default:
 		what = scope + " access to " + strings.Join(secrets, ", ")
 	}
-	full := fmt.Sprintf("grant %s %s for %s", s.Who(), what, humanDuration(d))
-	r := approval.Reason("%s", full)
-	return r, r == approval.Clean(full, approval.MaxReasonBytes) && len(r) <= approval.MaxReasonBytes && !strings.HasSuffix(r, "…")
+	auth := fmt.Sprintf("grant %s for %s (until %s) to %s", what, humanDuration(d), expires.Format("15:04"), s.Ident())
+	return approval.WithLabel(auth, s.DisplayLabel())
 }
 
 func humanDuration(d time.Duration) string {

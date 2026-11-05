@@ -124,15 +124,23 @@ func agentBrokerCommand(args []string) error {
 	if fs.NArg() != 0 || *idle < time.Minute || *lifetime < *idle {
 		return errors.New("usage: envbank agent-broker [--owner-input chromux --owner-input-unqualified] [--legacy-socket [--socket PATH]] [--allow-password-fallback] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]")
 	}
+	// A test-approver build never reaches Chromux or a real vault.
+	if err := testBuildGuard(*ownerInput, auth.configPath); err != nil {
+		return err
+	}
 	terminal, err := agentbroker.NewTerminalPrompter(os.Stdin, os.Stdout)
 	if err != nil {
 		return err
 	}
 	// Every grant and approval is a Touch ID check; typing in this terminal
 	// approves nothing.
-	var approver approval.Approver = approval.LocalAuth{AllowPasscode: *allowPassword}
+	// The enrollment state is recorded now: approvals are refused if the
+	// enrolled fingerprints change while this broker runs.
+	var approver approval.Approver
 	if t := testApprover(); t != nil {
 		approver = t
+	} else {
+		approver = approval.NewLocalAuth(*allowPassword)
 	}
 	if *allowPassword {
 		fmt.Println("WARNING: --allow-password-fallback: an approval can also be made with the login password, which a process that has seen you type it could enter.")
@@ -141,7 +149,10 @@ func agentBrokerCommand(args []string) error {
 		fmt.Println("WARNING: Touch ID is unavailable on this Mac (no enrolled biometry or no sensor): every grant and approval will be refused (APPROVAL_UNAVAILABLE).")
 	}
 	prompter := &ownerSurface{TerminalPrompter: terminal, approver: approver}
-	var paired *ownerinput.XPCProvider
+	var channel *ownerinput.AgentChannel
+	// Once the broker exists, a re-pairing's Touch ID waits its turn on the
+	// owner channel like every other approval.
+	var ownerChannel atomic.Pointer[agentbroker.Broker]
 	switch *ownerInput {
 	case "terminal":
 	case "chromux":
@@ -152,21 +163,24 @@ func agentBrokerCommand(args []string) error {
 			return errors.New("--owner-input chromux has not passed its installed-build no-leak qualification yet; add --owner-input-unqualified to use it anyway (or use the terminal)")
 		}
 		p := &ownerinput.XPCProvider{Service: *oiService, TeamID: *oiTeam, Identifier: *oiIdent}
-		// The owner compares the code in Chromux with this terminal; allow time to do it.
+		ch := &ownerinput.AgentChannel{Provider: p, Notify: prompter.Notify}
+		// Pairing happens on the connection the agent channel registers on,
+		// and needs the owner's Touch ID in Chromux (the service replies
+		// "confirmed") and then here. Allow time to compare the codes.
 		pctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		err := pairProvider(pctx, p, terminal, approver)
+		err := pairProvider(pctx, channelPairer{ch: ch, serialize: &ownerChannel}, terminal, approver)
 		cancel()
 		if err != nil {
 			fmt.Fprintf(os.Stdout, "Chromux secure input not paired (%v); secrets will be typed in this terminal.\n", err)
 		} else {
 			prompter.provider = p
-			paired = p
+			channel = ch
 			fmt.Println("Chromux secure input paired for this session (UNQUALIFIED: installed-build no-leak qualification pending).")
 		}
 	default:
 		return errors.New("--owner-input must be terminal or chromux")
 	}
-	if paired == nil && !*legacySocket {
+	if channel == nil && !*legacySocket {
 		return errors.New("no agent channel: authorized agents reach the broker only through a paired Chromux (--owner-input chromux --owner-input-unqualified); --legacy-socket is for development only")
 	}
 	state, err := term.GetState(int(os.Stdin.Fd()))
@@ -239,6 +253,7 @@ func agentBrokerCommand(args []string) error {
 		}
 	}
 	defer broker.Close()
+	ownerChannel.Store(broker)
 	gate := authz.NewGate(broker, prompter, nil)
 	defer gate.Close() // grants are memory-only and end when the broker locks
 	var listener net.Listener
@@ -273,11 +288,12 @@ func agentBrokerCommand(args []string) error {
 	}()
 	var wg sync.WaitGroup
 	var serveErr error
-	if paired != nil {
+	if channel != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ch := &ownerinput.AgentChannel{Provider: paired, Handler: gate, Notify: prompter.Notify, Activity: activity}
+			ch := channel
+			ch.Handler, ch.Activity = gate, activity
 			if err := ch.Run(ctx); err != nil {
 				prompter.Notify("authorized-agent channel stopped: " + err.Error())
 			}
@@ -300,6 +316,29 @@ func agentBrokerCommand(args []string) error {
 	wg.Wait()
 	fmt.Println("EnvBank agent broker locked.")
 	return serveErr
+}
+
+// channelPairer pairs the agent channel's own connection (pairer for
+// pairProvider). Its confirmation is kept for re-pairing after a service
+// restart or reconnect, serialized on the owner channel once the broker runs.
+type channelPairer struct {
+	ch        *ownerinput.AgentChannel
+	serialize *atomic.Pointer[agentbroker.Broker]
+}
+
+func (c channelPairer) Pair(ctx context.Context, confirm func(ownerinput.Identity, string) bool) error {
+	c.ch.Confirm = func(id ownerinput.Identity, code string) bool {
+		b := c.serialize.Load()
+		if b == nil {
+			return confirm(id, code)
+		}
+		qctx, cancel := context.WithTimeout(context.Background(), 2*approval.DefaultTimeout)
+		defer cancel()
+		return b.WithOwnerPrompt(qctx, func() agentbroker.Response {
+			return agentbroker.Response{OK: confirm(id, code)}
+		}).OK
+	}
+	return c.ch.Open(ctx)
 }
 
 // brokerPassphrase prefers typing the passphrase into the broker terminal: a

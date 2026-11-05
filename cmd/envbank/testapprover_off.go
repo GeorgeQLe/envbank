@@ -14,3 +14,6 @@ import (
 func registerTestApprover(*flag.FlagSet) func() approval.Approver {
 	return func() approval.Approver { return nil }
 }
+
+// testBuildGuard restricts nothing in the default build.
+func testBuildGuard(string, string) error { return nil }

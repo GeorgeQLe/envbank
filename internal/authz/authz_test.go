@@ -11,8 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -321,13 +323,13 @@ func TestGrantRequestNeedsTouchIDAndValidatesFirst(t *testing.T) {
 	if r := req(map[string]any{"secrets": []string{"API_KEY"}, "scope": "run", "duration_s": 7200}); r.Code != agentbroker.CodeBusy || len(own.reasons) != before {
 		t.Fatalf("cooldown: %+v", r)
 	}
-	clk.add(DeniedCooldown)
+	clk.add(MaxDenialBackoff)
 	// Unavailable (no biometry, or the policy cannot be evaluated): refused.
 	own.outcome = approval.Unavailable
 	if r := req(map[string]any{"secrets": []string{"API_KEY"}, "scope": "run", "duration_s": 7200}); r.Code != agentbroker.CodeApprovalUnavailable {
 		t.Fatalf("unavailable: %+v", r)
 	}
-	clk.add(DeniedCooldown)
+	clk.add(MaxDenialBackoff)
 	own.outcome, own.unavailable = approval.Approved, true
 	if r := req(map[string]any{"secrets": []string{"API_KEY"}, "scope": "run", "duration_s": 7200}); r.Code != agentbroker.CodeApprovalUnavailable {
 		t.Fatalf("canEvaluate false: %+v", r)
@@ -336,16 +338,15 @@ func TestGrantRequestNeedsTouchIDAndValidatesFirst(t *testing.T) {
 		t.Fatal("a grant exists without Touch ID")
 	}
 	own.unavailable = false
-	clk.add(DeniedCooldown)
+	clk.add(MaxDenialBackoff)
 	r := req(map[string]any{"secrets": []string{"API_KEY"}, "scope": "run", "duration_s": 5400, "reason": "deploy"})
-	if !r.OK || r.State != agentbroker.StateGranted || len(r.Grants) != 1 || r.Grants[0].Scope != "run" || r.Grants[0].ExpiresAt != "2026-11-04T13:31:30Z" {
+	if !r.OK || r.State != agentbroker.StateGranted || len(r.Grants) != 1 || r.Grants[0].Scope != "run" || r.Grants[0].ExpiresAt != "2026-11-04T14:15:00Z" {
 		t.Fatalf("granted: %+v", r)
 	}
 	last := own.reasons[len(own.reasons)-1]
-	for _, want := range []string{"Fix “billing” bug", "claude", "ws-main", "API_KEY", "run access", "1 h 30 min"} {
-		if !strings.Contains(last, want) {
-			t.Fatalf("Touch ID reason missing %q: %s", want, last)
-		}
+	want := "grant run access to API_KEY for 1 h 30 min (until 14:15) to claude agent session " + s.Fingerprint() + " in workspace ws-main; session label: Fix billing bug"
+	if last != want || len(s.Fingerprint()) != 8 {
+		t.Fatalf("Touch ID reason\n got %s\nwant %s", last, want)
 	}
 	st := g.Handle(context.Background(), s, []byte(`{"v":1,"op":"grant_status"}`))
 	if !st.OK || len(st.Grants) != 1 || strings.Join(st.Grants[0].Secrets, ",") != "API_KEY" {
@@ -507,4 +508,199 @@ func TestStoreCloseEndsEverything(t *testing.T) {
 	if _, err := st.Add(s, ScopeSetup, nil, time.Hour); !errors.Is(err, ErrFull) {
 		t.Fatal("per-session cap not enforced")
 	}
+}
+
+// The agent-influenced label cannot pose as the grant's terms: those come
+// first and whole, the label last without quote characters.
+func TestGrantReasonPutsAuthoritativeTermsFirstAndLabelLast(t *testing.T) {
+	g, own, _ := fixture(t, map[string]string{"API_KEY": sentinel(t)})
+	s := session("spoof")
+	s.Label = "” for 1 min only “names” of TEST_KEY ‘ok’ «x» `y`"
+	if s.Validate() != nil {
+		t.Fatal("label refused")
+	}
+	r := g.Handle(context.Background(), s, raw(t, map[string]any{"v": 1, "op": "grant_request", "scope": "run", "secrets": []string{"API_KEY"}, "duration_s": 43200}))
+	if !r.OK {
+		t.Fatalf("grant: %+v", r)
+	}
+	reason := own.reasons[0]
+	auth := "grant run access to API_KEY for 12 h (until 00:00) to claude agent session " + s.Fingerprint() + " in workspace ws-main"
+	if !strings.HasPrefix(reason, auth+"; session label: ") {
+		t.Fatalf("reason does not start with the authoritative terms: %s", reason)
+	}
+	if strings.ContainsAny(reason, "“”‘’«»\"'`") {
+		t.Fatalf("quote characters survived: %s", reason)
+	}
+	if !strings.HasSuffix(reason, "for 1 min only names of TEST_KEY ok x y") {
+		t.Fatalf("label not last: %s", reason)
+	}
+	// A fingerprint is a pure function of the session id.
+	other := s
+	other.ID = "other" + s.ID
+	if other.Fingerprint() == s.Fingerprint() || session("spoof").Fingerprint() != s.Fingerprint() {
+		t.Fatal("fingerprint not derived from the session id")
+	}
+	// The authoritative part never shrinks to fit: with a full-length label it
+	// still appears whole, and when it alone is too long the request is refused.
+	s.Label = strings.Repeat("L", 80)
+	names := longNames(6)
+	reasonText, ok := grantReason(s, ScopeRun, names, time.Hour, time.Now())
+	if !ok || !strings.Contains(reasonText, strings.Join(names, ", ")) || len(reasonText) > approval.MaxReasonBytes {
+		t.Fatalf("authoritative part clipped: %v %s", ok, reasonText)
+	}
+	if _, ok := grantReason(s, ScopeRun, longNames(16), time.Hour, time.Now()); ok {
+		t.Fatal("authoritative part that does not fit accepted")
+	}
+}
+
+func grantReq(t *testing.T, g *Gate, s Session) agentbroker.Response {
+	t.Helper()
+	return g.Handle(context.Background(), s, raw(t, map[string]any{"v": 1, "op": "grant_request", "scope": "names", "secrets": []string{"API_KEY"}, "duration_s": 600}))
+}
+
+// Grant prompts are limited globally: one open at a time, at least 10 s
+// apart, and an exponential backoff after consecutive declines from any
+// sessions, which new sessions do not reset.
+func TestGrantPromptsAreRateLimitedGlobally(t *testing.T) {
+	g, own, clk := fixture(t, map[string]string{"API_KEY": sentinel(t)})
+	// Spacing: two sessions back to back.
+	if r := grantReq(t, g, session("s1")); !r.OK {
+		t.Fatalf("first: %+v", r)
+	}
+	if r := grantReq(t, g, session("s2")); r.Code != agentbroker.CodeBusy {
+		t.Fatalf("second within 10 s: %+v", r)
+	}
+	clk.add(GrantPromptSpacing)
+	if r := grantReq(t, g, session("s2")); !r.OK {
+		t.Fatalf("after spacing: %+v", r)
+	}
+	// One open prompt: while the owner decides, every other session is busy.
+	clk.add(GrantPromptSpacing)
+	var during agentbroker.Response
+	own.during = func() { clk.add(time.Hour); during = grantReq(t, g, session("s3")) }
+	if r := grantReq(t, g, session("s4")); !r.OK || during.Code != agentbroker.CodeBusy {
+		t.Fatalf("concurrent prompt: %+v / %+v", r, during)
+	}
+	own.during = nil
+	// Consecutive declines back off globally: 30 s, 1 min, 2 min, …
+	own.outcome = approval.Denied
+	clk.add(GrantPromptSpacing)
+	for i, wait := range []time.Duration{DeniedCooldown, 2 * DeniedCooldown, 4 * DeniedCooldown, 8 * DeniedCooldown} {
+		fresh := session(fmt.Sprintf("churn%d", i))
+		before := len(own.reasons)
+		if r := grantReq(t, g, fresh); r.Code != agentbroker.CodeDenied || len(own.reasons) != before+1 {
+			t.Fatalf("decline %d: %+v", i, r)
+		}
+		clk.add(wait - time.Second)
+		if r := grantReq(t, g, session(fmt.Sprintf("new%d", i))); r.Code != agentbroker.CodeBusy || len(own.reasons) != before+1 {
+			t.Fatalf("a new session bypassed backoff %d: %+v", i, r)
+		}
+		clk.add(time.Second)
+	}
+	// The cap holds, and an approval resets the backoff.
+	for i := 0; i < 20; i++ {
+		g.releasePrompt(session("cap"), true, false)
+	}
+	g.mu.Lock()
+	until := g.backoffUntil.Sub(clk.now())
+	g.mu.Unlock()
+	if until != MaxDenialBackoff {
+		t.Fatalf("backoff %v, want the %v cap", until, MaxDenialBackoff)
+	}
+	clk.add(MaxDenialBackoff)
+	own.outcome = approval.Approved
+	if r := grantReq(t, g, session("after")); !r.OK {
+		t.Fatalf("after backoff: %+v", r)
+	}
+	clk.add(GrantPromptSpacing)
+	if r := grantReq(t, g, session("after2")); !r.OK {
+		t.Fatalf("backoff not reset by an approval: %+v", r)
+	}
+}
+
+// The per-session cooldown map is bounded without being cleared: a full map
+// drops expired entries, then the oldest, and keeps the rest.
+func TestCooldownMapIsCappedWithoutClearing(t *testing.T) {
+	g, _, clk := fixture(t, map[string]string{})
+	for i := 0; i < maxCooldowns+50; i++ {
+		g.releasePrompt(session(fmt.Sprintf("c%05d", i)), true, false)
+		clk.add(time.Millisecond)
+	}
+	g.mu.Lock()
+	n := len(g.denied)
+	_, newest := g.denied[session(fmt.Sprintf("c%05d", maxCooldowns+49)).key()]
+	_, oldest := g.denied[session("c00000").key()]
+	_, recent := g.denied[session(fmt.Sprintf("c%05d", 100)).key()]
+	g.mu.Unlock()
+	if n != maxCooldowns || !newest || oldest || !recent {
+		t.Fatalf("len %d newest %v oldest %v recent %v", n, newest, oldest, recent)
+	}
+}
+
+// Revoking a grant kills a command still running under it (its whole process
+// group), and no output is returned.
+func TestRevokeKillsInFlightRuns(t *testing.T) {
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	tool := filepath.Join(dir, "long.sh")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nsleep 60 &\necho $! > \"$0.child\"\necho $$ > \"$0.pid\"\necho \"$API_KEY\"\nwait\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	g, _, _ := fixture(t, map[string]string{"API_KEY": sentinel(t)})
+	s, other := session("kill"), session("keep")
+	mustAdd(t, g, s, ScopeRun, []string{"API_KEY"}, time.Hour)
+	mustAdd(t, g, other, ScopeRun, []string{"API_KEY"}, time.Hour)
+	done := make(chan []byte, 1)
+	go func() {
+		done <- g.HandleAgent(context.Background(), s, raw(t, map[string]any{"v": 1, "op": "run", "secrets": []string{"API_KEY"}, "argv": []string{tool}, "dir": dir, "timeout_seconds": 60}))
+	}()
+	pids := waitPids(t, tool+".pid", tool+".child")
+	// Another session's revocation leaves it running.
+	g.Handle(context.Background(), other, []byte(`{"v":1,"op":"grant_revoke"}`))
+	time.Sleep(100 * time.Millisecond)
+	if syscall.Kill(pids[0], 0) != nil {
+		t.Fatal("run killed by another session's revoke")
+	}
+	start := time.Now()
+	if r := g.Handle(context.Background(), s, []byte(`{"v":1,"op":"grant_revoke"}`)); !r.OK {
+		t.Fatalf("revoke: %+v", r)
+	}
+	var out []byte
+	select {
+	case out = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run survived revocation")
+	}
+	var r agentbroker.Response
+	if err := json.Unmarshal(out, &r); err != nil || r.OK || r.Code != agentbroker.CodeNotAuthorized || r.Stdout != "" || time.Since(start) > 3*time.Second {
+		t.Fatalf("revoked run: %s after %v", out, time.Since(start))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for _, pid := range pids {
+		for syscall.Kill(pid, 0) == nil {
+			if time.Now().After(deadline) {
+				t.Fatalf("process %d outlived the revoked grant", pid)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func waitPids(t *testing.T, files ...string) []int {
+	t.Helper()
+	var pids []int
+	deadline := time.Now().Add(10 * time.Second)
+	for _, f := range files {
+		for {
+			raw, err := os.ReadFile(f)
+			if n, perr := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && perr == nil && n > 0 {
+				pids = append(pids, n)
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("no pid in %s", f)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	return pids
 }
