@@ -194,3 +194,15 @@ func OperationAuthority(ctx context.Context) error {
 	}
 	return check(ctx)
 }
+
+// ErrPromotionUnsupported is returned by VercelPort.Redeploy for a
+// production target when the port cannot promote: a production redeploy is
+// created staged (never aliased to the production domains), so production
+// traffic would keep the old credentials, and a rotation would then
+// invalidate them under it. The step fails with CodePromotionUnsupported
+// before any deployment is created.
+var ErrPromotionUnsupported = errors.New("production promotion unsupported")
+
+// CodePromotionUnsupported: see ErrPromotionUnsupported. Nothing was
+// deployed or invalidated; env vars pushed earlier in the operation stay.
+const CodePromotionUnsupported = "PRODUCTION_PROMOTION_UNSUPPORTED"

@@ -326,6 +326,8 @@ func (r *run) step(name, code string, fn func() error) error {
 		var given *failure
 		if errors.As(err, &given) {
 			f.code = given.code
+		} else if errors.Is(err, ErrPromotionUnsupported) {
+			f.code = CodePromotionUnsupported
 		}
 		if c := cancelCode(r.ctx); c != "" {
 			f.code = c
