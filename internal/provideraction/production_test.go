@@ -65,12 +65,14 @@ func TestProductionNeonRotateOrder(t *testing.T) {
 	}
 	want := []string{
 		"neon.database_owner appdb",
+		"vercel.env_present production",
 		"neon.database_owner appdb",
 		"neon.roles_ready neondb_owner app_a,app_b",
 		"vercel.current", // the deployment serving production: the rollback target
 		"neon.reset app_b",
 		"vault.store DATABASE_URL",
 		"vault.store DATABASE_URL_UNPOOLED",
+		"vercel.env_present production",
 		"vercel.upsert DATABASE_URL production",
 		"vercel.upsert DATABASE_URL_UNPOOLED production",
 		"vercel.redeploy dpl_current",

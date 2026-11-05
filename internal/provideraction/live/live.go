@@ -213,7 +213,7 @@ func (p *stripePort) Close() error { p.a.Close(); return nil }
 // account is not looked up.
 const stripeIdentity = "stripe-test-mode"
 
-func (p *stripePort) CreateWebhook(ctx context.Context, endpointURL string, events []string, secret *lifecycle.SecretSink) (string, error) {
+func (p *stripePort) CreateWebhook(ctx context.Context, endpointURL string, events []string, apiVersion string, secret *lifecycle.SecretSink) (string, error) {
 	if err := authorized(ctx, "create"); err != nil {
 		return "", err
 	}
@@ -221,9 +221,13 @@ func (p *stripePort) CreateWebhook(ctx context.Context, endpointURL string, even
 	if err != nil {
 		return "", provider.NewError("create", 0, "RANDOM_UNAVAILABLE", provider.RetryNever)
 	}
+	params := map[string][]string{"url": {endpointURL}, "enabled_events": append([]string(nil), events...)}
+	if apiVersion != "" {
+		params["api_version"] = []string{apiVersion}
+	}
 	ev, err := p.a.Create(ctx, lifecycle.CredentialRequest{ProviderIdentity: stripeIdentity, CredentialType: "webhook-signing-secret",
 		DestinationRecord: "provider-action", IdempotencyKey: key,
-		Parameters: map[string][]string{"url": {endpointURL}, "enabled_events": append([]string(nil), events...)}}, secret)
+		Parameters: params}, secret)
 	return ev.CredentialID, err
 }
 
@@ -236,7 +240,7 @@ func (p *stripePort) Webhook(ctx context.Context, endpointID string) (providerac
 	if err != nil {
 		return provideraction.StripeWebhook{}, err
 	}
-	return provideraction.StripeWebhook{URL: ep.URL, Events: ep.Events}, nil
+	return provideraction.StripeWebhook{URL: ep.URL, Events: ep.Events, Status: ep.Status, APIVersion: ep.APIVersion}, nil
 }
 
 func (p *stripePort) DeleteWebhook(ctx context.Context, endpointID string) error {
@@ -402,6 +406,16 @@ func (p *vercelPort) DeleteEnv(ctx context.Context, env provideraction.VercelEnv
 		return err
 	}
 	return a.DeleteEnv(mutating(ctx), key)
+}
+
+// EnvPresent lists the scope's env metadata (names only, never values).
+func (p *vercelPort) EnvPresent(ctx context.Context, env provideraction.VercelEnv, keys []string) (map[string]bool, error) {
+	scope := vercel.Scope{TeamID: env.TeamID, ProjectID: env.ProjectID, Environment: env.Target, GitBranch: env.GitBranch}
+	a, err := p.project(scope)
+	if err != nil {
+		return nil, err
+	}
+	return a.Present(ctx, keys)
 }
 
 // CurrentDeployment: for a branch-scoped preview, the adapter lists with

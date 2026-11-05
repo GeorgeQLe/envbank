@@ -141,6 +141,12 @@ type Binding struct {
 	// succeeded, the binding save did not); the next neon.rotate retries
 	// the reset instead of refusing the record as unbound.
 	PendingRole string `json:"pending_role,omitempty"`
+	// PendingHost (with PendingRole) is the hex SHA-256 of the host of the
+	// URI the record held when the rotation was marked pending. A record one
+	// revision ahead is accepted as the rotation's own store only when its
+	// URI names PendingRole as user and the same host (pendingStored):
+	// anything else (an owner edit) leaves the record unbound.
+	PendingHost string `json:"pending_host,omitempty"`
 	Revoked     bool   `json:"revoked,omitempty"`
 }
 
@@ -159,7 +165,7 @@ func (b Binding) Valid() bool {
 		}
 	case KindStripeWebhookSecret, KindStripeWebhookSecretPrevious:
 		if b.Provider != ProviderStripe || !stripeEndpointRe.MatchString(r.EndpointID) || !stripeEndpointRe.MatchString(r.Lineage) || r.ProjectID != "" || r.BranchID != "" ||
-			b.Roles != nil || b.ActiveRole != "" || b.RetiringRole != "" || b.PendingRole != "" {
+			b.Roles != nil || b.ActiveRole != "" || b.RetiringRole != "" || b.PendingRole != "" || b.PendingHost != "" {
 			return false
 		}
 	default:
@@ -190,6 +196,9 @@ func (b Binding) Valid() bool {
 // distinct rotation roles with the active one among them and, during an
 // incomplete rotation, the other one retiring.
 func (b Binding) validRoles() bool {
+	if (b.PendingHost != "") != (b.PendingRole != "") || (b.PendingHost != "" && !sha256HexRe.MatchString(b.PendingHost)) {
+		return false
+	}
 	if b.Roles == nil {
 		return b.ActiveRole == "" && b.RetiringRole == "" && b.PendingRole == ""
 	}
@@ -399,12 +408,16 @@ type StripeEndpointProvenance struct {
 	URL        string   `json:"url"`
 	Lineage    string   `json:"lineage"`
 	Events     []string `json:"events,omitempty"`
+	// APIVersion is the endpoint's event API version when known ("" when
+	// it could not be read back): a rotation refuses an endpoint whose
+	// version changed and creates the copy with the same one.
+	APIVersion string `json:"api_version,omitempty"`
 }
 
 // Valid reports whether p is well formed.
 func (p StripeEndpointProvenance) Valid() bool {
 	return p.V == BindingVersion && stripeEndpointRe.MatchString(p.EndpointID) && validHTTPSURL(p.URL) && stripeEndpointRe.MatchString(p.Lineage) &&
-		(p.Events == nil || validEvents(p.Events))
+		(p.Events == nil || validEvents(p.Events)) && (p.APIVersion == "" || stripeAPIVersionRe.MatchString(p.APIVersion))
 }
 
 // DecodeStripeEndpoint strictly decodes and validates a stored provenance payload.

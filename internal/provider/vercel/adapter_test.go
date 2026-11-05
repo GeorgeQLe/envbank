@@ -537,3 +537,43 @@ func TestDeleteEnvRemovesOnlyTheExactSensitiveEntry(t *testing.T) {
 		}
 	})
 }
+
+// Present is read-only and names-only: anything in or overlapping the exact
+// scope (including ambiguous and plain entries) counts as present. Entries
+// of other scopes do not; nor does an all-branches preview entry, which a
+// branch-scoped write leaves in place (Vercel prefers the branch entry).
+func TestPresentReportsAnyOverlappingEntry(t *testing.T) {
+	fake := newFake(t)
+	fake.project("")
+	fake.envs(
+		env("e1", "EXACT", "sensitive", `["preview"]`, testBranch, ""),
+		env("e2", "ALL_PREVIEW", "sensitive", `["preview"]`, "", ""),
+		env("e3", "PLAIN", "plain", `["preview"]`, testBranch, ""),
+		env("e4", "MULTI", "sensitive", `["preview","production"]`, testBranch, ""),
+		env("e5", "OTHER_BRANCH", "sensitive", `["preview"]`, "feature/y", ""),
+		env("e6", "PROD_ONLY", "sensitive", `["production"]`, "", ""),
+		`{"id":"e7","key":"WITH_VALUE","type":"sensitive","target":["preview"],"gitBranch":"`+testBranch+`","value":"`+canary+`"}`,
+	)
+	adapter := fake.adapter(t, previewScope())
+	names := []string{"EXACT", "ALL_PREVIEW", "PLAIN", "MULTI", "OTHER_BRANCH", "PROD_ONLY", "WITH_VALUE", "MISSING"}
+	got, err := adapter.Present(context.Background(), names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoCanary(t, got)
+	want := map[string]bool{"EXACT": true, "PLAIN": true, "MULTI": true, "WITH_VALUE": true}
+	for _, name := range names {
+		if got[name] != want[name] {
+			t.Errorf("%s: present %v, want %v", name, got[name], want[name])
+		}
+	}
+	if fake.mutations() != 0 || fake.last(http.MethodGet, envPath).Query.Get("decrypt") != "false" {
+		t.Fatal("presence check mutated or asked for values")
+	}
+	before := fake.total()
+	_, err = adapter.Present(context.Background(), []string{"bad key!"})
+	expectCode(t, err, "NAME_NOT_ALLOWED")
+	if fake.total() != before {
+		t.Fatal("invalid name triggered provider requests")
+	}
+}

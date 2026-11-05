@@ -363,6 +363,7 @@ func (s *fakeSession) Close(context.Context) error { return nil }
 
 type vercelEnv struct {
 	id, key, target, branch, value string
+	typ                            string // "" is sensitive
 }
 
 type vercelDeployment struct {
@@ -674,7 +675,11 @@ func (f *fakeVercel) serve(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			list := []map[string]any{}
 			for _, e := range p.envs {
-				m := map[string]any{"id": e.id, "key": e.key, "type": "sensitive", "target": []string{e.target}, "updatedAt": 1}
+				typ := e.typ
+				if typ == "" {
+					typ = "sensitive"
+				}
+				m := map[string]any{"id": e.id, "key": e.key, "type": typ, "target": []string{e.target}, "updatedAt": 1}
 				if e.branch != "" {
 					m["gitBranch"] = e.branch
 				}
@@ -822,8 +827,17 @@ func (f *fakeVercel) RoundTrip(r *http.Request) (*http.Response, error) {
 
 type stripeEndpoint struct {
 	id, url, secret string
+	apiVersion      string // "" is null: the account default
 	events          []string
 	deleted         bool
+}
+
+func (e *stripeEndpoint) wire() map[string]any {
+	m := map[string]any{"id": e.id, "url": e.url, "enabled_events": e.events, "status": "enabled", "api_version": nil}
+	if e.apiVersion != "" {
+		m["api_version"] = e.apiVersion
+	}
+	return m
 }
 
 type fakeStripe struct {
@@ -881,17 +895,19 @@ func (f *fakeStripe) serve(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(bufio.NewReader(r.Body))
 		form, _ := url.ParseQuery(string(raw))
 		f.next++
-		e := &stripeEndpoint{id: fmt.Sprintf("we_e2e%d", f.next), url: form.Get("url"), events: form["enabled_events[]"], secret: f.sec.issue("whsec_")}
+		e := &stripeEndpoint{id: fmt.Sprintf("we_e2e%d", f.next), url: form.Get("url"), events: form["enabled_events[]"], secret: f.sec.issue("whsec_"), apiVersion: form.Get("api_version")}
 		f.byID[e.id] = e
 		f.ev.add("stripe.create %s", e.id)
-		writeJSON(w, http.StatusOK, map[string]any{"id": e.id, "url": e.url, "enabled_events": e.events, "secret": e.secret})
+		m := e.wire()
+		m["secret"] = e.secret
+		writeJSON(w, http.StatusOK, m)
 	case r.Method == http.MethodGet && id != r.URL.Path:
 		e := f.byID[id]
 		if e == nil || e.deleted {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"id": e.id, "url": e.url, "enabled_events": e.events})
+		writeJSON(w, http.StatusOK, e.wire())
 	case r.Method == http.MethodDelete && id != r.URL.Path:
 		e := f.byID[id]
 		if e == nil || e.deleted {

@@ -135,7 +135,7 @@ func TestProviderBindingsPersistInTheVault(t *testing.T) {
 	svc := newProviderService(second, provideractiontest.NewProviders(&provideractiontest.Log{}))
 	defer svc.Close()
 	push := func(project string) string {
-		params, _ := json.Marshal(map[string]any{"team_id": "team_abc123", "project_id": project, "target": "preview", "variables": map[string]string{"DATABASE_URL": "DATABASE_URL"}})
+		params, _ := json.Marshal(map[string]any{"team_id": "team_abc123", "project_id": project, "target": "preview", "git_branch": "main", "variables": map[string]string{"DATABASE_URL": "DATABASE_URL"}})
 		prep, code := svc.Prepare(ctx, provideraction.ActionVercelEnvPush, params)
 		prep.Release()
 		return code

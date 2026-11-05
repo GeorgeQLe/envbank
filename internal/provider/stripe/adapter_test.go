@@ -119,3 +119,69 @@ func TestEndpointIsPinned(t *testing.T) {
 		}
 	}
 }
+
+func TestWebhookCreatePassesOnlyAValidAPIVersion(t *testing.T) {
+	var bodies []string
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(request.Body)
+		bodies = append(bodies, string(body))
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"we_123","secret":"whsec_x"}`)), Header: http.Header{}}, nil
+	})}
+	adapter, err := New([]byte("sk_test_control"), Options{Endpoint: "http://127.0.0.1", Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	create := func(versions ...string) error {
+		params := map[string][]string{"url": {"https://example.test/webhook"}, "enabled_events": {"invoice.paid"}}
+		if versions != nil {
+			params["api_version"] = versions
+		}
+		sink, _ := lifecycle.NewSecretSink(&writer{}, "STRIPE_WEBHOOK_SECRET")
+		_, err := adapter.Create(context.Background(), lifecycle.CredentialRequest{ProviderIdentity: "acct_123", CredentialType: "webhook-signing-secret", DestinationRecord: "STRIPE_WEBHOOK_SECRET", IdempotencyKey: fmt.Sprintf("op-%d", len(bodies)), Parameters: params}, sink)
+		return err
+	}
+	if err := create("2024-06-20"); err != nil || !strings.Contains(bodies[0], "api_version=2024-06-20") {
+		t.Fatalf("err %v body %s", err, bodies)
+	}
+	if err := create(); err != nil || strings.Contains(bodies[1], "api_version") {
+		t.Fatalf("default: err %v body %s", err, bodies)
+	}
+	for _, bad := range [][]string{{"latest"}, {""}, {"2024-06-20", "2025-01-01"}, {"2024-06-20&x=1"}} {
+		if err := create(bad...); err == nil {
+			t.Fatalf("accepted api_version %q", bad)
+		}
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("invalid versions were sent: %d requests", len(bodies))
+	}
+}
+
+func TestEndpointDecodesStatusAndAPIVersion(t *testing.T) {
+	cases := map[string]struct {
+		body, status, version string
+		ok                    bool
+	}{
+		"enabled with version": {`{"id":"we_1","url":"https://example.test/w","enabled_events":["invoice.paid"],"status":"enabled","api_version":"2024-06-20"}`, "enabled", "2024-06-20", true},
+		"null version":         {`{"id":"we_1","url":"https://example.test/w","enabled_events":["invoice.paid"],"status":"disabled","api_version":null}`, "disabled", "", true},
+		"unknown status":       {`{"id":"we_1","url":"https://example.test/w","enabled_events":["invoice.paid"],"status":"paused","api_version":null}`, "", "", false},
+		"missing status":       {`{"id":"we_1","url":"https://example.test/w","enabled_events":["invoice.paid"]}`, "", "", false},
+		"empty version":        {`{"id":"we_1","url":"https://example.test/w","enabled_events":["invoice.paid"],"status":"enabled","api_version":""}`, "", "", false},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(c.body)), Header: http.Header{}}, nil
+			})}
+			adapter, err := New([]byte("sk_test_control"), Options{Endpoint: "http://127.0.0.1", Client: client})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer adapter.Close()
+			ep, err := adapter.Endpoint(context.Background(), "we_1")
+			if (err == nil) != c.ok || (c.ok && (ep.Status != c.status || ep.APIVersion != c.version)) {
+				t.Fatalf("endpoint %+v err %v", ep, err)
+			}
+		})
+	}
+}

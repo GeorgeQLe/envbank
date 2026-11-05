@@ -317,6 +317,30 @@ func (adapter *Adapter) DeleteEnv(ctx context.Context, name string) error {
 	return nil
 }
 
+// Present reports, for each name, whether this exact scope holds an entry
+// for it or one that overlaps it (anything not proven absent counts as
+// present). Read-only and names-only: values are never decoded.
+func (adapter *Adapter) Present(ctx context.Context, names []string) (map[string]bool, error) {
+	const operation = "env_presence"
+	for _, name := range names {
+		if !envKeyPattern.MatchString(name) {
+			return nil, safeError(operation, "NAME_NOT_ALLOWED", provider.RetryNever)
+		}
+	}
+	if _, err := adapter.verifiedProject(ctx, operation); err != nil {
+		return nil, err
+	}
+	entries, err := adapter.listEnv(ctx, operation)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(names))
+	for _, name := range names {
+		out[name] = adapter.scope.stateFor(entries, name).presence() != provider.PresenceAbsent
+	}
+	return out, nil
+}
+
 // envEntry deliberately has no value, vsmValue, legacyValue or content-hint
 // fields: those are never decoded.
 type envEntry struct {

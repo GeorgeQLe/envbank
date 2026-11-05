@@ -32,6 +32,9 @@ func (g *Gate) providerAction(ctx context.Context, s Session, req Request) agent
 	if !g.Provider.Available() {
 		return refuse(provideraction.CodeUnavailable)
 	}
+	// A push is refused if no later rotation of its records could fit this
+	// session's Touch ID reason.
+	ctx = provideraction.WithPlanFit(ctx, func(sum string) bool { _, code := providerReason(s, sum); return code == "" })
 	prep, code, detail := g.Provider.PrepareDetail(ctx, req.Action, req.Params)
 	if code != "" {
 		resp := refuse(code)

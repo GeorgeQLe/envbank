@@ -117,11 +117,20 @@ func (p *vercelEnvPush) summary() string {
 	}
 	s := "PUSH vault records to " + p.ref().text() + " as sensitive env vars: " + strings.Join(parts, ", ")
 	for _, env := range p.replacedEnvs() {
-		s += "; REPLACES record " + p.replaced[env] + "'s value in " + env
+		owners := p.replaced[env]
+		if len(owners) == 1 {
+			s += "; REPLACES record " + owners[0] + "'s value in " + env
+		} else {
+			s += "; REPLACES records " + strings.Join(owners, ", ") + "' values in " + env
+		}
+	}
+	if len(p.foreign) > 0 {
+		s += "; REPLACES a value NOT written by this broker in " + strings.Join(p.foreign, ", ")
 	}
 	return s
 }
-func (p *vercelEnvPush) controls() []string { return []string{ControlVercel} }
+func (p *vercelEnvPush) controls() []string     { return []string{ControlVercel} }
+func (p *vercelEnvPush) liveControls() []string { return []string{ControlVercel} }
 func (p *vercelEnvPush) recordNames() []string {
 	seen := map[string]bool{}
 	var recs []string
@@ -134,7 +143,7 @@ func (p *vercelEnvPush) recordNames() []string {
 	return recs
 }
 
-// replacedEnvs are the env names (sorted) whose current owner the push
+// replacedEnvs are the env names (sorted) whose current claimants the push
 // replaces.
 func (p *vercelEnvPush) replacedEnvs() []string {
 	out := make([]string, 0, len(p.replaced))
@@ -156,64 +165,96 @@ func (p *vercelEnvPush) deployed(record string) []Deployed {
 	return out
 }
 
+// pushChecked is what check found: the pushed records' live bindings, the
+// other records claiming each env var (replaced), and the env vars no
+// binding claims (fresh, sorted).
+type pushChecked struct {
+	bound    map[string]bound
+	replaced map[string][]string
+	fresh    []string
+}
+
 // check: every record exists, has a live binding, may be deployed to this
-// project, and has room to record this push in deployed_to, without
-// spreading over more scopes than one rotation can rewrite. An env var
-// another record's binding owns in this scope (envClaims) is replaced only
-// with replace_existing; replaced maps it to that record.
-func (p *vercelEnvPush) check(ctx context.Context, v Vault) (map[string]bound, map[string]string, string) {
+// project, and has room to record this push in deployed_to, and after the
+// push every record can still be rotated (rotatable: no interrupted Neon
+// rotation, branch-scoped previews, at most max_rotation_targets scopes, a
+// rotation approval that fits the prompt). An env var other records'
+// bindings claim in this scope (envClaims, revoked included) is taken over
+// only with replace_existing; replaced maps it to those records.
+func (p *vercelEnvPush) check(ctx context.Context, v Vault) (pushChecked, string) {
+	var c pushChecked
 	if code := mustExist(ctx, v, p.recordNames()...); code != "" {
-		return nil, nil, code
+		return c, code
 	}
 	checked, code := boundForPush(ctx, v, p.ref().dest(), p.recordNames()...)
 	if code != "" {
-		return nil, nil, code
+		return c, code
 	}
+	after := map[string]Binding{}
 	for rec, lb := range checked {
 		b, ok := lb.b.withDeployed(p.deployed(rec)...)
 		if !ok {
-			return nil, nil, CodeBindingLimit
+			return c, CodeBindingLimit
 		}
-		if len(b.deployedScopes()) > maxRotationTargets {
-			return nil, nil, CodeRotationScopeLimit
-		}
+		after[rec] = b
+	}
+	if code := rotatable(ctx, v, after); code != "" {
+		return c, code
 	}
 	claims, code := envClaims(ctx, v)
 	if code != "" {
-		return nil, nil, code
+		return c, code
 	}
-	replaced := map[string]string{}
+	c.bound, c.replaced = checked, map[string][]string{}
 	for _, env := range p.envNames() {
-		owner, ok := claims[Deployed{DeployTarget: p.ref().deployTarget(), Env: env}]
-		if ok && owner != p.Variables[env] {
-			replaced[env] = owner
+		d := Deployed{DeployTarget: p.ref().deployTarget(), Env: env}
+		if others := othersClaiming(claims, d, p.Variables[env]); len(others) > 0 {
+			c.replaced[env] = others
+		}
+		if len(claims[d]) == 0 {
+			c.fresh = append(c.fresh, env)
 		}
 	}
-	if len(replaced) > 0 && !p.ReplaceExisting {
-		return nil, nil, CodeEnvNameTaken
+	if len(c.replaced) > 0 && !p.ReplaceExisting {
+		return c, CodeEnvNameTaken
 	}
-	return checked, replaced, ""
+	return c, ""
 }
 
 // precheck: unbound records (owner-entered secrets) are never pushed.
 func (p *vercelEnvPush) precheck(ctx context.Context, v Vault) string {
-	_, replaced, code := p.check(ctx, v)
-	p.replaced = replaced
+	c, code := p.check(ctx, v)
+	p.replaced, p.fresh = c.replaced, c.fresh
 	return code
 }
+
+// liveCheck: an env var no binding claims must not exist in Vercel yet (the
+// owner, or something else, set it), unless replace_existing, and then the
+// approval names it.
+func (p *vercelEnvPush) liveCheck(ctx context.Context, ps *ports) (string, *Result) {
+	found, code := foreignEnvs(ctx, ps.vercel, p.ref().env(), p.fresh)
+	if code != "" {
+		return code, nil
+	}
+	if len(found) > 0 && !p.ReplaceExisting {
+		return CodeEnvNameTaken, nil
+	}
+	p.foreign = found
+	return "", nil
+}
+
 func (p *vercelEnvPush) execute(r *run) error {
-	var checked map[string]bound
+	var c pushChecked
 	if err := r.step(StepVaultReadRevisions, agentbroker.CodeVaultFailed, func() error {
 		var code string
-		var replaced map[string]string
-		if checked, replaced, code = p.check(r.ctx, r.vault); code != "" {
+		if c, code = p.check(r.ctx, r.vault); code != "" {
 			return fail(code)
 		}
-		if !sameStrings(replaced, p.replaced) {
+		if !sameClaims(c.replaced, p.replaced) || strings.Join(c.fresh, ",") != strings.Join(p.fresh, ",") {
 			return fail(CodeEnvNameTaken) // changed since the owner approved
 		}
 		// Each push reads exactly the bound revision.
-		for rec, lb := range checked {
+		for rec, lb := range c.bound {
 			r.res.record(rec, lb.b.RecordRevision)
 		}
 		return nil
@@ -221,10 +262,13 @@ func (p *vercelEnvPush) execute(r *run) error {
 		return err
 	}
 	// Where each record goes is recorded before it is written, so a later
-	// rotation knows every scope it must rewrite.
+	// rotation knows every scope it must rewrite. (If the push or the
+	// release below fails, an env var may stay claimed by two records:
+	// rotations and env.remove then refuse it until an env.push with
+	// replace_existing takes it over.)
 	if err := r.step(StepBindingDeployed, agentbroker.CodeVaultFailed, func() error {
 		for _, rec := range p.recordNames() {
-			lb := checked[rec]
+			lb := c.bound[rec]
 			b, ok := lb.b.withDeployed(p.deployed(rec)...)
 			if !ok {
 				return fail(CodeBindingLimit)
@@ -240,19 +284,25 @@ func (p *vercelEnvPush) execute(r *run) error {
 	}); err != nil {
 		return err
 	}
-	if err := r.push(p.ref().env(), p.Variables); err != nil {
+	approved := map[string]bool{}
+	for _, env := range p.foreign {
+		approved[env] = true
+	}
+	if err := r.push(p.ref().env(), p.Variables, p.fresh, approved); err != nil {
 		return err
 	}
 	if len(p.replaced) == 0 {
 		return nil
 	}
 	// The replaced records no longer live there: their rotations must not
-	// rewrite (and so clobber) these env vars.
+	// rewrite (and so clobber) these env vars. Every other claimant is
+	// released, so the pushed record is the sole owner again.
 	return r.step(StepBindingRelease, agentbroker.CodeVaultFailed, func() error {
 		drop := map[string][]Deployed{}
 		for _, env := range p.replacedEnvs() {
-			owner := p.replaced[env]
-			drop[owner] = append(drop[owner], Deployed{DeployTarget: p.ref().deployTarget(), Env: env})
+			for _, owner := range p.replaced[env] {
+				drop[owner] = append(drop[owner], Deployed{DeployTarget: p.ref().deployTarget(), Env: env})
+			}
 		}
 		owners := make([]string, 0, len(drop))
 		for owner := range drop {
@@ -267,18 +317,18 @@ func (p *vercelEnvPush) execute(r *run) error {
 			if err := saveBinding(r.ctx, r.vault, b.without(drop[owner]...), objRev); err != nil {
 				return err
 			}
+			r.res.ReplacedRecords = append(r.res.ReplacedRecords, owner)
 		}
-		r.res.ReplacedRecords = owners
 		return nil
 	})
 }
 
-func sameStrings(a, b map[string]string) bool {
+func sameClaims(a, b map[string][]string) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for k, v := range a {
-		if b[k] != v {
+		if strings.Join(b[k], ",") != strings.Join(v, ",") {
 			return false
 		}
 	}
@@ -302,7 +352,9 @@ func (p *vercelEnvRemove) summary() string {
 func (p *vercelEnvRemove) controls() []string { return []string{ControlVercel} }
 
 // check: record has a binding (live, stale or revoked: this broker wrote
-// the value) that lists exactly this env var in this scope.
+// the value) that lists exactly this env var in this scope, and no other
+// record's binding claims it (ENV_NAME_TAKEN: the value there may be the
+// other record's; take it over with env.push replace_existing first).
 func (p *vercelEnvRemove) check(ctx context.Context, v Vault) (bound, string) {
 	b, objRev, err := v.LoadBinding(ctx, p.Record)
 	if errors.Is(err, ErrMissing) {
@@ -311,12 +363,21 @@ func (p *vercelEnvRemove) check(ctx context.Context, v Vault) (bound, string) {
 	if err != nil || b.Record != p.Record || !b.Valid() {
 		return bound{}, agentbroker.CodeVaultFailed
 	}
+	listed := false
 	for _, d := range b.DeployedTo {
-		if d == p.deployed() {
-			return bound{b: b, objRev: objRev}, ""
-		}
+		listed = listed || d == p.deployed()
 	}
-	return bound{}, CodeNotDeployed
+	if !listed {
+		return bound{}, CodeNotDeployed
+	}
+	claims, code := envClaims(ctx, v)
+	if code != "" {
+		return bound{}, code
+	}
+	if len(othersClaiming(claims, p.deployed(), p.Record)) > 0 {
+		return bound{}, CodeEnvNameTaken
+	}
+	return bound{b: b, objRev: objRev}, ""
 }
 func (p *vercelEnvRemove) precheck(ctx context.Context, v Vault) string {
 	_, code := p.check(ctx, v)

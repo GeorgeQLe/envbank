@@ -114,8 +114,8 @@ func budgetSummary(t *testing.T, action string, scopes []provideraction.DeployTa
 		provideraction.ControlNeon:   provideractiontest.Sentinel("napi_"),
 		provideraction.ControlVercel: provideractiontest.Sentinel("vcp_"),
 		provideraction.ControlStripe: provideractiontest.Sentinel("rk_test_"),
-		"DATABASE_URL":               provideractiontest.Sentinel("postgresql://app_a:"),
-		"DATABASE_URL_UNPOOLED":      provideractiontest.Sentinel("postgresql://app_a:"),
+		"DATABASE_URL":               provideractiontest.Sentinel("postgresql://app_a:") + "@ep-x-pooler.neon.tech/neondb",
+		"DATABASE_URL_UNPOOLED":      provideractiontest.Sentinel("postgresql://app_a:") + "@ep-x-pooler.neon.tech/neondb",
 		"STRIPE_WEBHOOK_SECRET":      provideractiontest.Sentinel("whsec_"),
 	})
 	var dests []provideraction.Destination

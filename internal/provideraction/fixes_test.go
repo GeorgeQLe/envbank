@@ -45,17 +45,23 @@ func deployedTo(b pa.Binding) []string {
 }
 
 // M1: a rotation never rewrites an all-branches preview env var, named in
-// its params or recorded in deployed_to. The way out: remove that env var
-// (vercel.env.remove), push per branch, rotate.
+// its params or recorded in deployed_to. Since review 3 the push of a
+// rotatable record to one is refused too. The way out for one recorded
+// earlier: remove that env var (vercel.env.remove), push per branch, rotate.
 func TestRotationRefusesUnscopedPreview(t *testing.T) {
 	e := newEnv(t, nil)
 	mark := len(e.log.Calls())
 	if code := e.prepareCode(t, pa.ActionNeonRotate, neonRotate(t, branchRef(""))); code != pa.CodeRotationUnscopedPreview {
 		t.Fatalf("unscoped preview in params: %q", code)
 	}
-	if st := e.run(t, pa.ActionVercelEnvPush, pushAt(t, branchRef(""), map[string]string{"DATABASE_URL": "DATABASE_URL"}, false)); st.State != pa.StateSucceeded {
-		t.Fatalf("all-branches push %+v", st)
+	if code := e.prepareCode(t, pa.ActionVercelEnvPush, pushAt(t, branchRef(""), map[string]string{"DATABASE_URL": "DATABASE_URL"}, false)); code != pa.CodeRotationUnscopedPreview {
+		t.Fatalf("all-branches push of a rotatable record: %q", code)
 	}
+	e.noCallsSince(t, mark, "refused push")
+	// Recorded before review 3: an all-branches preview in deployed_to.
+	b, _ := e.vault.Binding("DATABASE_URL")
+	b.DeployedTo = append(b.DeployedTo, pa.Deployed{DeployTarget: pa.DeployTarget{TeamID: "team_abc123", ProjectID: "prj_abc123", Target: "preview"}, Env: "DATABASE_URL"})
+	e.vault.Bind(b)
 	mark = len(e.log.Calls())
 	if code := e.prepareCode(t, pa.ActionNeonRotate, neonRotate(t, branchRef("main"))); code != pa.CodeRotationUnscopedPreview {
 		t.Fatalf("unscoped preview in deployed_to: %q", code)

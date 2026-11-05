@@ -497,10 +497,14 @@ type Providers struct {
 	DBOwner       string
 	// Deleted are Stripe endpoints deleted (Webhook answers ErrNotFound).
 	Deleted map[string]bool
+	// Foreign are env keys Vercel holds in every scope that no fake call
+	// wrote (set by the owner by hand).
+	Foreign map[string]bool
 
 	mu        sync.Mutex
 	Creds     [][]byte          // credential slices the factory was given
 	Pushed    map[string]string // env key → value read from the vault
+	envs      map[string]bool   // scoped env keys written (envKey)
 	Issued    []string          // every secret the fakes created
 	Endpoints map[string]provideraction.StripeWebhook
 	// Closed counts port Close calls (each port must be closed once, when
@@ -540,7 +544,7 @@ func (p *Providers) close() error {
 // NewProviders returns a fake factory.
 func NewProviders(log *Log) *Providers {
 	return &Providers{Log: log, Secret: Sentinel("provider_error_"), Pushed: map[string]string{}, Endpoints: map[string]provideraction.StripeWebhook{},
-		ExistingRoles: map[string]bool{}, Deleted: map[string]bool{}}
+		ExistingRoles: map[string]bool{}, Deleted: map[string]bool{}, Foreign: map[string]bool{}, envs: map[string]bool{}}
 }
 
 func (p *Providers) call(ctx context.Context, c string) error {
@@ -717,9 +721,27 @@ func (v vercel) UpsertSensitiveEnv(ctx context.Context, env provideraction.Verce
 	return value.WithSecret(ctx, func(b []byte) error {
 		v.p.mu.Lock()
 		v.p.Pushed[key] = string(b)
+		v.p.envs[envKey(env, key)] = true
 		v.p.mu.Unlock()
 		return nil
 	})
+}
+
+func envKey(env provideraction.VercelEnv, key string) string {
+	return env.TeamID + "/" + env.ProjectID + "/" + env.Target + "/" + env.GitBranch + "/" + key
+}
+
+func (v vercel) EnvPresent(ctx context.Context, env provideraction.VercelEnv, keys []string) (map[string]bool, error) {
+	if err := v.p.call(ctx, "vercel.env_present "+env.Target); err != nil {
+		return nil, err
+	}
+	v.p.mu.Lock()
+	defer v.p.mu.Unlock()
+	out := map[string]bool{}
+	for _, k := range keys {
+		out[k] = v.p.envs[envKey(env, k)] || v.p.Foreign[k]
+	}
+	return out, nil
 }
 
 func (v vercel) DeleteEnv(ctx context.Context, env provideraction.VercelEnv, key string) error {
@@ -728,6 +750,8 @@ func (v vercel) DeleteEnv(ctx context.Context, env provideraction.VercelEnv, key
 	}
 	v.p.mu.Lock()
 	delete(v.p.Pushed, key)
+	delete(v.p.envs, envKey(env, key))
+	delete(v.p.Foreign, key)
 	v.p.mu.Unlock()
 	return nil
 }
@@ -786,11 +810,14 @@ func (v vercel) CheckHealth(ctx context.Context, _, path string) error {
 	return v.p.call(ctx, "vercel.health "+path)
 }
 
+// DefaultStripeAPIVersion is the fake account's default webhook API version.
+const DefaultStripeAPIVersion = "2025-03-31.basil"
+
 type stripe struct{ p *Providers }
 
 func (s stripe) Close() error { return s.p.close() }
 
-func (s stripe) CreateWebhook(ctx context.Context, url string, events []string, secret *lifecycle.SecretSink) (string, error) {
+func (s stripe) CreateWebhook(ctx context.Context, url string, events []string, apiVersion string, secret *lifecycle.SecretSink) (string, error) {
 	if err := s.p.call(ctx, "stripe.create"); err != nil {
 		return "", err
 	}
@@ -799,7 +826,10 @@ func (s stripe) CreateWebhook(ctx context.Context, url string, events []string, 
 		return id, err
 	}
 	s.p.mu.Lock()
-	s.p.Endpoints[id] = provideraction.StripeWebhook{URL: url, Events: append([]string(nil), events...)}
+	if apiVersion == "" {
+		apiVersion = DefaultStripeAPIVersion
+	}
+	s.p.Endpoints[id] = provideraction.StripeWebhook{URL: url, Events: append([]string(nil), events...), Status: "enabled", APIVersion: apiVersion}
 	s.p.mu.Unlock()
 	return id, nil
 }
@@ -816,7 +846,8 @@ func (s stripe) Webhook(ctx context.Context, id string) (provideraction.StripeWe
 	if w, ok := s.p.Endpoints[id]; ok {
 		return w, nil
 	}
-	return provideraction.StripeWebhook{URL: "https://shop.example.com/api/stripe/webhook", Events: []string{"checkout.session.completed", "invoice.paid"}}, nil
+	return provideraction.StripeWebhook{URL: "https://shop.example.com/api/stripe/webhook", Events: []string{"checkout.session.completed", "invoice.paid"},
+		Status: "enabled", APIVersion: DefaultStripeAPIVersion}, nil
 }
 
 func (s stripe) DeleteWebhook(ctx context.Context, id string) error {

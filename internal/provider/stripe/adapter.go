@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -131,6 +132,10 @@ func (adapter *Adapter) Identify(ctx context.Context) (provider.Identity, error)
 	return provider.Identity{Provider: "stripe", ID: string(id)}, nil
 }
 
+// apiVersionPattern is a Stripe API version: a date, optionally with a
+// release name (2025-03-31.basil).
+var apiVersionPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:\.[a-z]{1,32})?$`)
+
 func (adapter *Adapter) Create(ctx context.Context, request lifecycle.CredentialRequest, sink *lifecycle.SecretSink) (lifecycle.CredentialEvidence, error) {
 	if request.CredentialType != "webhook-signing-secret" || request.ProviderIdentity == "" || request.DestinationRecord == "" || sink == nil || len(request.IdempotencyKey) == 0 || len(request.IdempotencyKey) > 255 || strings.IndexFunc(request.IdempotencyKey, func(character rune) bool { return character <= ' ' || character == 0x7f }) >= 0 {
 		return lifecycle.CredentialEvidence{}, provider.NewError("create", 0, "INVALID_REQUEST", provider.RetryNever)
@@ -151,6 +156,12 @@ func (adapter *Adapter) Create(ctx context.Context, request lifecycle.Credential
 			return lifecycle.CredentialEvidence{}, provider.NewError("create", 0, "INVALID_CONFIGURATION", provider.RetryNever)
 		}
 		values.Add("enabled_events[]", event)
+	}
+	if versions, ok := request.Parameters["api_version"]; ok {
+		if len(versions) != 1 || !apiVersionPattern.MatchString(versions[0]) {
+			return lifecycle.CredentialEvidence{}, provider.NewError("create", 0, "INVALID_CONFIGURATION", provider.RetryNever)
+		}
+		values.Set("api_version", versions[0])
 	}
 	body, status, err := adapter.request(ctx, http.MethodPost, "/v1/webhook_endpoints", strings.NewReader(values.Encode()), request.IdempotencyKey)
 	if err != nil {

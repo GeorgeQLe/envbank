@@ -15,7 +15,7 @@ import (
 
 func pushReq(project string, vars map[string]string) map[string]any {
 	return map[string]any{"op": "provider_action", "action": "vercel.env.push", "params": map[string]any{
-		"team_id": "team_abc123", "project_id": project, "target": "preview", "variables": vars}}
+		"team_id": "team_abc123", "project_id": project, "target": "preview", "git_branch": "main", "variables": vars}}
 }
 
 func allowReq(project string, records ...string) map[string]any {
@@ -109,8 +109,8 @@ func TestBindingsAreNotReachableByAgentOps(t *testing.T) {
 	log := &provideractiontest.Log{}
 	shared := provideractiontest.NewVault(log, map[string]string{
 		provideraction.ControlVercel: provideractiontest.Sentinel("vcp_"),
-		"DATABASE_URL":               provideractiontest.Sentinel("postgresql://app_a:"),
-		"DATABASE_URL_UNPOOLED":      provideractiontest.Sentinel("postgresql://app_a:"),
+		"DATABASE_URL":               provideractiontest.Sentinel("postgresql://app_a:") + "@ep-x-pooler.neon.tech/neondb",
+		"DATABASE_URL_UNPOOLED":      provideractiontest.Sentinel("postgresql://app_a:") + "@ep-x-pooler.neon.tech/neondb",
 	})
 	bindNeonRecords(shared)
 	o := &owner{outcome: approval.Approved, secret: []byte(sentinel(t))}

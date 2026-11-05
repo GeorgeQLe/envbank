@@ -153,7 +153,7 @@ func TestNeonActiveRoleIsDerived(t *testing.T) {
 	if code := e.prepareCode(t, pa.ActionNeonRotate, withRoles("app_a", "app_b")); code != "" {
 		t.Fatalf("matching order: %q", code)
 	}
-	if len(e.log.Calls()) != 1 { // the owner precheck of the accepted one only
+	if len(e.log.Calls()) != 2 { // the owner and fresh-name live checks of the accepted one only
 		t.Fatalf("calls %v", e.log.Calls())
 	}
 	// Inconsistent or missing role state: refused.

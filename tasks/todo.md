@@ -13,18 +13,18 @@ Owner decisions:
   - L4: a deployed *previous* Stripe secret does not block a delete.
   - L5: the production source is checked at execute, not before the prompt.
 - [x] Third independent review of d9c1395 (2026-11-05): no Critical or High findings; go test and go vet are clean.
-- [ ] Fix review 3:
-  - M1: an env var can keep two owners after a failed `vercel.env_push` (StepBindingDeployed runs first) or a failed `vault.release_env_owner`. `envClaims` (rotation.go) takes the last claim it sees. Fix: return every claimant and refuse when there is more than one; release drops the entry from every other binding. Add tests for both failure paths.
-  - M2: `vercel.env.remove` accepts revoked bindings, but `envClaims` skips them, so a stale revoked claim can delete another record's live value. Fix: count revoked claims (a push takes them over), and allow remove only for the sole claimant.
-  - M3: a push silently overwrites a Vercel env var that no binding claims (for example one the owner set by hand). Fix: list names in `liveCheck` and refuse it, or add "REPLACES an existing value not written by this broker".
-  - L-a: a Neon retry after a partial binding-follow can reset a role a deployment already uses. Fix: refuse the push or retry while a sibling binding is pending.
-  - L-b: the pending-role revision check accepts an owner edit at R+1. Fix: check the URI user and host in the read callback, or store a digest.
-  - L-c: a push can create records whose rotation is always PLAN_TOO_LONG or ROTATION_UNSCOPED_PREVIEW. Fix: check the rotation-plan fit at push time.
-  - L-d: TOCTOU between project or endpoint delete and env.push. Fix: env.push and env.remove also lock each record's provider resource.
-  - L-e: Stripe drift ignores `status` and `api_version`. Fix: record `api_version` and pass it on create; refuse a disabled endpoint.
-  - Missing tests: Stripe `previous_record` RECORD_CHANGED, `replaced_records` after a partial release, end-to-end env.remove against an ambiguous or plain entry.
-  - Live check: the Touch ID prompt shows a 600-byte reason in full. If not, move REPLACES and INVALIDATE text earlier.
-- [ ] Chromux mirror of the d9c1395 wire changes (XPC depth fix done in Chromux 0855ac5; see Chromux `tasks/todo.md`).
+- [x] Fix review 3 (5 November 2026; see `docs/provider-actions.md`, tests in `internal/provideraction/review3_test.go`):
+  - M1: `envClaims` returns every claimant (sorted); rotations and env.remove refuse an env var with more than one claimant (`ENV_NAME_TAKEN`); a `replace_existing` push releases every other claimant. Tested: failed push, failed release, partial release.
+  - M2: revoked claims count; env.remove only by the sole claimant.
+  - M3: names-only `VercelPort.EnvPresent` (adapter `Present`) before the prompt and again before the write; an unclaimed value is `ENV_NAME_TAKEN` unless `replace_existing`, text `REPLACES a value NOT written by this broker in ENV`. Rotations check names they newly write the same way. An all-branches preview entry does not count for a branch scope (Vercel keeps it and prefers the branch entry).
+  - L-a: a push is refused `ROTATION_INCOMPLETE` (new code) while any Neon group member is pending. The retry itself stays allowed (the only way out).
+  - L-b: `pending_host` (SHA-256 of the URI host) stored at `vault.mark_pending`; R+1 is accepted only if its user is the pending role and its host matches.
+  - L-c: push refuses `ROTATION_UNSCOPED_PREVIEW`, `ROTATION_SCOPE_LIMIT` and `PLAN_TOO_LONG` (shortest rotation summary through `provideraction.WithPlanFit`, wired in authz).
+  - L-d: env.push and env.remove lock each record's Neon project or Stripe endpoint and lineage.
+  - L-e: Stripe drift covers `status` (must be enabled) and the recorded `api_version`; the copy is created with the live version, recorded in provenance (create records the default it got).
+  - Missing tests added: Stripe `previous_record` RECORD_CHANGED and RECORD_NOT_BOUND, `replaced_records` after a partial release, live env.remove of a plain or ambiguous entry, live hand-set env var refusal.
+- [ ] Live check: the Touch ID prompt shows a 600-byte reason in full. If not, move REPLACES and INVALIDATE text earlier.
+- [ ] Chromux mirror of the d9c1395 and review-3 wire changes (XPC depth fix done in Chromux 0855ac5; see Chromux `tasks/todo.md`). Review 3 adds: new code `ROTATION_INCOMPLETE`; `ENV_NAME_TAKEN` now also from env.remove (another claimant) and the unclaimed-value check (push and rotations); push refusals `ROTATION_UNSCOPED_PREVIEW` and `PLAN_TOO_LONG`; push approval text `REPLACES records A, B' values in ENV` and `REPLACES a value NOT written by this broker in ENV`; `replaced_records` can be partial on a failed push.
 - [ ] Build and sign both apps with Developer ID (Team NC56VXK48K). Back up the installed builds to Artifacts/ first. Keychain prompts: Allow, never Always Allow. Then reinstall envbank and Chromux v2 Rebuild.app, and the owner reconnects.
 - [ ] Live Touch ID e2e with synthetic values and a throwaway vault (handoff checks a–h).
 - [ ] Owner seeds `CONTROL_VERCEL_TOKEN`, `CONTROL_NEON_API_KEY` and `CONTROL_STRIPE_KEY` (test mode) through Chromux secure entry.

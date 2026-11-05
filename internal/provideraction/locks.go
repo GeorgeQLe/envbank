@@ -73,25 +73,48 @@ func (p *vercelProjectDelete) resources(context.Context, Vault) []string {
 	return []string{lockVercel(p.TeamID, p.ProjectID)}
 }
 
-// env.push also locks every record it pushes, and every record whose env
-// var it may replace (their bindings change), so no rotation of them runs
-// meanwhile.
+// providerKeys locks the provider resource record's binding names (any
+// binding, revoked included), so a project or endpoint delete cannot run
+// between a push's or remove's checks and its write. Read-only; a vault
+// failure locks nothing extra (the action's own checks then refuse).
+func providerKeys(ctx context.Context, v Vault, record string) []string {
+	b, _, err := v.LoadBinding(ctx, record)
+	if err != nil {
+		return nil
+	}
+	switch b.Provider {
+	case ProviderNeon:
+		if b.Resource.ProjectID != "" {
+			return []string{lockNeon(b.Resource.ProjectID)}
+		}
+	case ProviderStripe:
+		if b.Resource.EndpointID != "" {
+			return stripeKeys(ctx, v, b.Resource.EndpointID)
+		}
+	}
+	return nil
+}
+
+// env.push also locks every record it pushes and its provider resource,
+// and every record claiming an env var it may replace (their bindings
+// change), so no rotation or delete of them runs meanwhile.
 func (p *vercelEnvPush) resources(ctx context.Context, v Vault) []string {
 	keys := []string{lockVercel(p.TeamID, p.ProjectID)}
 	for _, rec := range p.recordNames() {
 		keys = append(keys, lockRecord(rec))
+		keys = append(keys, providerKeys(ctx, v, rec)...)
 	}
 	if claims, code := envClaims(ctx, v); code == "" {
 		for _, env := range p.envNames() {
-			if owner, ok := claims[Deployed{DeployTarget: p.ref().deployTarget(), Env: env}]; ok {
+			for _, owner := range claims[Deployed{DeployTarget: p.ref().deployTarget(), Env: env}] {
 				keys = append(keys, lockRecord(owner))
 			}
 		}
 	}
 	return keys
 }
-func (p *vercelEnvRemove) resources(context.Context, Vault) []string {
-	return []string{lockVercel(p.TeamID, p.ProjectID), lockRecord(p.Record)}
+func (p *vercelEnvRemove) resources(ctx context.Context, v Vault) []string {
+	return append([]string{lockVercel(p.TeamID, p.ProjectID), lockRecord(p.Record)}, providerKeys(ctx, v, p.Record)...)
 }
 func (p *vercelRedeploy) resources(context.Context, Vault) []string {
 	return []string{lockVercel(p.TeamID, p.ProjectID)}

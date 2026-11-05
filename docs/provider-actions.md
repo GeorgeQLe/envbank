@@ -80,11 +80,11 @@ exact plan. There is no "always" for provider actions.
 | `neon.rotate` | `project_id`, `branch_id`, `roles?:[A, B]` (optional; derived from the binding, and a mismatch is refused), `owner_role`, `database`, `records:{pooled, direct}`, `vercel:[{team_id, project_id, target, production?, git_branch?, deployment?}, …]` (1 to 3 scopes, at most one production; a preview scope must name `git_branch`), `health_path` | Check the roles are prepared (`NEON_ROLES_NOT_PREPARED`) and the owner (`NEON_OWNER_ROLE_MISMATCH`), then zero-downtime rotation: reset the inactive role's password, store its URIs, push them to every scope (production last), redeploy and check each, then reset the previously active role (invalidating its old password). The production scope runs a [production release](#production-releases) | active role, `invalidated_role`, record revisions, `redeployed`, `resumed` (production: release fields) |
 | `vercel.project.create` | `team_id`, `name`, `git_repo?` (`owner/repo`), `framework?` | Create a project and record its provenance (allows no record) | `team_id`, `project_id` |
 | `vercel.project.delete` | `team_id`, `project_id` | Delete a project this broker created (`NOT_CREATED_BY_BROKER` otherwise; the text names it), then drop its `deployed_to` entries | `deleted`, `forgotten_deployments` |
-| `vercel.env.push` | `team_id`, `project_id`, `target` (`preview`\|`production`), `git_branch?`, `variables:{ENV_NAME: record}`, `replace_existing?` | Record the scope in each binding's `deployed_to`, then upsert each variable as a `sensitive` env var; every record must be bound and allowed to the project. An env var another record's binding owns in that scope is `ENV_NAME_TAKEN` unless `replace_existing: true`; the text then says `REPLACES record B's value in ENV`, and after the push that record's entry is dropped (`vault.release_env_owner`). A record may spread over at most 3 distinct scopes (`ROTATION_SCOPE_LIMIT`), what one rotation can rewrite | names and states, `replaced_records?` |
-| `vercel.env.remove` | `record`, `env`, `team_id`, `project_id`, `target`, `production?`, `git_branch?` | Delete env var `env` from exactly that scope and drop that `deployed_to` entry of `record`'s binding (`vault.forget_deployments`). Only for an entry this broker recorded (`RECORD_NOT_BOUND` without a binding, `NOT_DEPLOYED` without the entry; a revoked or stale binding is accepted, so cleanup works after a delete or an owner edit). Text: `REMOVE env var ENV (record REC's value) from Vercel prj_… (team_…) [PRODUCTION]; deployments built with it keep it until redeployed; the record stays in the vault`. Reads no value | `variables:{ENV: "removed"}`, `forgotten_deployments` |
+| `vercel.env.push` | `team_id`, `project_id`, `target` (`preview`\|`production`), `git_branch?`, `variables:{ENV_NAME: record}`, `replace_existing?` | Record the scope in each binding's `deployed_to`, then upsert each variable as a `sensitive` env var; every record must be bound and allowed to the project. An env var another record's binding claims in that scope (a revoked binding's claim counts), or one Vercel already holds that no binding claims (set by hand; a names-only read before the prompt and again just before the write), is `ENV_NAME_TAKEN` unless `replace_existing: true`; the text then says `REPLACES record B's value in ENV` (`REPLACES records B, C' values in ENV` when several claim it) or `REPLACES a value NOT written by this broker in ENV`, and after the push every other claimant's entry is dropped (`vault.release_env_owner`). The claims and unclaimed names are re-checked after approval (`ENV_NAME_TAKEN` if they changed). A push is refused if a later rotation of its records could not run: more than 3 distinct scopes (`ROTATION_SCOPE_LIMIT`), an all-branches preview (`ROTATION_UNSCOPED_PREVIEW`), a Neon sibling mid-rotation (`ROTATION_INCOMPLETE`), or a shortest possible rotation plan that would not fit the prompt (`PLAN_TOO_LONG`) | names and states, `replaced_records?` (the records actually released, also on a failed release) |
+| `vercel.env.remove` | `record`, `env`, `team_id`, `project_id`, `target`, `production?`, `git_branch?` | Delete env var `env` from exactly that scope and drop that `deployed_to` entry of `record`'s binding (`vault.forget_deployments`). Only for an entry this broker recorded (`RECORD_NOT_BOUND` without a binding, `NOT_DEPLOYED` without the entry; a revoked or stale binding is accepted, so cleanup works after a delete or an owner edit), and only by its sole claimant (`ENV_NAME_TAKEN` while another record, revoked or not, also claims it: an `env.push` with `replace_existing` resolves that). A plain or ambiguous Vercel entry under the name is not deleted (the step fails, the claim stays). Text: `REMOVE env var ENV (record REC's value) from Vercel prj_… (team_…) [PRODUCTION]; deployments built with it keep it until redeployed; the record stays in the vault`. Reads no value | `variables:{ENV: "removed"}`, `forgotten_deployments` |
 | `vercel.redeploy` | `team_id`, `project_id`, `target`, `git_branch?` (preview only), `deployment?` (source ID; default current, of that branch if named), `health_path?` | Redeploy, wait until ready, check health (at least 3 checks over at least 30 s, as in `lifecycle.HealthEvidence`). Production: a [production release](#production-releases); an explicit `deployment` must be the one serving production now (`PRODUCTION_SOURCE_NOT_CURRENT`, checked after approval before any change; the text says `(must be dpl_…)`) | `deployment_id`, health (production: release fields) |
-| `stripe.webhook.create` | `url` (HTTPS), `events:[...]`, `record` | Create an endpoint, record its provenance (`provider-stripe-endpoint`) and store `whsec_…` in the record, bound to the endpoint with no destination | `endpoint_id`, record revision |
-| `stripe.webhook.rotate` | `endpoint_id`, `record`, `previous_record`, `vercel:[…]` (as for `neon.rotate`), `health_path` | Create a new endpoint with the URL and events recorded in the endpoint's provenance; the live endpoint must still match them (`STRIPE_ENDPOINT_DRIFT` before the prompt and again after approval; a missing endpoint or provenance without events is drift). Move the current secret to `previous_record`, store the new one in `record`, push both to every scope, redeploy and check each, then delete the old endpoint. Refused (`STRIPE_ORPHAN_ENDPOINT`) while `previous_record` holds the secret of another endpoint that still exists. The production scope runs a [production release](#production-releases) | new `endpoint_id`, revisions, `redeployed` (production: release fields) |
+| `stripe.webhook.create` | `url` (HTTPS), `events:[...]`, `record` | Create an endpoint (the account's default API version), record its provenance (`provider-stripe-endpoint`, with the `api_version` read back, best effort) and store `whsec_…` in the record, bound to the endpoint with no destination | `endpoint_id`, record revision |
+| `stripe.webhook.rotate` | `endpoint_id`, `record`, `previous_record`, `vercel:[…]` (as for `neon.rotate`), `health_path` | Create a new endpoint with the URL and events recorded in the endpoint's provenance; the live endpoint must still match them, be `enabled`, and have the recorded `api_version` if one was recorded (`STRIPE_ENDPOINT_DRIFT` before the prompt and again after approval; a missing endpoint, provenance without events, or a version changed after approval is drift). The copy is created with the live endpoint's `api_version`, which its provenance records. Move the current secret to `previous_record`, store the new one in `record`, push both to every scope, redeploy and check each, then delete the old endpoint. Refused (`STRIPE_ORPHAN_ENDPOINT`) while `previous_record` holds the secret of another endpoint that still exists. The production scope runs a [production release](#production-releases) | new `endpoint_id`, revisions, `redeployed` (production: release fields) |
 | `stripe.webhook.delete` | `endpoint_id` | Delete an endpoint this broker created (`NOT_CREATED_BY_BROKER` otherwise; the text gives its URL and says `created by this broker`) and revoke its bindings (its whole lineage, if it is the current endpoint). Refused (`RESOURCE_STILL_DEPLOYED`) while a live `stripe.webhook_secret` binding of this endpoint lists a `deployed_to` entry. A previous secret still deployed does not block it (the orphan cleanup below deletes such endpoints) | `deleted`, `revoked_bindings` |
 | `binding.allow` | `records:[record...]` (1 to 16), `team_id`, `project_id` | Allow bound records to be deployed to a Vercel project (every target). The only way a destination is added | `team_id`, `project_id`, `records:{name: revision}` |
 
@@ -137,13 +137,17 @@ Role escalation guards (all read-only, before the prompt):
   pooled and direct bindings. A binding written before these fields existed
   has no roles and is refused the same way.
 - **Retry.** Before the reset, the bindings record `pending_role: next`
+  and `pending_host`, the SHA-256 of the current URI's host
   (`vault.mark_pending`). If the operation stops between the reset and the
   binding save (provider failure, vault failure, broker restart), the next
   `neon.rotate` sees the pending role and resets the same role again
   instead of refusing a mismatch: the old role is still the one in use. A
   pending binding is accepted with its record at the bound revision or one
-  ahead (the pooled URI stored, the direct one not). The binding save clears
-  `pending_role`.
+  ahead (the pooled URI stored, the direct one not). The vault keeps no
+  history, so one ahead must be the rotation's own store: its URI's user is
+  the pending role and its host hashes to `pending_host`; anything else (an
+  owner edit) fails `RECORD_NOT_BOUND` at `vault.mark_pending`, before any
+  reset. The binding save clears both fields.
 - **Resume.** The bindings switch to `active_role: next`, `retiring_role:
   old` as soon as the new URIs are stored. If the operation stops before
   the old role is invalidated, the next `neon.rotate` resumes it instead of
@@ -167,7 +171,9 @@ any record it named.
   an encrypted vault object (kind `provider-binding`, keyed by record name;
   not a record, so `names`, `run` and `request` never reach it): `{v,
   record, provider, kind, resource, record_revision, allowed_destinations,
-  deployed_to?, roles?, active_role?, retiring_role?, pending_role?, revoked}`. The schema
+  deployed_to?, roles?, active_role?, retiring_role?, pending_role?,
+  pending_host?, revoked}` (`pending_host` set exactly when `pending_role`
+  is; Neon only). The schema
   stays `v: 1`; the new fields are optional. Kinds: `neon.pooled`, `neon.direct` (resource `project_id`,
   `branch_id`), `stripe.webhook_secret`, `stripe.webhook_secret_previous`
   (resource `endpoint_id`, `lineage` = the first endpoint of the rotation
@@ -195,12 +201,24 @@ any record it named.
   under-approximate. Every entry must be an allowed destination.
   `vercel.project.delete` drops that project's entries and
   `vercel.env.remove` one entry (`vault.forget_deployments`).
-- **One owner per env var.** One `(scope, env name)` is listed by at most
-  one non-revoked binding: the record whose value the broker last wrote
+- **One owner per env var.** One `(scope, env name)` should be listed by
+  one binding, revoked or not: the record whose value the broker last wrote
   there. A push over another record's env var needs `replace_existing`
-  (`ENV_NAME_TAKEN` otherwise) and drops that record's entry after the
-  write, so the replaced record's rotation never rewrites it; a rotation
-  that would write there is refused `ENV_NAME_TAKEN`.
+  (`ENV_NAME_TAKEN` otherwise) and drops every other claimant's entry after
+  the write, so a replaced record's rotation never rewrites it. Because the
+  entry is recorded before the write and released after it, a failed push
+  or release can leave two claimants; then rotations and `vercel.env.remove`
+  of that env var are refused `ENV_NAME_TAKEN` until an `env.push` with
+  `replace_existing` takes it over. A rotation that would write there is
+  refused `ENV_NAME_TAKEN`.
+- **Unclaimed env vars.** An env var Vercel holds in a scope that no
+  binding claims was set by someone else. A push or rotation that would
+  newly write that name checks presence (names only, never values) before
+  the prompt and again just before the write; a push needs
+  `replace_existing` and says `REPLACES a value NOT written by this broker
+  in ENV`, a rotation is refused `ENV_NAME_TAKEN`. An all-branches preview
+  entry does not count for a branch scope: Vercel keeps it and prefers the
+  branch entry.
 - **Rotation scope.** A rotation invalidates the old credential at the end,
   so it must first rewrite every scope that uses it. Its `vercel` list must
   cover every `deployed_to` entry of the records it rotates
@@ -213,7 +231,8 @@ any record it named.
   all-branches env var) is used by every preview deployment, but a
   rotation redeploys and checks only one, so invalidating the old
   credential would break the others. A rotation naming one, or of a record
-  whose `deployed_to` lists one, is refused `ROTATION_UNSCOPED_PREVIEW`.
+  whose `deployed_to` lists one, is refused `ROTATION_UNSCOPED_PREVIEW`,
+  and so is a push of a rotatable record to one.
   Workaround: `vercel.env.remove` the all-branches entry, `vercel.env.push`
   to each branch that needs it, then rotate with those branch scopes.
 - **Provenance.** `vercel.project.create`, `neon.project.create` and
@@ -389,18 +408,23 @@ details or deviates from the above:
   `RECORD_EXISTS`, `UNKNOWN_SECRET`, `RECORD_NOT_BOUND`,
   `DESTINATION_NOT_ALLOWED`, `BINDING_MISMATCH`, `BINDING_LIMIT`,
   `ROTATION_SCOPE_INCOMPLETE`, `ROTATION_SCOPE_LIMIT`,
-  `ROTATION_UNSCOPED_PREVIEW`, `ENV_NAME_TAKEN`, `NOT_DEPLOYED`,
+  `ROTATION_UNSCOPED_PREVIEW`, `ROTATION_INCOMPLETE`, `ENV_NAME_TAKEN`,
+  `NOT_DEPLOYED`,
   `RESOURCE_STILL_DEPLOYED`, `NEON_ACTIVE_ROLE_MISMATCH`,
   `NEON_OWNER_ROLE_MISMATCH`, `NOT_CREATED_BY_BROKER`), then a run slot
   (`BROKER_BUSY`), then live prechecks, and only then Touch ID. The
   resource lock (`RESOURCE_BUSY`) is taken just before the vault prechecks.
   A plan whose text does not fit the prompt with the label's minimum room
-  is refused (`PLAN_TOO_LONG`), never clipped.
+  is refused (`PLAN_TOO_LONG`), never clipped. A push also checks, through
+  `provideraction.WithPlanFit` (set by authz for that session), that the
+  shortest rotation of its records (health path `/`) would fit.
 - **Live prechecks.** `neon.roles.prepare` (owner, existing roles:
   `NEON_OWNER_ROLE_MISMATCH`, `NEON_ROLE_EXISTS`), `neon.rotate` (owner) and
   `stripe.webhook.rotate` (endpoint drift: `STRIPE_ENDPOINT_DRIFT`, then
   orphan endpoint: `STRIPE_ORPHAN_ENDPOINT`) read
-  the provider before the prompt. They open the ports with the control
+  the provider before the prompt; `vercel.env.push` and both rotations
+  check that env names they newly write are unset in Vercel
+  (`VercelPort.EnvPresent`; `ENV_NAME_TAKEN`). They open the ports with the control
   credentials but without operation authority, so every mutation is
   refused; they are bounded to 30 s, and the ports are closed and the
   credentials wiped before the prompt. A provider failure there is
@@ -472,7 +496,9 @@ details or deviates from the above:
   changes: the Neon project, the Vercel project (push, redeploy, delete,
   rotations), the Stripe lineage and endpoint, and every record it writes or
   re-binds (a push: each record it pushes and each record whose env var it
-  replaces; an env remove: its record). A second action needing any of them
+  replaces; an env remove: its record). A push and an env remove also lock
+  each record's provider resource (its Neon project, or its Stripe endpoint
+  and lineage), so neither interleaves with that resource's delete. A second action needing any of them
   is refused `RESOURCE_BUSY`
   before its prompt, while the first is waiting for approval or running. The
   lock ends with the operation (or a declined prompt).
@@ -493,7 +519,10 @@ details or deviates from the above:
   the Vercel workflow does with its policy check; the Neon and Stripe ports
   check it before each mutation.
 - **Vercel mapping.** Env pushes use the adapter's exact-scope sensitive
-  `Write` (value read only inside `SecretSource.WithSecret`). "Current
+  `Write` (value read only inside `SecretSource.WithSecret`). `EnvPresent`
+  uses the adapter's `Present`: a names-only listing (`decrypt=false`)
+  where any entry in or overlapping the exact scope, including plain and
+  ambiguous ones, counts as present. "Current
   deployment" is the production alias target for production, and the newest
   READY preview deployment of the project for preview, filtered to
   `git_branch` when the scope names one; the port also checks each
@@ -516,8 +545,10 @@ details or deviates from the above:
   `HEALTH_PROTECTED` and is never bypassed: disable protection on the
   throwaway project, or use a path it serves unprotected.
 - **Stripe mapping.** Webhook create uses the adapter's `Create` with
-  `url`/`enabled_events` and a random idempotency key; the endpoint is read
-  back with `Endpoint` (ID, URL, events only; a 404 is "not found") and
+  `url`/`enabled_events`, an optional validated `api_version` and a random
+  idempotency key; the endpoint is read back with `Endpoint` (ID, URL,
+  events, `status` (`enabled`/`disabled`) and `api_version` (null is the
+  account default); a 404 is "not found") and
   deleted with `Revoke`. Live-mode keys are refused by the service, the
   factory and the adapter. `stripe.New` accepts only
   `https://api.stripe.com` or an `http(s)` literal loopback IP (tests); any

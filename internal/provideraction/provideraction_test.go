@@ -41,7 +41,7 @@ func newEnv(t *testing.T, values map[string]string, opts ...func(*pa.Options)) *
 	// The Neon rotation records exist, created by the broker (bound to the
 	// project) and allowed to the default Vercel destination.
 	for _, rec := range []string{"DATABASE_URL", "DATABASE_URL_UNPOOLED"} {
-		all[rec] = provideractiontest.Sentinel("postgresql://app_a:")
+		all[rec] = provideractiontest.Sentinel("postgresql://app_a:") + "@ep-x-pooler.neon.tech/neondb"
 		e.controls = append(e.controls, all[rec])
 	}
 	for k, v := range values {
@@ -294,12 +294,14 @@ func TestNeonRotateHappyPathOrder(t *testing.T) {
 		t.Fatalf("status %+v", st)
 	}
 	want := []string{
-		"neon.database_owner appdb", // before the prompt: owner_role is the database owner
-		"neon.database_owner appdb", // again when running
+		"neon.database_owner appdb",  // before the prompt: owner_role is the database owner
+		"vercel.env_present preview", // before the prompt: the names it newly writes are unset
+		"neon.database_owner appdb",  // again when running
 		"neon.roles_ready neondb_owner app_a,app_b",
 		"neon.reset app_b",
 		"vault.store DATABASE_URL",
 		"vault.store DATABASE_URL_UNPOOLED",
+		"vercel.env_present preview", // again just before the write
 		"vercel.upsert DATABASE_URL preview",
 		"vercel.upsert DATABASE_URL_UNPOOLED preview",
 		"vercel.current branch=main",
@@ -383,7 +385,7 @@ func TestNeonRotateFailureAtEachStepKeepsOldRole(t *testing.T) {
 		if st.State != pa.StateFailed || st.Step != pa.StepNeonCheckRoles || st.Code != pa.CodeRolesNotPrepared {
 			t.Fatalf("status %+v", st)
 		}
-		if got := e.log.Calls(); strings.Join(got, ",") != "neon.database_owner appdb,neon.database_owner appdb,neon.roles_ready neondb_owner app_a,app_b" {
+		if got := e.log.Calls(); strings.Join(got, ",") != "neon.database_owner appdb,vercel.env_present preview,neon.database_owner appdb,neon.roles_ready neondb_owner app_a,app_b" {
 			t.Fatalf("side effects with unprepared roles: %v", got)
 		}
 	})
@@ -395,7 +397,7 @@ func TestNeonRotateFailureAtEachStepKeepsOldRole(t *testing.T) {
 			t.Fatalf("status %+v", st)
 		}
 		for _, c := range e.log.Calls() {
-			if strings.HasPrefix(c, "vercel.") || strings.HasPrefix(c, "neon.invalidate") {
+			if (strings.HasPrefix(c, "vercel.") && !strings.HasPrefix(c, "vercel.env_present ")) || strings.HasPrefix(c, "neon.invalidate") {
 				t.Fatalf("destination written or old role invalidated before the value was stored: %v", e.log.Calls())
 			}
 		}
@@ -419,11 +421,13 @@ func TestStripeWebhookRotateOrder(t *testing.T) {
 		t.Fatalf("status %+v", st)
 	}
 	want := []string{
-		"stripe.webhook we_old1", // before the prompt: no drift from the provenance
-		"stripe.webhook we_old1", // again when running
+		"stripe.webhook we_old1",     // before the prompt: no drift from the provenance
+		"vercel.env_present preview", // before the prompt: the names it newly writes are unset
+		"stripe.webhook we_old1",     // again when running
 		"vault.store STRIPE_WEBHOOK_SECRET_PREVIOUS",
 		"stripe.create",
 		"vault.store STRIPE_WEBHOOK_SECRET",
+		"vercel.env_present preview", // again just before the write
 		"vercel.upsert STRIPE_WEBHOOK_SECRET preview",
 		"vercel.upsert STRIPE_WEBHOOK_SECRET_PREVIOUS preview",
 		"vercel.current branch=main",
@@ -552,7 +556,7 @@ func TestOtherActionsAndPrechecks(t *testing.T) {
 	}
 	e.noLeak(t, "stripe create", st)
 	ctx := context.Background()
-	push := js(t, map[string]any{"team_id": "team_a", "project_id": "prj_a", "target": "preview", "variables": map[string]string{"APP_KEY": "NEW_POOLED"}})
+	push := js(t, map[string]any{"team_id": "team_a", "project_id": "prj_a", "target": "preview", "git_branch": "main", "variables": map[string]string{"APP_KEY": "NEW_POOLED"}})
 	if _, code := e.svc.Prepare(ctx, pa.ActionVercelEnvPush, push); code != pa.CodeDestinationNotAllowed {
 		t.Fatalf("push before binding.allow: %q", code)
 	}

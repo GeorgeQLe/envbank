@@ -163,13 +163,13 @@ func TestPortsClosedWhenOperationEnds(t *testing.T) {
 	if st := e.run(t, pa.ActionNeonRotate, rotateParams(t)); st.State != pa.StateSucceeded {
 		t.Fatalf("status %+v", st)
 	}
-	if n := e.fake.Closes(); n != 3 {
-		t.Fatalf("closed %d ports, want 3 (the precheck's Neon port, then Neon and Vercel)", n)
+	if n := e.fake.Closes(); n != 4 {
+		t.Fatalf("closed %d ports, want 4 (the live check's Neon and Vercel ports, then the run's)", n)
 	}
 	e.vault.CreatedNeonProject("abc", "br-main-1")
 	e.fake.Fail = "neon.delete_project abc"
 	e.run(t, pa.ActionNeonProjectDelete, js(t, map[string]any{"project_id": "abc"}))
-	if n := e.fake.Closes(); n != 4 {
+	if n := e.fake.Closes(); n != 5 {
 		t.Fatalf("failed operation's port not closed: %d", n)
 	}
 }

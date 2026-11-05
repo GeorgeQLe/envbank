@@ -2,6 +2,7 @@ package live
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/GeorgeQLe/envbank/internal/provider/vercel"
@@ -104,4 +105,67 @@ func TestStripeOrphanRefusalNamesTheEndpoint(t *testing.T) {
 	if h.fx.stripe.endpoint(first).deleted {
 		t.Fatal("orphan deleted without approval")
 	}
+}
+
+// vercel.env.remove deletes only the exact sensitive entry: a plain or
+// ambiguous (duplicated) entry under the name is refused at the delete,
+// nothing is removed, and the record's claim stays recorded.
+func TestEnvRemoveRefusesPlainOrAmbiguousEntry(t *testing.T) {
+	for _, name := range []string{"plain", "ambiguous"} {
+		t.Run(name, func(t *testing.T) {
+			p := newProdFixture(t)
+			h := p.h
+			h.fx.vercel.mu.Lock()
+			proj := h.fx.vercel.byID[p.project]
+			for _, e := range proj.envs {
+				if e.key == "DATABASE_URL" && name == "plain" {
+					e.typ = "plain"
+				}
+			}
+			if name == "ambiguous" {
+				proj.envs = append(proj.envs, &vercelEnv{id: "env_dup", key: "DATABASE_URL", target: "production", value: "owner-set"})
+			}
+			envs := len(proj.envs)
+			h.fx.vercel.mu.Unlock()
+			rm := p.vercel()
+			rm["record"], rm["env"] = "DATABASE_URL", "DATABASE_URL"
+			r := h.act(provideraction.ActionVercelEnvRemove, rm)
+			if r.resp.State != provideraction.StateFailed || r.resp.Step != provideraction.StepVercelEnvRemove {
+				t.Fatalf("remove: %+v", r.resp)
+			}
+			h.fx.vercel.mu.Lock()
+			left := len(proj.envs)
+			h.fx.vercel.mu.Unlock()
+			if left != envs || h.fx.ev.index("vercel.env_delete DATABASE_URL production") >= 0 {
+				t.Fatalf("deleted: %v", h.fx.ev.list())
+			}
+			if b := h.binding("DATABASE_URL"); len(b.DeployedTo) != 1 {
+				t.Fatalf("claim dropped: %+v", b.DeployedTo)
+			}
+			p.noLeaks(t)
+		})
+	}
+}
+
+// An env var set by hand (no binding claims it) is not overwritten: the
+// push is refused before the prompt unless replace_existing names it.
+func TestPushRefusesHandSetEnvVar(t *testing.T) {
+	p := newProdFixture(t)
+	h := p.h
+	h.fx.vercel.mu.Lock()
+	proj := h.fx.vercel.byID[p.project]
+	proj.envs = append(proj.envs, &vercelEnv{id: "env_owner", key: "PG_URL", target: "production", value: "owner-set"})
+	h.fx.vercel.mu.Unlock()
+	push := p.vercel()
+	push["variables"] = map[string]string{"PG_URL": "DATABASE_URL"}
+	h.refusedWithoutPrompt(provideraction.CodeEnvNameTaken, provideraction.ActionVercelEnvPush, push)
+	push["replace_existing"] = true
+	h.mustSucceed(provideraction.ActionVercelEnvPush, push)
+	if a := h.own.approvals(); !strings.Contains(a[len(a)-1], "REPLACES a value NOT written by this broker in PG_URL") {
+		t.Fatalf("approval text: %s", a[len(a)-1])
+	}
+	if h.fx.vercel.envValueIn(p.project, "PG_URL", "production") != value(h.vault, "DATABASE_URL") {
+		t.Fatal("not replaced")
+	}
+	p.noLeaks(t)
 }

@@ -105,6 +105,10 @@ type VercelPort interface {
 	// sensitive entry of exactly that scope; absent is success, anything
 	// ambiguous is refused (never deleted).
 	DeleteEnv(ctx context.Context, env VercelEnv, key string) error
+	// EnvPresent reports, for each of keys, whether env's scope already
+	// holds an entry for it, or one that overlaps it (read-only, names
+	// only: no value is read).
+	EnvPresent(ctx context.Context, env VercelEnv, keys []string) (map[string]bool, error)
 	// CurrentDeployment is, for production, the deployment every verified
 	// production domain of the project is proven to be aliased to (it fails
 	// while an alias job runs or the aliases disagree); for preview, the
@@ -136,19 +140,24 @@ type VercelPort interface {
 	CheckHealth(ctx context.Context, deploymentURL, path string) error
 }
 
-// StripeWebhook is an endpoint's non-secret configuration.
+// StripeWebhook is an endpoint's non-secret configuration. Status is
+// Stripe's "enabled" or "disabled"; APIVersion is the version its events
+// are rendered with ("" for the account default).
 type StripeWebhook struct {
-	URL    string
-	Events []string
+	URL        string
+	Events     []string
+	Status     string
+	APIVersion string
 }
 
 // StripePort is the Stripe API surface the actions need (test mode only).
 // Close as for NeonPort.
 type StripePort interface {
 	io.Closer
-	// CreateWebhook creates an endpoint and stores its whsec_ signing secret
-	// through secret before returning.
-	CreateWebhook(ctx context.Context, url string, events []string, secret *lifecycle.SecretSink) (endpointID string, err error)
+	// CreateWebhook creates an endpoint (with apiVersion, unless "": the
+	// account default) and stores its whsec_ signing secret through secret
+	// before returning.
+	CreateWebhook(ctx context.Context, url string, events []string, apiVersion string, secret *lifecycle.SecretSink) (endpointID string, err error)
 	// Webhook reads an endpoint; ErrNotFound if it does not exist (deleted).
 	Webhook(ctx context.Context, endpointID string) (StripeWebhook, error)
 	DeleteWebhook(ctx context.Context, endpointID string) error

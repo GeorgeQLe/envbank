@@ -41,7 +41,7 @@ func newProviderFixture(t *testing.T) *providerFixture {
 	f.values = append(f.values, brokerValues["API_KEY"])
 	f.g, f.own, f.clk = fixture(t, brokerValues)
 	for _, rec := range []string{"DATABASE_URL", "DATABASE_URL_UNPOOLED"} {
-		controls[rec] = provideractiontest.Sentinel("postgresql://app_a:")
+		controls[rec] = provideractiontest.Sentinel("postgresql://app_a:") + "@ep-x-pooler.neon.tech/neondb"
 		f.values = append(f.values, controls[rec])
 	}
 	f.vault = provideractiontest.NewVault(f.log, controls)
@@ -95,6 +95,9 @@ func rotateReq(target string) map[string]any {
 
 func (f *providerFixture) waitDone(t *testing.T, s Session, id string) agentbroker.Response {
 	t.Helper()
+	if id == "" {
+		t.Fatal("no operation was started")
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		r, _ := f.call(t, s, map[string]any{"op": "provider_status", "operation_id": id})
@@ -149,8 +152,8 @@ func TestProviderActionDeclinedTouchIDHasNoSideEffects(t *testing.T) {
 		if _, approvals := f.own.prompts(); approvals != 1 {
 			t.Fatalf("want exactly one Touch ID prompt, got %d", approvals)
 		}
-		// Only the read-only precheck (owner_role is the database owner) ran.
-		if got := strings.Join(f.log.Calls(), ","); got != "neon.database_owner appdb" {
+		// Only the read-only live checks (owner_role is the database owner; the env names it newly writes are unset) ran.
+		if got := strings.Join(f.log.Calls(), ","); got != "neon.database_owner appdb,vercel.env_present preview" {
 			t.Fatalf("side effects after a declined approval: %v", got)
 		}
 	}

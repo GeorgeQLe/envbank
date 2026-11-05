@@ -30,6 +30,8 @@ var (
 	neonRegionRe       = regexp.MustCompile(`^(?:aws|azure|gcp)-[a-z0-9-]{1,40}$`)
 	pgIdentRe          = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,62}$`)
 	stripeEndpointRe   = regexp.MustCompile(`^we_[A-Za-z0-9]{1,64}$`)
+	sha256HexRe        = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	stripeAPIVersionRe = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:\.[a-z]{1,32})?$`)
 	stripeEventRe      = regexp.MustCompile(`^(?:\*|[a-z0-9_]+(?:\.[a-z0-9_]+){1,4})$`)
 	healthPathRe       = regexp.MustCompile(`^/[A-Za-z0-9._~/-]{0,200}$`)
 	urlHostRe          = regexp.MustCompile(`^(?:[a-z0-9][a-z0-9-]{0,62}\.)+[a-z][a-z0-9-]{0,62}$`) // a DNS name, never an IP literal
@@ -292,6 +294,7 @@ type (
 		HealthPath string     `json:"health_path"`
 		// Set by precheck from the bindings (never from params).
 		derived neonRoleOrder
+		fresh   map[DeployTarget][]string
 	}
 	vercelProjectCreate struct {
 		TeamID    string `json:"team_id"`
@@ -315,8 +318,13 @@ type (
 		// ReplaceExisting lets the push take over env vars this broker
 		// recorded as holding another record (the approval names each).
 		ReplaceExisting bool `json:"replace_existing,omitempty"`
-		// set by precheck: env name -> record that owns it now
-		replaced map[string]string
+		// set by precheck: env name -> the other records claiming it now,
+		// and the env names no binding claims
+		replaced map[string][]string
+		fresh    []string
+		// set by liveCheck: fresh names Vercel already holds (replaced only
+		// with replace_existing, named in the approval)
+		foreign []string
 	}
 	vercelEnvRemove struct {
 		Record     string `json:"record"`
@@ -349,9 +357,14 @@ type (
 		HealthPath     string     `json:"health_path"`
 		// set by precheck: the endpoint a live previous_record is bound to,
 		// and the URL and events this broker created the endpoint with
-		prevEndpoint string
-		url          string
-		events       []string
+		prevEndpoint    string
+		url             string
+		events          []string
+		fresh           map[DeployTarget][]string
+		recordedVersion string
+		// set by liveCheck: the live endpoint's API version ("" when it
+		// uses the account default); the new endpoint gets the same
+		apiVersion string
 	}
 	stripeWebhookDelete struct {
 		EndpointID string `json:"endpoint_id"`

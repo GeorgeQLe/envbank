@@ -1,7 +1,11 @@
 package provideraction
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"strconv"
 	"strings"
@@ -303,7 +307,7 @@ func (p *neonRotate) summary() string {
 	return "ROTATE Neon " + where + ": reset role " + o.next + " into " + recs + scopes + "; then INVALIDATE old role " + o.old
 }
 func (p *neonRotate) controls() []string     { return []string{ControlNeon, ControlVercel} }
-func (p *neonRotate) liveControls() []string { return []string{ControlNeon} }
+func (p *neonRotate) liveControls() []string { return []string{ControlNeon, ControlVercel} }
 
 // neonChecked is a rotation's checked bindings and plan.
 type neonChecked struct {
@@ -400,14 +404,18 @@ func (p *neonRotate) check(ctx context.Context, v Vault) (neonChecked, string) {
 func (p *neonRotate) precheck(ctx context.Context, v Vault) string {
 	c, code := p.check(ctx, v)
 	if code == "" {
-		p.derived = c.order
+		p.derived, p.fresh = c.order, c.scope.fresh
 	}
 	return code
 }
 
-// liveCheck: owner_role must be the database's actual owner.
+// liveCheck: owner_role must be the database's actual owner, and no env var
+// the rotation newly writes exists in Vercel yet.
 func (p *neonRotate) liveCheck(ctx context.Context, ps *ports) (string, *Result) {
-	return checkNeonOwner(ctx, ps.neon, p.ProjectID, p.BranchID, p.Database, p.OwnerRole), nil
+	if code := checkNeonOwner(ctx, ps.neon, p.ProjectID, p.BranchID, p.Database, p.OwnerRole); code != "" {
+		return code, nil
+	}
+	return freshAbsent(ctx, ps.vercel, p.Vercel, p.fresh), nil
 }
 
 // execute is the zero-downtime dual-role rotation. The role deployments use
@@ -470,11 +478,23 @@ func (p *neonRotate) execute(r *run) error {
 		// unbound record.
 		if err := r.step(StepBindingPending, agentbroker.CodeVaultFailed, func() error {
 			for _, lb := range []*bound{&c.pooled, &c.direct} {
-				if lb.b.PendingRole != "" || lb.b.RetiringRole != "" {
-					continue // marked, or already following next
+				if lb.b.PendingRole != "" {
+					// Marked by an interrupted attempt: a record one revision
+					// ahead must be that attempt's own store.
+					if lb.rev != lb.b.RecordRevision && !pendingStored(r.ctx, r.vault, lb.b, lb.rev) {
+						return fail(CodeRecordNotBound)
+					}
+					continue
+				}
+				if lb.b.RetiringRole != "" {
+					continue // already following next
+				}
+				host, ok := uriHostDigest(r.ctx, r.vault, lb.b.Record, lb.rev, lb.b.ActiveRole)
+				if !ok {
+					return fail(CodeRecordNotBound)
 				}
 				b := lb.b.clone()
-				b.PendingRole = next
+				b.PendingRole, b.PendingHost = next, host
 				rev, err := saveBindingRev(r.ctx, r.vault, b, lb.objRev)
 				if err != nil {
 					return err
@@ -507,7 +527,7 @@ func (p *neonRotate) execute(r *run) error {
 				return fail(CodeBindingLimit)
 			}
 			b.RecordRevision = r.res.Records[b.Record]
-			b.ActiveRole, b.RetiringRole, b.PendingRole = next, old, ""
+			b.ActiveRole, b.RetiringRole, b.PendingRole, b.PendingHost = next, old, "", ""
 			rev, err := saveBindingRev(r.ctx, r.vault, b, lb.objRev)
 			if err != nil {
 				return err
@@ -545,4 +565,61 @@ func (p *neonRotate) execute(r *run) error {
 		}
 		return nil
 	})
+}
+
+// uriUserHost splits a postgres URI (scheme://user[:password]@host[:port]/…)
+// into views of its user and host, without copying the password.
+func uriUserHost(uri []byte) (user, host []byte, ok bool) {
+	i := bytes.Index(uri, []byte("://"))
+	if i < 0 {
+		return nil, nil, false
+	}
+	rest := uri[i+3:]
+	end := bytes.IndexAny(rest, "/?#")
+	if end < 0 {
+		end = len(rest)
+	}
+	authority := rest[:end]
+	at := bytes.LastIndexByte(authority, '@')
+	if at < 1 {
+		return nil, nil, false
+	}
+	userinfo, hostport := authority[:at], authority[at+1:]
+	if c := bytes.IndexByte(userinfo, ':'); c >= 0 {
+		userinfo = userinfo[:c]
+	}
+	if c := bytes.LastIndexByte(hostport, ':'); c >= 0 {
+		hostport = hostport[:c]
+	}
+	if len(userinfo) == 0 || len(hostport) == 0 {
+		return nil, nil, false
+	}
+	return userinfo, hostport, true
+}
+
+// uriHostDigest reads exactly revision rev of record, checks its URI's user
+// is role, and returns the hex SHA-256 of its host.
+func uriHostDigest(ctx context.Context, v Vault, record string, rev int64, role string) (string, bool) {
+	var digest string
+	err := v.ReadSecret(ctx, record, rev, func(val []byte) error {
+		user, host, ok := uriUserHost(val)
+		if !ok || !bytes.Equal(user, []byte(role)) {
+			return errors.New("unexpected record")
+		}
+		sum := sha256.Sum256(host)
+		digest = hex.EncodeToString(sum[:])
+		return nil
+	})
+	return digest, err == nil
+}
+
+// pendingStored reports whether revision rev of a pending binding's record
+// is the interrupted rotation's own store: its URI names the pending role
+// as user and the host recorded when the rotation was marked pending.
+func pendingStored(ctx context.Context, v Vault, b Binding, rev int64) bool {
+	if rev != b.RecordRevision+1 || b.PendingRole == "" || b.PendingHost == "" {
+		return false
+	}
+	got, ok := uriHostDigest(ctx, v, b.Record, rev, b.PendingRole)
+	return ok && subtle.ConstantTimeCompare([]byte(got), []byte(b.PendingHost)) == 1
 }

@@ -157,6 +157,10 @@ const (
 	// CodeProductionSourceNotCurrent: a production redeploy names a
 	// deployment that is not the one serving production now.
 	CodeProductionSourceNotCurrent = "PRODUCTION_SOURCE_NOT_CURRENT"
+	// CodeRotationIncomplete: env.push names a Neon record whose rotation
+	// group has an interrupted rotation (a pending binding); finish it with
+	// neon.rotate first.
+	CodeRotationIncomplete = "ROTATION_INCOMPLETE"
 	// CodePlanTooLong: the approval text of the plan alone (without the
 	// agent label) exceeds the prompt limit.
 	CodePlanTooLong = "PLAN_TOO_LONG"
@@ -403,18 +407,59 @@ func mustExist(ctx context.Context, v Vault, names ...string) string {
 
 func noCheck(context.Context, Vault) string { return "" }
 
+// foreignEnvs returns, sorted, those of names (env vars no binding claims)
+// that Vercel already holds in env's scope (read-only).
+func foreignEnvs(ctx context.Context, vp VercelPort, env VercelEnv, names []string) ([]string, string) {
+	if len(names) == 0 {
+		return nil, ""
+	}
+	present, err := vp.EnvPresent(ctx, env, append([]string(nil), names...))
+	if err != nil {
+		return nil, CodeProviderFailed
+	}
+	var out []string
+	for _, n := range names {
+		if present[n] {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out, ""
+}
+
+// foreignEnvsAbsent refuses (ENV_NAME_TAKEN) when Vercel holds one of names
+// the owner did not approve replacing.
+func foreignEnvsAbsent(ctx context.Context, vp VercelPort, env VercelEnv, names []string, approved map[string]bool) string {
+	found, code := foreignEnvs(ctx, vp, env, names)
+	if code != "" {
+		return code
+	}
+	for _, n := range found {
+		if !approved[n] {
+			return CodeEnvNameTaken
+		}
+	}
+	return ""
+}
+
 // ---- shared steps ----
 
 // push writes each env var from the exact record revision stored earlier in
 // this operation (r.res.Records): the destination never sees a value the
-// vault does not durably hold.
-func (r *run) push(env VercelEnv, vars map[string]string) error {
+// vault does not durably hold. fresh are the names no binding claims: before
+// anything is written, each must still be absent from Vercel unless the
+// owner approved replacing it (approved), so a value the broker did not
+// write is never overwritten silently.
+func (r *run) push(env VercelEnv, vars map[string]string, fresh []string, approved map[string]bool) error {
 	names := make([]string, 0, len(vars))
 	for n := range vars {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 	return r.step(StepVercelEnvPush, CodeProviderFailed, func() error {
+		if code := foreignEnvsAbsent(r.ctx, r.vercel, env, fresh, approved); code != "" {
+			return fail(code)
+		}
 		for _, name := range names {
 			rec := vars[name]
 			rev, ok := r.res.Records[rec]
