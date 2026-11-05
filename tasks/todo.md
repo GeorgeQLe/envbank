@@ -12,8 +12,19 @@ Owner decisions:
   - L2: the create-time windows in neon.project.create and Stripe create/rotate are not resumable.
   - L4: a deployed *previous* Stripe secret does not block a delete.
   - L5: the production source is checked at execute, not before the prompt.
-- [ ] Third independent review of d9c1395: new `vercel.env.remove`, `StoreSecretAt`/`RECORD_CHANGED`, env ownership (`replace_existing`), `pending_role` resume, the 570-byte plan budget and label clipping, Stripe drift.
-- [ ] Chromux mirror of the d9c1395 wire changes, plus the XPC depth fix (see Chromux `tasks/todo.md`).
+- [x] Third independent review of d9c1395 (2026-11-05): no Critical or High findings; go test and go vet are clean.
+- [ ] Fix review 3:
+  - M1: an env var can keep two owners after a failed `vercel.env_push` (StepBindingDeployed runs first) or a failed `vault.release_env_owner`. `envClaims` (rotation.go) takes the last claim it sees. Fix: return every claimant and refuse when there is more than one; release drops the entry from every other binding. Add tests for both failure paths.
+  - M2: `vercel.env.remove` accepts revoked bindings, but `envClaims` skips them, so a stale revoked claim can delete another record's live value. Fix: count revoked claims (a push takes them over), and allow remove only for the sole claimant.
+  - M3: a push silently overwrites a Vercel env var that no binding claims (for example one the owner set by hand). Fix: list names in `liveCheck` and refuse it, or add "REPLACES an existing value not written by this broker".
+  - L-a: a Neon retry after a partial binding-follow can reset a role a deployment already uses. Fix: refuse the push or retry while a sibling binding is pending.
+  - L-b: the pending-role revision check accepts an owner edit at R+1. Fix: check the URI user and host in the read callback, or store a digest.
+  - L-c: a push can create records whose rotation is always PLAN_TOO_LONG or ROTATION_UNSCOPED_PREVIEW. Fix: check the rotation-plan fit at push time.
+  - L-d: TOCTOU between project or endpoint delete and env.push. Fix: env.push and env.remove also lock each record's provider resource.
+  - L-e: Stripe drift ignores `status` and `api_version`. Fix: record `api_version` and pass it on create; refuse a disabled endpoint.
+  - Missing tests: Stripe `previous_record` RECORD_CHANGED, `replaced_records` after a partial release, end-to-end env.remove against an ambiguous or plain entry.
+  - Live check: the Touch ID prompt shows a 600-byte reason in full. If not, move REPLACES and INVALIDATE text earlier.
+- [ ] Chromux mirror of the d9c1395 wire changes (XPC depth fix done in Chromux 0855ac5; see Chromux `tasks/todo.md`).
 - [ ] Build and sign both apps with Developer ID (Team NC56VXK48K). Back up the installed builds to Artifacts/ first. Keychain prompts: Allow, never Always Allow. Then reinstall envbank and Chromux v2 Rebuild.app, and the owner reconnects.
 - [ ] Live Touch ID e2e with synthetic values and a throwaway vault (handoff checks a–h).
 - [ ] Owner seeds `CONTROL_VERCEL_TOKEN`, `CONTROL_NEON_API_KEY` and `CONTROL_STRIPE_KEY` (test mode) through Chromux secure entry.
