@@ -1,3 +1,28 @@
+# TOP PRIORITY — throwaway live acceptance of provider actions (owner request, 2026-11-05)
+
+Real Vercel, Neon and Stripe (test mode) with throwaway resources, deleted at the end. About an hour with the owner at the Mac and 12–15 Touch ID prompts. The agent (Codex launched by Chromux with agent tools; Chromux pins Codex 0.162.1, the copy is in `~/Developer/Tools/codex-0.162.1`) makes the calls and the owner approves each one.
+
+- [ ] Prerequisites (decide first):
+  - A throwaway deployable repo with one health route, connected through `vercel.project.create` `git_repo`. The owner's GitHub must be visible to the Vercel GitHub app. Redeploy and health need one successful build first.
+  - The owner's Vercel `team_id`. Neon free tier and Stripe test mode cost nothing.
+- [ ] Seed the control credentials. The owner creates each one in its dashboard and enters it through Chromux secure entry (`request` grant plus Touch ID):
+  - `CONTROL_VERCEL_TOKEN`: a team-scoped access token.
+  - `CONTROL_NEON_API_KEY`: an org or personal API key.
+  - `CONTROL_STRIPE_KEY`: a test-mode key (`rk_test_` or `sk_test_`) with webhook-endpoint write. Live keys are refused.
+- [ ] Run in order, one Touch ID each:
+  1. `vercel.project.create`
+  2. `neon.project.create` (rotation roles; pooled and direct records)
+  3. `stripe.webhook.create`
+  4. `binding.allow`, then `vercel.env.push`
+  5. `neon.rotate` with 3 scopes
+  6. `stripe.webhook.rotate`
+  7. Cleanup: `vercel.env.remove`, then `stripe.webhook.delete`, `neon.project.delete`, `vercel.project.delete`
+- [ ] Check during the run:
+  - The Touch ID prompt shows the full 600-byte reason (the longest are rotations and `REPLACES …`). If it doesn't, move the REPLACES and INVALIDATE text earlier.
+  - The `neon.rotate` plan text names all 3 scopes. This closes the addon scope-dropping question left open by the 5 November e2e.
+  - The live open questions under "Throwaway live acceptance" below (Neon role rights and pooler `SET role`, response shapes, `HEALTH_PROTECTED`, the Vercel Connect swap).
+- [ ] Afterwards: confirm all resources are deleted, then revoke the three control credentials in each dashboard (they are broad), and record the results here and in the Chromux todo.
+
 # Provider actions — agents provision and rotate Stripe/Neon for Vercel (2026-11-05)
 
 Goal: agents, through EnvBank and Chromux, set up Stripe and Neon for a Vercel project and rotate keys on demand, with only an owner Touch ID prompt. The contract is [provider-actions.md](../docs/provider-actions.md). The branch is `feat/provider-actions` at d9c1395, not pushed. It holds the authz work, the PR #50 Vercel integration, adapters, the broker ops, bindings, production promote and rollback, and fixes from two security reviews.
