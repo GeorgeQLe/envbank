@@ -1,5 +1,17 @@
 # History
 
+## 2026-11-06
+
+- Reconciled the current task list with merged protected computer use, agent
+  broker and agent setup work, and the reviewed heads of the unmerged Vercel/
+  hooks, XPC owner-input, authorized-agent and cross-device-relay branches.
+- Kept source completion, historical branch tests and integrated physical/
+  provider qualification distinct. Retained Cloudflare migration and live
+  provider gates, plus the unresolved prioritization decision.
+- Focused local Go checks passed at main `0375809` for the broker, owner-input,
+  setup, protected-fill, native-host and CLI packages. No real-vault or
+  live-provider acceptance was performed by this status audit.
+
 ## 2026-08-16
 
 - Added the Cloudflare EnvBank staging runtime with one SQLite-backed Durable

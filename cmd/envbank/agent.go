@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -14,7 +15,9 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/agentbroker"
 	"github.com/GeorgeQLe/envbank/internal/client"
 	"github.com/GeorgeQLe/envbank/internal/mcpserver"
+	"github.com/GeorgeQLe/envbank/internal/ownerinput"
 	"github.com/GeorgeQLe/envbank/internal/protocol"
+	"github.com/GeorgeQLe/envbank/internal/setup"
 	"golang.org/x/term"
 )
 
@@ -101,6 +104,12 @@ func agentBrokerCommand(args []string) error {
 	socket := fs.String("socket", agentbroker.DefaultSocketPath(), "Unix socket agents connect to")
 	idle := fs.Duration("idle-lock", 30*time.Minute, "lock (exit) after this long without requests")
 	lifetime := fs.Duration("max-lifetime", 12*time.Hour, "lock (exit) after this long regardless of activity")
+	setupMode := fs.Bool("setup", false, "allow agent-proposed setup when this device has no vault yet")
+	useExisting := fs.Bool("use-existing-server", false, "setup: allow reusing an EnvBank server you already started on the plan's address")
+	ownerInput := fs.String("owner-input", "terminal", "where the owner types secrets: terminal or chromux (verified, paired desktop provider)")
+	oiTeam := fs.String("owner-input-team", "NC56VXK48K", "Apple Team ID the desktop provider must be signed by")
+	oiIdent := fs.String("owner-input-identifier", "party.gblock.chromux.v2.desktop", "code-signing identifier of the desktop provider")
+	oiSocket := fs.String("owner-input-socket", ownerinput.DefaultSocketPath(), "desktop provider socket")
 	auth := addAuthFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -108,49 +117,91 @@ func agentBrokerCommand(args []string) error {
 	if fs.NArg() != 0 || *idle < time.Minute || *lifetime < *idle {
 		return errors.New("usage: envbank agent-broker [--socket PATH] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]")
 	}
-	prompter, err := agentbroker.NewTerminalPrompter(os.Stdin, os.Stdout)
+	terminal, err := agentbroker.NewTerminalPrompter(os.Stdin, os.Stdout)
 	if err != nil {
 		return err
+	}
+	prompter := &ownerSurface{TerminalPrompter: terminal}
+	switch *ownerInput {
+	case "terminal":
+	case "chromux":
+		// Not qualified: a Unix-socket peer token reports the socket's last
+		// owner, so an impostor can pass the check by handing its fd to an exec'd
+		// genuine binary. The provider needs an XPC transport with per-message
+		// code-signing checks before it may receive real secrets.
+		_, _, _ = oiSocket, oiTeam, oiIdent
+		return errors.New("--owner-input chromux is not available yet: socket peer identity can be spoofed; it requires the planned XPC transport (use the terminal)")
+	default:
+		return errors.New("--owner-input must be terminal or chromux")
 	}
 	state, err := term.GetState(int(os.Stdin.Fd()))
 	if err != nil {
 		return err
 	}
 	defer term.Restore(int(os.Stdin.Fd()), state) // never leave echo off
-	// Check the device config BEFORE asking for a passphrase: with no vault on
-	// this device there is nothing to unlock.
-	cfg, err := client.LoadConfig(auth.configPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("no EnvBank device config at %s: run `envbank init` (new vault) or `envbank enroll-request` (existing vault) first, or pass --config", auth.configPath)
+	var broker *agentbroker.Broker
+	var vault *brokerVault
+	defer func() {
+		if vault != nil {
+			vault.wipe()
 		}
+	}()
+	cfg, err := client.LoadConfig(auth.configPath)
+	switch {
+	case errors.Is(err, os.ErrNotExist) && !*setupMode:
+		return fmt.Errorf("no EnvBank device config at %s: run `envbank init` or `envbank enroll-request`, or start `envbank agent-broker --setup` to let an agent propose a setup", auth.configPath)
+	case errors.Is(err, os.ErrNotExist):
+		// Setup mode: no vault on this device yet. Agents may propose a setup;
+		// every secret and persistent change is collected/confirmed here.
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if exe, err = filepath.EvalSymlinks(exe); err != nil {
+			return err
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		applier := &setupApplier{allowExistingServer: *useExisting, owner: prompter, inspector: setup.SystemInspector{}, service: launchdService{executable: exe, home: home, uid: os.Getuid()}, now: time.Now}
+		if broker, err = agentbroker.New(agentbroker.Options{Setup: applier, Prompter: prompter, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()}); err != nil {
+			return err
+		}
+		defer func() {
+			if applier.created != nil {
+				applier.created.wipe()
+			}
+		}()
+		fmt.Printf("No EnvBank vault on this device (%s): starting in SETUP MODE.\n", auth.configPath)
+		fmt.Println("An agent can propose a setup (`envbank setup apply`); you will confirm it and type passphrases here.")
+	case err != nil:
 		return err
-	}
-	passphrase, err := brokerPassphrase(auth)
-	if err != nil {
-		return err
-	}
-	secrets, err := cfg.Unlock(passphrase)
-	for i := range passphrase {
-		passphrase[i] = 0
-	}
-	if err != nil {
-		return err
-	}
-	api := client.NewAPI(cfg.Server)
-	api.Config, api.Secrets, api.Access = cfg, secrets, cfg.AccessCredentials()
-	vaultKey, err := requireVaultKey(secrets)
-	if err != nil {
-		return err
-	}
-	vault := &brokerVault{api: api, vaultKey: vaultKey}
-	defer vault.wipe()
-	if _, err := vault.Names(context.Background()); err != nil {
-		return fmt.Errorf("vault check failed: %w", err)
-	}
-	broker, err := agentbroker.New(agentbroker.Options{Vault: vault, Prompter: prompter, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()})
-	if err != nil {
-		return err
+	default:
+		passphrase, err := brokerPassphrase(auth)
+		if err != nil {
+			return err
+		}
+		secrets, err := cfg.Unlock(passphrase)
+		for i := range passphrase {
+			passphrase[i] = 0
+		}
+		if err != nil {
+			return err
+		}
+		api := client.NewAPI(cfg.Server)
+		api.Config, api.Secrets, api.Access = cfg, secrets, cfg.AccessCredentials()
+		vaultKey, err := requireVaultKey(secrets)
+		if err != nil {
+			return err
+		}
+		vault = &brokerVault{api: api, vaultKey: vaultKey}
+		if _, err := vault.Names(context.Background()); err != nil {
+			return fmt.Errorf("vault check failed: %w", err)
+		}
+		if broker, err = agentbroker.New(agentbroker.Options{Vault: vault, Prompter: prompter, Runner: agentbroker.ExecRunner{}, Path: os.Getenv("PATH"), BaseEnv: agentbroker.BaseEnv()}); err != nil {
+			return err
+		}
 	}
 	defer broker.Close()
 	listener, err := agentbroker.Listen(*socket)
@@ -195,8 +246,7 @@ func brokerPassphrase(auth *authFlags) ([]byte, error) {
 		fmt.Fprintln(os.Stderr, "warning: a passphrase file or ENVBANK_PASSPHRASE that agents can read lets them bypass the broker")
 		return readPassphrase(auth.passphraseFile)
 	}
-	fmt.Print("EnvBank passphrase (hidden): ")
-	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	raw, err := agentbroker.ReadHidden(os.Stdin, os.Stdout, "EnvBank passphrase (hidden): ")
 	fmt.Println()
 	if err != nil {
 		return nil, err

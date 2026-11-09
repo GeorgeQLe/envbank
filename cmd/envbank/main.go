@@ -153,6 +153,8 @@ func run(args []string) error {
 		return agentBrokerCommand(args[1:])
 	case "agent":
 		return agentCommand(args[1:])
+	case "setup":
+		return setupCommand(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -184,6 +186,8 @@ Usage:
   envbank due [--notify] [auth flags]
   envbank run [auth flags] -- COMMAND [ARGS...]
   envbank agent-broker [--socket PATH] [--idle-lock 30m] [--max-lifetime 12h] [auth flags]  # owner terminal
+  envbank setup plan --sync local_server|hosted --device-name NAME --backup-dir DIR [--vault-dir DIR] [--server URL]  # read-only
+  envbank setup status [--config PATH] [--socket PATH]                                                              # read-only
   envbank agent names [--socket PATH]
   envbank agent request --reason TEXT [--socket PATH] NAME
   envbank agent run --secret NAME [--secret NAME] [--dir DIR] [--timeout S] [--socket PATH] -- COMMAND [ARGS...]
@@ -1043,41 +1047,53 @@ func initialize(args []string) error {
 	if err != nil {
 		return err
 	}
-	keys, err := secure.NewDeviceKeys()
+	_, _, vaultID, fingerprint, err := createVaultDevice(*serverURL, *vaultName, *deviceName, passphrase, access, auth.configPath)
 	if err != nil {
 		return err
+	}
+	fmt.Printf("vault %s initialized; device fingerprint %s\n", vaultID, fingerprint)
+	return nil
+}
+
+// createVaultDevice creates a vault on the server with a fresh device identity
+// and saves the passphrase-encrypted config. It returns the unlocked API and
+// vault key so a caller (the setup broker) can use the vault immediately.
+func createVaultDevice(serverURL, vaultName, deviceName string, passphrase []byte, access *client.AccessCredentials, configPath string) (*client.API, []byte, string, string, error) {
+	fail := func(err error) (*client.API, []byte, string, string, error) { return nil, nil, "", "", err }
+	keys, err := secure.NewDeviceKeys()
+	if err != nil {
+		return fail(err)
 	}
 	vaultKey, err := secure.RandomBytes(32)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	keys.Secrets.VaultKey = secure.Encode(vaultKey)
-	api := client.NewAPI(*serverURL)
+	api := client.NewAPI(serverURL)
 	api.Access = access
-	created, err := api.CreateVault(*vaultName, protocol.PublicDevice{
-		Name: *deviceName, SigningPublic: keys.SigningPublic, WrappingPublic: keys.WrappingPublic,
+	created, err := api.CreateVault(vaultName, protocol.PublicDevice{
+		Name: deviceName, SigningPublic: keys.SigningPublic, WrappingPublic: keys.WrappingPublic,
 	})
 	if err != nil {
-		return err
+		return fail(err)
 	}
-	cfg, err := client.NewConfig(*serverURL, created.VaultID, created.DeviceID, *deviceName, keys, passphrase)
+	cfg, err := client.NewConfig(serverURL, created.VaultID, created.DeviceID, deviceName, keys, passphrase)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	if access != nil {
 		if err := cfg.SetAccessCredentials(*access); err != nil {
-			return err
+			return fail(err)
 		}
 		if err := cfg.Lock(keys.Secrets, passphrase); err != nil {
-			return err
+			return fail(err)
 		}
 	}
-	if err := cfg.Save(auth.configPath); err != nil {
-		return fmt.Errorf("vault was created but local config could not be saved: %w", err)
+	if err := cfg.Save(configPath); err != nil {
+		return fail(fmt.Errorf("vault was created but local config could not be saved: %w", err))
 	}
-	fmt.Printf("vault %s initialized; device fingerprint %s\n",
-		created.VaultID, secure.PublicFingerprint(keys.SigningPublic, keys.WrappingPublic))
-	return nil
+	api.Config, api.Secrets = cfg, keys.Secrets
+	return api, vaultKey, created.VaultID, secure.PublicFingerprint(keys.SigningPublic, keys.WrappingPublic), nil
 }
 
 func enrollRequest(args []string) error {

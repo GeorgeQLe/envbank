@@ -1,25 +1,86 @@
 # Current work
 
-## Vercel integration — implementation verified, live acceptance pending
+> Completed items are archived monthly in `tasks/history/`; the ship log stays in `tasks/history.md`.
 
-See [scope, verification and remaining acceptance](vercel-workflow-2026-11-03.md).
+## Development status — reviewed 2026-11-06
 
-- [x] Implement exact-scoped Secret writes and the vault-to-deployment CLI/MCP backend.
-- [x] Verify synthetic API workflows, policy enforcement, recovery and rollback.
-- [x] Add owner hardware-signature enforcement, encrypted pinning and separate
-  disposable Preview/Production acceptance runners; execute synthetic checks.
-- [ ] Owner imports acceptance credentials privately and approves disposable targets.
-- [ ] Qualify real Preview consumption, staged Production promotion and rollback.
-- [ ] Qualify the external observation controller before browser key capture.
+Reviewed `main` at `0375809`. Source implementation, branch evidence and
+integrated release qualification are tracked separately below. A checked source
+item does not mean a real vault, provider or protected desktop flow is qualified.
+
+### Merged implementation
+
+- [x] Merge Brave native-host support, protected selection and the host gate SDK
+  ([PR #48](https://github.com/GeorgeQLe/envbank/pull/48)). Actual host/Driver
+  integration and capture-channel acceptance remain open in the
+  [protected computer-use checklist](protected-computer-use-2026-11-03.md).
+- [x] Merge the owner-held agent secret broker with exact-command approval,
+  names-only operations and output redaction
+  ([PR #51](https://github.com/GeorgeQLe/envbank/pull/51)). Disposable local
+  end-to-end evidence is recorded in [agent broker](../docs/agent-broker.md);
+  owner real-vault acceptance and the placeholder egress proxy remain open.
+- [x] Merge agent-operated setup planning/apply through the owner-held broker
+  ([PR #52](https://github.com/GeorgeQLe/envbank/pull/52)). Disposable
+  `local_server` setup passed; actual launchd installation was not exercised.
+  [Setup documentation](../docs/agent-setup.md) records the remaining hosted
+  Access, `local_only` and desktop-owner-input work. The legacy socket-based
+  desktop input path is disabled on `main`; see the
+  [owner-input protocol](../docs/owner-input-protocol.md).
+
+### Unmerged implementations and qualification
+
+These items remain unchecked until reviewed and integrated. Test claims below
+are historical branch evidence, not new physical acceptance from this audit.
+
+- [ ] Review and integrate guarded Vercel workflows and Codex lifecycle hooks:
+  [PR #50](https://github.com/GeorgeQLe/envbank/pull/50),
+  `feat/protected-host-hooks`. `main` was merged into the branch on
+  2026-11-08 to clear the conflict GitHub reported. Remaining gates are in
+  [the Vercel checklist](vercel-workflow-2026-11-03.md): owner imports
+  acceptance credentials privately, disposable Preview/Production acceptance,
+  hardware owner approval, actual vendor-runtime hook coverage and the
+  external observation controller before browser key capture.
+- [ ] Review and integrate XPC owner input: `feat/owner-input-xpc` at `482a14f`.
+  The [branch evidence](https://github.com/GeorgeQLe/envbank/blob/482a14f/docs/owner-input-xpc.md)
+  records one signed Chromux/broker end-to-end run using a synthetic value;
+  installed-build no-leak qualification and independent review remain open.
+- [ ] Review and integrate authorized agents: `feat/authorized-agents` at
+  `44a0009`. The [branch status](https://github.com/GeorgeQLe/envbank/blob/44a0009/docs/authorized-agents.md)
+  reports broker implementation/unit tests and a built, unqualified host side.
+  Complete the Chromux session-grant/Touch ID end-to-end qualification.
+  This branch also contains the XPC work; reconcile shared ancestry rather
+  than treating the branches as independent integrations.
+- [ ] Review and integrate cross-device relay: `feat/cross-device-relay` at
+  `1079409`. The [branch evidence](https://github.com/GeorgeQLe/envbank/blob/1079409/docs/cross-device-relay.md)
+  records disposable loopback vault-ingest acceptance. Independent review,
+  Cloudflare Worker support and actual device acceptance remain open.
+- [ ] Qualify a real observation-controlling host and protected-fill Driver,
+  Brave native messaging/human approval, and every actual capture/trace route
+  before enabling real protected transfers. Keep the detailed
+  [protected computer-use checklist](protected-computer-use-2026-11-03.md)
+  authoritative for these gates.
+- [ ] Complete owner real-vault acceptance for the broker; implement the
+  separately planned placeholder egress proxy. Existing command-output
+  redaction is not that proxy.
+- [ ] Finish hosted Cloudflare Access setup and `local_only` support after
+  reconciling branch implementations; retain actual launchd acceptance as a
+  separate physical check.
+
+Validation performed for this audit on macOS arm64: focused Go tests passed
+for `internal/agentbroker`, `internal/ownerinput`, `internal/setup`,
+`pkg/protectedfill`, `internal/nativehost` and `cmd/envbank` at `0375809`.
+These were local automated checks, not new branch, device or live-provider
+qualification.
+
+## Priority decision still open
+
+- Milestone 12's parity, importer and staging/cutover items remain unfinished.
+  Confirm their order relative to the newer agent/desktop integrations. This
+  status update preserves the existing milestone order without inferring a
+  new product priority or authorizing deployment.
 
 ## Milestone 12: Cloudflare-first migration — foundation complete
 
-- [x] Add the staging EnvBank Worker with one SQLite-backed Durable Object per
-  vault, encrypted client-config v2 with Cloudflare Access credentials, and
-  redirect-safe Access headers outside the v1 signature.
-- [x] Add exact-account/zone/script Cloudflare binding, atomic undeployed
-  Worker-version staging, names-only verification, separate promotion and
-  rollback, and a marked live-provider acceptance path.
 - [ ] Complete the cross-language v1 parity harness and close every Worker
   route, error, audit, pagination, concurrency, and schema-migration gap before
   any production data or hostname is placed on the Worker.
@@ -32,142 +93,11 @@ See [scope, verification and remaining acceptance](vercel-workflow-2026-11-03.md
 
 ## Milestone 11: $0 end-to-end execution — implementation complete
 
-- [x] Add the required network-free `make e2e` gate, binary restart matrix,
-  fault coverage, recovery/extension/website orchestration, and leakage scan.
-- [x] Add local release, disposable headed-browser, interactive Keychain, and
-  explicitly authorized provider-acceptance entry points plus a full runbook.
-- [x] Execute disposable browser and production native-host Keychain/Touch ID
-  approval/denial observations on the release Mac and record sanitized evidence.
 - [ ] Execute the explicitly authorized Stripe, Clerk Development, and
   Cloudflare observations against dedicated marked resources before the next
   release.
 
-## Milestone 10: Hermetic agent-operable lifecycle testlab — complete
-
-- [x] Add version-2 lifecycle contracts, signed automation policy and evidence
-  foundations, callback-scoped secret sinks/sources, encrypted operations,
-  optimistic bundle leases, ordered deployments, and reverse rollback.
-- [x] Add private-pipe provider intake, the Stripe webhook adapter, the
-  terminal-safe Clerk helper, and the workflow-only production MCP surface.
-- [x] Add a separate `envbank-testlab` binary with encrypted ephemeral state,
-  loopback provider emulators, signed simulated browser capture, virtual time,
-  bounded faults, strict test-only MCP controls, resumable flow assertions,
-  rollback/quarantine, and leakage regression coverage.
-
-## Milestone 9: EnvBank OSS v0.2.0 feature release — complete
-
-- [x] Repair the scheduled full-history Gitleaks scan with version-compatible,
-  narrowly scoped allowlists and an executable history regression.
-- [x] Prepare an exact-tag v0.2.0 prerelease workflow, release notes, current
-  installation guidance, anonymous verifier, and a cgo-enabled macOS archive
-  that includes Keychain-backed Railway credential support.
-- [x] Merge the preparation through protected `main`, create the annotated
-  `v0.2.0` tag, and publish the prerelease plus `v0.2.0`/`0.2` GHCR tags.
-- [x] Verify the public release anonymously, record immutable evidence, update
-  the website to v0.2.0, and install the verified macOS binary on PATH.
-
-## Milestone 8: Railway apply, resume, and names-only verification — complete
-
-- [x] Add separately confirmed Railway variable writes, partial-failure resume,
-  and sanitized verification while forbidding deployment mutations and blind
-  deletion.
-
-## Milestone 7: Railway identity binding and names-only planning — complete
-
-- [x] Add an in-process Railway metadata adapter that binds the credential,
-  project, environment, and exact service IDs, then creates names-only plans
-  without value reads, provider writes, or deployment mutations.
-
-## Milestone 6: Provider-neutral rollout engine — complete
-
-- [x] Define redaction-safe provider capabilities and request types, then add
-  expiring encrypted plans and a resumable local rollout state machine with a
-  fake adapter before any live-provider integration.
-
-## Milestone 5: SiftCut trusted bundle preparation — complete
-
-- [x] Add local `bundle prepare` and `bundle status` workflows with trusted
-  stdin import, deterministic bounded derivation, optimistic record writes,
-  resumable journals, and encrypted snapshot persistence.
-
-## Milestone 4: Public EnvBank website — implementation complete
-
-- [x] Add a static TypeScript Next.js website with public marketing,
-  first-vault tutorial, and platform-specific installation routes.
-- [x] Present only released v0.1.1 capabilities, verification evidence, and
-  candid alpha limitations without including unreleased provider automation.
-- [x] Add responsive, keyboard-accessible controls, reduced-motion support,
-  route metadata, canonical URLs, favicon, sitemap, robots metadata, and a
-  bespoke social preview.
-- [x] Add a Node 24 website build, lint, and typecheck lane to CI.
-
-## Milestone 3: SiftCut staging foundation — complete
-
-- [x] Document the SiftCut staging use-case gaps, security invariants,
-  capability gates, phased implementation sequence, and acceptance criteria.
-- [x] Add the strict version-1 YAML manifest contract, canonical digest,
-  derivation AST and dependency ordering, semantic validation, and the
-  read-only `envbank bundle check` command with redacted regression coverage.
-- [x] Add encrypted vault-object CRUD with domain-separated IDs and AAD,
-  optimistic revisions, server-opacity integration coverage, bundle snapshot
-  and provider-plan schemas, and recovery artifact v2 compatibility.
-
-## Milestone 2: EnvBank OSS v0.1.1 corrective launch — complete
-
-- [x] Prepare the Apache-2.0 license, public governance and security policy,
-  alpha documentation, release metadata, and narrowly scoped Gitleaks policy.
-- [x] Add pinned CI, security analysis, dependency updates, release archives,
-  checksums, SPDX SBOM, provenance, and multi-architecture GHCR automation.
-- [x] Validate formatting, modules, Go and extension tests, race tests, vet,
-  recovery, vulnerability and license audits, full-history secret scanning,
-  cross-builds, and the hardened container.
-- [x] Rename the GitHub repository to `GeorgeQLe/envbank`, make it public, and
-  enable private vulnerability reporting and GitHub security features.
-- [x] Protect `main`, create the annotated `v0.1.0` tag, publish the prerelease
-  and GHCR image, and make the package public.
-- [x] Prepare a corrective tag-only v0.1.1 workflow with downloadable artifact
-  and image provenance bundles plus credential-isolated public verification.
-- [x] Merge the preparation, create the annotated `v0.1.1` tag on protected
-  `main`, and publish the new prerelease and `v0.1.1`/`0.1` GHCR tags.
-- [x] Verify clone, redirect, exact downloads, checksums, SBOM, local Sigstore
-  bundles, image platforms, health and immutable digest pull anonymously, then
-  record the evidence without changing v0.1.0.
-
-## Milestone 1: Safe access and recovery — complete
-
-- [x] Verify backup and restore procedures with a documented recovery drill.
-- [x] Add an encrypted recovery export.
-- [x] Prepare hardened single-host production deployment guidance.
-- [x] Prepare a cryptographic review packet.
-- [x] Complete an independent cryptographic review and remediate its findings.
-
 Later milestones are tracked in the [product roadmap](../docs/roadmap.md).
-
-## Completed
-
-- [x] Add cryptographically secure random-character password generation to the
-  CLI and Chrome extension without exposing generated plaintext through output,
-  metadata, clipboard, extension storage, or popup JavaScript.
-- [x] Implement the initial zero-knowledge EnvBank CLI, sync service, browser
-  extension, native host, cryptographic record storage, and multi-device
-  enrollment flow.
-- [x] Add automated Go, browser-extension, race, vet, formatting, and build
-  validation.
-- [x] Initialize and publish the repository on GitHub.
-- [x] Replace the single-process JSON state file with a transactional SQLite
-  backend and an automatic version-1 state migration.
-- [x] Add soft device revocation with fingerprint verification, self-revocation
-  confirmation, and an atomic final-active-device safeguard.
-- [x] Add bounded, privacy-preserving device-access events with authenticated
-  pagination and transactional fail-closed persistence.
-- [x] Add encrypted offline recovery artifacts and resumable restoration into a
-  new vault, key, and device identity.
-- [x] Add a versioned, server-enforced device-pairing invitation lifecycle with
-  expiration, cancellation, rejection, attempt exhaustion, atomic approval,
-  and a disposable QR-first developer lab.
-- [x] Remove both empty accidental `recovery-drill` vaults from the separate
-  local showcase service while preserving its configured vault, device, and
-  encrypted record plus a verified rollback backup.
 
 ## Blockers
 
