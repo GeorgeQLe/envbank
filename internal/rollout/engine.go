@@ -103,6 +103,11 @@ func (engine *Engine) Plan(ctx context.Context, input PlanInput) (ProviderPlan, 
 		return ProviderPlan{}, err
 	}
 	if _, err := engine.Store.SavePlan(ctx, plan, 0); err != nil {
+		// The ID is the content digest, so an existing plan with this ID is
+		// this plan: planning the same snapshot twice is idempotent.
+		if existing, _, loadErr := engine.Store.LoadPlan(ctx, plan.ID()); loadErr == nil && existing.Digest == plan.Digest {
+			return existing, nil
+		}
 		return ProviderPlan{}, fmt.Errorf("save encrypted provider plan: %w", err)
 	}
 	return plan, nil

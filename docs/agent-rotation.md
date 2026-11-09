@@ -22,11 +22,12 @@ agent-readable channel.
 | Piece | Where | State |
 | --- | --- | --- |
 | Lifecycle state machine, signed policies, leases, evidence chain | `internal/lifecycle` | merged |
-| Rotation engine: resumable driver over the state machine | `internal/rotation` | this branch |
-| Neon adapter (role password, API key) | `internal/provider/neon` | PR #58 |
+| Rotation engine: resumable driver over the state machine | `internal/rotation` | merged (#59) |
+| Vercel `Deployer` for the engine, standing rotation approval | `internal/vercelworkflow` (`RotationDeployer`, `Backend.StandingPolicyID`) | this branch |
+| Neon adapter (role password, API key) | `internal/provider/neon` | merged (#58) |
 | Stripe adapter (webhook secret automatic; secret/restricted keys interactive) | `internal/provider/stripe` | merged |
-| Vercel secret-only writes, staged promotion, health, rollback | `internal/vercelworkflow`, `cmd/envbank/vercel.go` | PR #50 |
-| Owner approval: Secure Enclave P-256 signature over the policy | `internal/ownerapproval` | PR #50 |
+| Vercel secret-only writes, staged promotion, health, rollback | `internal/vercelworkflow`, `cmd/envbank/vercel.go` | merged (#50) |
+| Owner approval: Secure Enclave P-256 signature over the policy | `internal/ownerapproval` | merged (#50) |
 | Agent broker: agents use secrets by name, output redacted | `internal/agentbroker` | merged |
 
 The engine is deliberately ignorant of providers and approval channels. It
@@ -57,15 +58,17 @@ the operation.
 
 ## Remaining work, in order
 
-### 1. Deployer for Vercel (small)
+### 1. Deployer for Vercel — done on this branch
 
-Wrap the PR #50 backend as a `rotation.Deployer`: `Stage` = write the new
-record revision as a Secret variable and create the redeploy; `Activate` =
-promote (Production) or verify the Preview URL, returning the backend's
-`HealthEvidence`; `Rollback` = the backend's rollback. The backend already
-does every one of these; the wrapper maps its `State` to the engine's calls.
+`vercelworkflow.RotationDeployer` wraps the backend: `Stage` plans the
+current snapshot (refusing one whose record revisions differ from what the
+engine stored) and drives the workflow to the promotion gate, or to
+completion for Preview; `Activate` promotes and returns the backend's
+`HealthEvidence`; `Rollback` restores the previous production deployment.
+Blocker codes map to the engine's retry classes: waits are safe,
+reconciliation and unexpected upstream state are ambiguous, the rest never.
 
-### 2. Standing rotation approval (the hands-free part)
+### 2. Standing rotation approval — done on this branch
 
 Today every Vercel plan needs a fresh owner signature bound to one plan ID.
 That is right for an ad-hoc deployment and wrong for rotation, where the
@@ -82,13 +85,13 @@ A **standing policy** is the existing `lifecycle.AutomationPolicy` with:
 - one owner signature (Secure Enclave **or** a remote approval, below) over
   the whole statement.
 
-The engine already authorizes each step against such a policy. Two changes
-are needed outside the engine:
+The engine already authorizes each step against such a policy, and
+`vercelworkflow.Backend` now accepts one when configured with
+`StandingPolicyID`: it matches manifest digest, bundle, scope fingerprint and
+health path instead of a plan ID, resolves the source deployment at run time
+(current production deployment, or the caller's `source_deployment_id` for
+other scopes), and still requires the owner signature. Remaining:
 
-- `vercelworkflow.Backend.policy` must accept a plan whose policy is a
-  standing one: match on manifest digest, scope fingerprint and health path
-  instead of `DeploymentPlanID`. The plan's record set must be a subset of
-  the policy's `credential_classes`.
 - A `rotation.Trigger` entry point (CLI `envbank rotate --policy ID`, MCP
   `envbank_rotation_run`, and a due-date check for `envbank_rotation_due`)
   that builds `PlanInput` from the manifest: for Neon role passwords it picks

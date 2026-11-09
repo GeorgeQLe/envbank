@@ -24,7 +24,7 @@ func (backend *Backend) authorizeState(ctx context.Context, state State, verb st
 	if e != nil {
 		return e
 	}
-	if p.DeploymentSourceID != state.SourceDeploymentID || p.DeploymentHealthPath != state.HealthPath {
+	if p.DeploymentSourceID != "" && p.DeploymentSourceID != state.SourceDeploymentID || p.DeploymentHealthPath != state.HealthPath {
 		return errors.New("deployment approval changed target")
 	}
 	digest, e := state.Approval.Digest()

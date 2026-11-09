@@ -51,6 +51,9 @@ type Request struct {
 	PlanID         string `json:"plan_id,omitempty"`
 	OperationID    string `json:"operation_id,omitempty"`
 	PolicyID       string `json:"policy_id,omitempty"`
+	// SourceDeploymentID names the deployment a standing approval should
+	// rebuild for non-production scopes. It is an identifier, never a value.
+	SourceDeploymentID string `json:"source_deployment_id,omitempty"`
 }
 
 type Backend interface {
@@ -97,7 +100,7 @@ func productionTool(name string) ToolDefinition {
 	fields := map[string]map[string]any{
 		"envbank_capabilities":        {},
 		"envbank_setup_plan":          {"vault_id": stringField(), "bundle": stringField(), "manifest_digest": stringField(), "environment": stringField()},
-		"envbank_workflow_start":      {"vault_id": stringField(), "bundle": stringField(), "manifest_digest": stringField(), "environment": stringField(), "provider": stringField(), "plan_id": stringField(), "policy_id": stringField()},
+		"envbank_workflow_start":      {"vault_id": stringField(), "bundle": stringField(), "manifest_digest": stringField(), "environment": stringField(), "provider": stringField(), "plan_id": stringField(), "policy_id": stringField(), "source_deployment_id": stringField()},
 		"envbank_workflow_resume":     {"operation_id": stringField()},
 		"envbank_workflow_status":     {"operation_id": stringField()},
 		"envbank_deployment_rollback": {"operation_id": stringField()},
