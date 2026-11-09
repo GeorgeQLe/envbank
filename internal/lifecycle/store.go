@@ -135,6 +135,23 @@ func (store *VaultStore) loadLease(bundle string) (Lease, int64, error) {
 	return lease, revision, err
 }
 
+// LoadEvidence returns the verified evidence chain for an operation; a
+// missing chain is empty, not an error.
+func (store *VaultStore) LoadEvidence(_ context.Context, operationID string, public ed25519.PublicKey) ([]Evidence, error) {
+	if err := store.ready(); err != nil {
+		return nil, err
+	}
+	object, err := store.API.GetObject(store.VaultKey, vaultobject.KindOperationEvidence, operationID)
+	if err != nil {
+		return []Evidence{}, nil
+	}
+	chain := []Evidence{}
+	if decodeStrict(object.Payload, &chain) != nil || VerifyEvidenceChain(chain, public) != nil {
+		return nil, errors.New("encrypted evidence chain is invalid")
+	}
+	return chain, nil
+}
+
 func (store *VaultStore) AppendEvidence(_ context.Context, operationID string, evidence Evidence, public ed25519.PublicKey) (int64, error) {
 	if err := store.ready(); err != nil {
 		return 0, err

@@ -28,11 +28,16 @@ type Operation struct {
 	PreviousCredentialID   string       `json:"previous_credential_id"`
 	NewCredentialID        string       `json:"new_credential_id,omitempty"`
 	HealthEvidenceDigest   string       `json:"health_evidence_digest,omitempty"`
-	State                  State        `json:"state"`
-	Attempts               int          `json:"attempts"`
-	GraceEndsAt            string       `json:"grace_ends_at,omitempty"`
-	CreatedAt              string       `json:"created_at"`
-	UpdatedAt              string       `json:"updated_at"`
+	// DeploymentID is the target's staged deployment, kept so a run can
+	// resume between staging and activation. CreateParameters are the
+	// provider's non-secret creation inputs (for example a Neon role name).
+	DeploymentID     string              `json:"deployment_id,omitempty"`
+	CreateParameters map[string][]string `json:"create_parameters,omitempty"`
+	State            State               `json:"state"`
+	Attempts         int                 `json:"attempts"`
+	GraceEndsAt      string              `json:"grace_ends_at,omitempty"`
+	CreatedAt        string              `json:"created_at"`
+	UpdatedAt        string              `json:"updated_at"`
 }
 
 func (operation Operation) Validate() error {
@@ -52,7 +57,7 @@ func (operation Operation) Validate() error {
 	if operation.NewRecordRevision != 0 && operation.NewRecordRevision <= operation.PreviousRecordRevision {
 		return errors.New("new record revision must advance the previous revision")
 	}
-	if operation.State != StatePlanned && operation.NewRecordRevision == 0 && operation.State != StateAcquiring && operation.State != StateRetryable && operation.State != StateTerminalFailure {
+	if operation.State != StatePlanned && operation.NewRecordRevision == 0 && operation.State != StateAcquiring && operation.State != StateRetryable && operation.State != StateReconciliationRequired && operation.State != StateTerminalFailure {
 		return errors.New("lifecycle operation lost the new record revision")
 	}
 	if (operation.State == StateHealthy || operation.State == StateGracePeriod || operation.State == StateRevoking || operation.State == StateComplete) && !digestPattern.MatchString(operation.HealthEvidenceDigest) {

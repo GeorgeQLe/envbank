@@ -66,6 +66,12 @@ are historical branch evidence, not new physical acceptance from this audit.
   password reset with operation polling, endpoint lookup, API key
   create/list/revoke) on a disposable project; wire it into a rotation
   command with the Vercel workflow. Unit tests use a synthetic transport only.
+- [ ] Finish the [agent-driven rotation](../docs/agent-rotation.md) on top of
+  the `internal/rotation` engine: Vercel `Deployer` wrapper, standing-policy
+  acceptance in the Vercel backend, `envbank rotate` CLI/MCP trigger with
+  Neon two-role selection, WebAuthn passkey owner approval for phone/Windows,
+  HMAC-fingerprint leak scanner with emergency rotation, then disposable
+  end-to-end acceptance. The engine has synthetic tests only.
 - [ ] Finish hosted Cloudflare Access setup and `local_only` support after
   reconciling branch implementations; retain actual launchd acceptance as a
   separate physical check.
