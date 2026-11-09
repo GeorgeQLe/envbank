@@ -382,7 +382,8 @@ prompts, screenshots, logs, shell arguments, or clipboard history.
 The lifecycle foundation supports version-2 manifests, signed and expiring
 automation policies, optimistic per-bundle leases, secret-free evidence,
 ordered deployment with reverse rollback, and direct Stripe webhook-secret
-capture through an encrypted sink. Start the local workflow-only MCP server
+and [Neon role-password/API-key](docs/neon.md) capture through an encrypted
+sink. Start the local workflow-only MCP server
 with `./envbank mcp serve`; it intentionally exposes no raw secret operations
 and no network listener. Provider capabilities remain honest: unsupported
 unattended creation is reported as interactive instead of being simulated.

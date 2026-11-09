@@ -62,6 +62,10 @@ are historical branch evidence, not new physical acceptance from this audit.
 - [ ] Complete owner real-vault acceptance for the broker; implement the
   separately planned placeholder egress proxy. Existing command-output
   redaction is not that proxy.
+- [ ] Live-accept the [Neon credential adapter](../docs/neon.md) (role
+  password reset with operation polling, endpoint lookup, API key
+  create/list/revoke) on a disposable project; wire it into a rotation
+  command with the Vercel workflow. Unit tests use a synthetic transport only.
 - [ ] Finish hosted Cloudflare Access setup and `local_only` support after
   reconciling branch implementations; retain actual launchd acceptance as a
   separate physical check.

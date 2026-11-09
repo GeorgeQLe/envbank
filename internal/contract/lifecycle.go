@@ -23,11 +23,18 @@ var capabilityMode = map[string]map[string]string{
 		"application-key":        "interactive",
 		"webhook-signing-secret": "interactive",
 	},
+	// Neon role passwords have no grace period upstream; automatic rotation
+	// alternates two roles and "revoke-key" resets the retired role.
+	"neon": {
+		"role-password": "automatic",
+		"api-key":       "automatic",
+	},
 }
 
 var capabilityOperations = map[string]map[string][2]string{
 	"stripe": {"webhook-signing-secret": {"webhook-delivery", "delete-endpoint"}, "secret-key": {"identity", "revoke-key"}, "restricted-key": {"identity", "revoke-key"}},
 	"clerk":  {"application-key": {"identity", "revoke-key"}, "webhook-signing-secret": {"webhook-delivery", "delete-endpoint"}},
+	"neon":   {"role-password": {"role-lookup", "reset-password"}, "api-key": {"key-lookup", "revoke-key"}},
 }
 
 var deploymentProviders = map[string]bool{"vercel": true, "railway": true}
