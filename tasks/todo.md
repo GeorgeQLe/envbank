@@ -66,13 +66,32 @@ are historical branch evidence, not new physical acceptance from this audit.
   password reset with operation polling, endpoint lookup, API key
   create/list/revoke) on a disposable project; wire it into a rotation
   command with the Vercel workflow. Unit tests use a synthetic transport only.
-- [ ] Finish the [agent-driven rotation](../docs/agent-rotation.md): the
-  engine, Vercel `RotationDeployer`, standing approval and the
-  `envbank rotation` CLI/MCP trigger exist with synthetic tests only. Open:
-  `envbank_rotation_due` scheduling, WebAuthn passkey owner approval for
-  phone/Windows, HMAC-fingerprint leak scanner with emergency rotation, and
-  disposable end-to-end acceptance (Vercel preview, Neon project with two
-  roles, Stripe test mode).
+- [ ] Finish the [agent-driven rotation](../docs/agent-rotation.md). As of
+  `main` at `c5d6944` (2026-11-09) the engine, Neon adapter, Vercel
+  `RotationDeployer`, standing approval and the `envbank rotation` CLI/MCP
+  trigger are merged with synthetic tests only; nothing has run against a
+  real Neon or Vercel account. Remaining, in the recommended order:
+  1. [ ] Disposable live acceptance: throwaway Neon project with two
+     API-created roles, throwaway Vercel Preview project with `/api/health`,
+     Stripe test mode. Owner supplies the Neon API key and Vercel token on
+     stdin (`envbank rotation bind-provider`, `envbank vercel bind`), binds
+     the live role, and signs one standing approval; an agent then runs
+     `envbank rotation run` twice (mint/deploy, then retire after grace).
+     Record the evidence chain and every field-name assumption the Neon
+     adapter makes (endpoint `host`/`type`, operation `status` values).
+  2. [ ] Scheduling: implement `envbank_rotation_due` (today it reports
+     `ROTATION_SCHEDULE_NOT_IMPLEMENTED`) and run the grace-period retire
+     step automatically instead of on a second trigger.
+  3. [ ] Remote owner approval from a phone or Windows device: WebAuthn
+     passkey as a second owner key, approval request relayed as ciphertext,
+     `ownerapproval.Verify` WebAuthn mode (design §3).
+  4. [ ] Leak detection and response: HMAC-fingerprint scanner over
+     owner-chosen paths, broker redaction hits and provider last-used
+     signals; emergency rotation under a covering standing policy, or a
+     one-tap owner notification when none covers the record (design §4).
+  5. [ ] Stripe secret/restricted keys: dashboard-only, so rotation goes
+     through protected computer-use capture once the
+     [host checklist](protected-computer-use-2026-11-03.md) passes.
 - [ ] Finish hosted Cloudflare Access setup and `local_only` support after
   reconciling branch implementations; retain actual launchd acceptance as a
   separate physical check.
@@ -109,6 +128,14 @@ qualification.
   release.
 
 Later milestones are tracked in the [product roadmap](../docs/roadmap.md).
+
+## Housekeeping
+
+- [ ] Review the 14 open Dependabot alerts on `main` (7 high); PRs #53-55
+  carry the Go module bumps. GitHub Actions was re-enabled on 2026-11-08 so
+  required checks run again; the Codex review bot's threads must be
+  resolved before merge, and CodeQL's "weak hashing" alerts on
+  SHA-256-derived Keychain account names are false positives.
 
 ## Blockers
 
