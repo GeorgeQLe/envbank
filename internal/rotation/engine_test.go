@@ -615,3 +615,20 @@ func TestLeaseExpiryFencesTheRun(t *testing.T) {
 		t.Fatalf("state=%s err=%v", resumed.State, err)
 	}
 }
+
+type partialStageDeployer struct{ fakeDeployer }
+
+func (deployer *partialStageDeployer) Stage(ctx context.Context, request lifecycle.DeploymentRequest) (lifecycle.DeploymentEvidence, error) {
+	deployer.staged = append(deployer.staged, request)
+	return lifecycle.DeploymentEvidence{DeploymentID: "vd-partial", Status: "unexpected-promotion"}, provider.NewError("stage", 0, "UNEXPECTED_PROMOTION_ROLLBACK_REQUIRED", provider.RetryAmbiguous)
+}
+
+func TestFailedStageKeepsWorkflowForRollback(t *testing.T) {
+	h := newHarness(t)
+	partial := &partialStageDeployer{}
+	h.engine.Deployer = partial
+	operation := h.planAndRun(t)
+	if operation.State != lifecycle.StateQuarantined || len(partial.rolledBack) != 1 || partial.rolledBack[0] != "vd-partial" || operation.DeploymentID != "vd-partial" {
+		t.Fatalf("state=%s rolledBack=%v deployment=%s", operation.State, partial.rolledBack, operation.DeploymentID)
+	}
+}

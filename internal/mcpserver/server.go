@@ -54,6 +54,9 @@ type Request struct {
 	// SourceDeploymentID names the deployment a standing approval should
 	// rebuild for non-production scopes. It is an identifier, never a value.
 	SourceDeploymentID string `json:"source_deployment_id,omitempty"`
+	// Credential names a manifest credential to rotate. It is a manifest
+	// key, never a value.
+	Credential string `json:"credential,omitempty"`
 }
 
 type Backend interface {
@@ -105,7 +108,7 @@ func productionTool(name string) ToolDefinition {
 		"envbank_workflow_status":     {"operation_id": stringField()},
 		"envbank_deployment_rollback": {"operation_id": stringField()},
 		"envbank_rotation_due":        {"vault_id": stringField(), "bundle": stringField()},
-		"envbank_rotation_run":        {"operation_id": stringField(), "provider": stringField()},
+		"envbank_rotation_run":        {"operation_id": stringField(), "provider": stringField(), "credential": stringField()},
 		"envbank_operation_evidence":  {"operation_id": stringField()},
 		"envbank_policy_status":       {"policy_id": stringField(), "plan_id": stringField()},
 	}

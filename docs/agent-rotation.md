@@ -24,6 +24,7 @@ agent-readable channel.
 | Lifecycle state machine, signed policies, leases, evidence chain | `internal/lifecycle` | merged |
 | Rotation engine: resumable driver over the state machine | `internal/rotation` | merged (#59) |
 | Vercel `Deployer` for the engine, standing rotation approval | `internal/vercelworkflow` (`RotationDeployer`, `Backend.StandingPolicyID`) | this branch |
+| Trigger: manifest → operation, alternate selection, vault record writer, credential binding, `envbank rotation` CLI, `envbank_rotation_run` MCP | `internal/rotationrun`, `cmd/envbank/rotation.go` | this branch |
 | Neon adapter (role password, API key) | `internal/provider/neon` | merged (#58) |
 | Stripe adapter (webhook secret automatic; secret/restricted keys interactive) | `internal/provider/stripe` | merged |
 | Vercel secret-only writes, staged promotion, health, rollback | `internal/vercelworkflow`, `cmd/envbank/vercel.go` | merged (#50) |
@@ -90,18 +91,58 @@ The engine already authorizes each step against such a policy, and
 `StandingPolicyID`: it matches manifest digest, bundle, scope fingerprint and
 health path instead of a plan ID, resolves the source deployment at run time
 (current production deployment, or the caller's `source_deployment_id` for
-other scopes), and still requires the owner signature. Remaining:
+other scopes), and still requires the owner signature.
 
-- A `rotation.Trigger` entry point (CLI `envbank rotate --policy ID`, MCP
-  `envbank_rotation_run`, and a due-date check for `envbank_rotation_due`)
-  that builds `PlanInput` from the manifest: for Neon role passwords it picks
-  the standby role (the one not named in the current record's credential
-  ID), so two roles alternate and the application never loses its
-  connection.
+### 2a. Trigger — done on this branch
+
+`internal/rotationrun` builds the operation from the manifest. A credential
+declares its non-secret creation inputs and, for Neon role passwords, the
+roles it alternates between:
+
+```yaml
+credentials:
+  db:
+    provider: neon
+    type: role-password
+    mode: automatic
+    record: DATABASE_URL
+    validation: role-lookup
+    revoke: reset-password
+    parameters: {project_id: proj_x, branch_id: br_y, database_name: appdb, pooled: "true"}
+    alternates: [app_a, app_b]
+```
+
+A `credential-binding` vault object remembers which upstream credential
+backs each record (`role:proj_x/br_y/app_a`); the trigger mints for the
+other alternate and, once the new credential is healthy, rebinds. The
+record writer stores the new revision and advances the bundle snapshot in
+the same call, which is what lets the Vercel deployer refuse anything older.
+
+Owner, once per project:
+
+```sh
+envbank rotation bind-provider --manifest m.yaml --provider neon  < neon-api-key
+envbank rotation bind --manifest m.yaml --credential db --current-id role:proj_x/br_y/app_a
+envbank rotation approve --manifest m.yaml --policy rotation-app --health-path /api/health --expiry 720h
+```
+
+Agent, any time after that (CLI, or MCP `envbank_rotation_run` with
+`credential`, then with `operation_id` once the grace period has passed):
+
+```sh
+envbank rotation run --manifest m.yaml --policy rotation-app --credential db
+envbank rotation run --manifest m.yaml --policy rotation-app --operation rot-…   # after grace
+envbank rotation status --manifest m.yaml --operation rot-…
+```
+
+`envbank mcp serve --manifest m.yaml --rotation-policy rotation-app` exposes
+the same through `envbank_rotation_run`; `envbank_rotation_due` reports
+`ROTATION_SCHEDULE_NOT_IMPLEMENTED` until scheduling lands.
 
 With this, the human does exactly one thing per 90 days per project: sign
-the standing policy. Every rotation, scheduled or emergency, runs without
-them.
+the standing policy. Every rotation runs without them. Still open:
+`envbank_rotation_due` scheduling, and running the grace-period follow-up
+automatically rather than on the next trigger.
 
 ### 3. Remote owner approval (phone, Windows)
 

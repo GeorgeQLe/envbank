@@ -139,6 +139,8 @@ func run(args []string) error {
 		return railwayCommand(args[1:])
 	case "vercel":
 		return vercelCommand(args[1:])
+	case "rotation":
+		return rotationCommand(args[1:])
 	case "owner-approval":
 		return ownerApprovalCommand(args[1:])
 	case "access":

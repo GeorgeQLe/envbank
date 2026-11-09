@@ -312,8 +312,13 @@ func (engine *Engine) stage(ctx context.Context, current *run) (bool, error) {
 	evidence, err := engine.Deployer.Stage(ctx, engine.deployment(*operation))
 	if err != nil {
 		if retryClass(err) == provider.RetrySafe {
+			// Leave DeploymentID empty so the retry re-enters Stage; the
+			// deployer resumes its own durable workflow.
 			return engine.retryable(ctx, current, "stage", "retryable")
 		}
+		// Keep whatever deployment the deployer did start so rollback can
+		// act on it.
+		operation.DeploymentID = evidence.DeploymentID
 		return false, engine.move(ctx, current, lifecycle.StateRollingBack, "stage", "failed")
 	}
 	if evidence.DeploymentID == "" {

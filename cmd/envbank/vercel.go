@@ -22,6 +22,7 @@ import (
 	"github.com/GeorgeQLe/envbank/internal/ownerapproval"
 	"github.com/GeorgeQLe/envbank/internal/provider/vercel"
 	"github.com/GeorgeQLe/envbank/internal/rollout"
+	"github.com/GeorgeQLe/envbank/internal/rotationrun"
 	"github.com/GeorgeQLe/envbank/internal/secure"
 	"github.com/GeorgeQLe/envbank/internal/vaultobject"
 	"github.com/GeorgeQLe/envbank/internal/vercelworkflow"
@@ -497,6 +498,8 @@ func vercelAcceptProduction(auth *authFlags, manifestPath, planID string) error 
 func vercelMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
 	manifest := fs.String("manifest", "", "fixed Vercel bundle manifest; approval is separately signed by owner")
+	rotationPolicy := fs.String("rotation-policy", "", "standing rotation approval id; enables envbank_rotation_run for the manifest's automatic credentials")
+	source := fs.String("source-deployment", "", "Preview/custom scopes: deployment rotations rebuild")
 	auth := addAuthFlags(fs)
 	if e := fs.Parse(args); e != nil {
 		return e
@@ -504,10 +507,44 @@ func vercelMCP(args []string) error {
 	if *manifest == "" || fs.NArg() != 0 {
 		return errors.New("configured MCP requires --manifest and auth flags")
 	}
-	backend, _, _, closeBackend, e := openVercelBackend(auth, *manifest)
+	if *rotationPolicy == "" {
+		backend, _, _, closeBackend, e := openVercelBackend(auth, *manifest)
+		if e != nil {
+			return e
+		}
+		defer closeBackend()
+		return (mcpserver.Server{Backend: backend}).Serve(context.Background(), os.Stdin, os.Stdout)
+	}
+	document, e := loadBundleManifest(*manifest)
 	if e != nil {
 		return e
 	}
-	defer closeBackend()
-	return (mcpserver.Server{Backend: backend}).Serve(context.Background(), os.Stdin, os.Stdout)
+	runners := map[string]*rotationrun.Runner{}
+	var closers []func()
+	defer func() {
+		for _, closeRunner := range closers {
+			closeRunner()
+		}
+	}()
+	for _, name := range sortedCredentialNames(document) {
+		providerName := document.Manifest.Credentials[name].Provider
+		if _, ok := runners[providerName]; ok {
+			continue
+		}
+		runner, closeRunner, e := openRotationRunner(auth, *manifest, *rotationPolicy, *source, providerName)
+		if e != nil {
+			return e
+		}
+		closers = append(closers, closeRunner)
+		runners[providerName] = runner
+	}
+	if len(runners) == 0 {
+		return errors.New("manifest declares no automatic credentials to rotate")
+	}
+	var inner mcpserver.Backend
+	for _, runner := range runners {
+		inner = runner.Engine.Deployer.(*vercelworkflow.RotationDeployer).Backend
+		break
+	}
+	return (mcpserver.Server{Backend: &rotationrun.MCPBackend{Inner: inner, Runners: runners, PolicyID: *rotationPolicy}}).Serve(context.Background(), os.Stdin, os.Stdout)
 }

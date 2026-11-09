@@ -65,6 +65,12 @@ type Credential struct {
 	Validation string   `yaml:"validation" json:"validation"`
 	Revoke     string   `yaml:"revoke" json:"revoke"`
 	Actions    []string `yaml:"actions,omitempty" json:"actions,omitempty"`
+	// Parameters are the provider's non-secret creation inputs (for example
+	// a Neon project, branch and database). Alternates lists the upstream
+	// containers a rotation alternates between, such as two Neon roles; the
+	// rotation trigger mints for the one not currently bound to the record.
+	Parameters map[string]string `yaml:"parameters,omitempty" json:"parameters,omitempty"`
+	Alternates []string          `yaml:"alternates,omitempty" json:"alternates,omitempty"`
 }
 
 type RotationPolicy struct {

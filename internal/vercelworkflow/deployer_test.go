@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GeorgeQLe/envbank/internal/bundle"
 	"github.com/GeorgeQLe/envbank/internal/lifecycle"
 	"github.com/GeorgeQLe/envbank/internal/provider"
 )
@@ -156,5 +157,52 @@ func TestBlockerRetryClasses(t *testing.T) {
 		if got := blockerRetry(code); got != want {
 			t.Fatalf("%s: got %s want %s", code, got, want)
 		}
+	}
+}
+
+func TestStageRetryResumesTheSameWorkflow(t *testing.T) {
+	b, s, a, _ := standingFixture(t, "production", nil)
+	d := deployerFor(b)
+	d.SourceDeploymentID = ""
+	first, err := d.Stage(context.Background(), rotationRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := d.Stage(context.Background(), rotationRequest())
+	if err != nil || again.DeploymentID != first.DeploymentID || a.writes != 1 || a.creates != 1 || len(s.states) != 1 {
+		t.Fatalf("again=%+v err=%v writes=%d creates=%d states=%d", again, err, a.writes, a.creates, len(s.states))
+	}
+	if linked, _, err := s.LoadLink(context.Background(), linkKey("op-1")); err != nil || linked != first.DeploymentID {
+		t.Fatalf("link=%q err=%v", linked, err)
+	}
+	// A rollback that lost the workflow ID still finds it through the link.
+	if _, err := d.Activate(context.Background(), rotationRequest(), first.DeploymentID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Rollback(context.Background(), rotationRequest(), ""); err != nil || a.rollbacks != 1 {
+		t.Fatalf("err=%v rollbacks=%d", err, a.rollbacks)
+	}
+}
+
+func TestStageRefusesPlanThatSkipsARequestedRecord(t *testing.T) {
+	b, s, a, _ := standingFixture(t, "preview", nil)
+	s.snapshot.RecordRevisions["other"] = 1
+	s.snapshot.PhysicalToLogical["fixture/other"] = "other"
+	s.snapshot.Sources["other"] = bundle.SourceStatus{Source: "generate", Status: "ready"}
+	request := rotationRequest()
+	request.RecordRevisions["other"] = 1
+	_, err := deployerFor(b).Stage(context.Background(), request)
+	var typed provider.Error
+	if !errors.As(err, &typed) || typed.Code != "RECORD_NOT_DEPLOYED" || typed.Retry != provider.RetryNever || a.writes != 0 {
+		t.Fatalf("err=%v writes=%d", err, a.writes)
+	}
+}
+
+func TestStageWithoutOperationIDIsRefused(t *testing.T) {
+	b, _, a, _ := standingFixture(t, "preview", nil)
+	request := rotationRequest()
+	request.OperationID = ""
+	if _, err := deployerFor(b).Stage(context.Background(), request); err == nil || a.writes != 0 {
+		t.Fatalf("err=%v", err)
 	}
 }

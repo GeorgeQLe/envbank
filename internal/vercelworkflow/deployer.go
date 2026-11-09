@@ -2,6 +2,7 @@ package vercelworkflow
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -47,6 +48,17 @@ func (deployer *RotationDeployer) production() bool {
 	return deployer.Backend.Adapter.Scope().Environment == "production"
 }
 
+func linkKey(operationID string) string { return "rotation/" + operationID }
+
+// evidence reports the workflow even on failure so the engine can roll it
+// back; a workflow that never started has no ID.
+func (deployer *RotationDeployer) evidence(result mcpserver.Result) lifecycle.DeploymentEvidence {
+	if result.OperationID == "" {
+		return lifecycle.DeploymentEvidence{}
+	}
+	return lifecycle.DeploymentEvidence{DeploymentID: result.OperationID, Status: result.Stage, At: deployer.Backend.now().Format(time.RFC3339)}
+}
+
 // Stage writes the record revisions the engine just stored and builds the
 // deployment that consumes them. The snapshot must already carry exactly
 // those revisions: a stale snapshot would deploy the retired credential.
@@ -55,6 +67,22 @@ func (deployer *RotationDeployer) Stage(ctx context.Context, request lifecycle.D
 		return lifecycle.DeploymentEvidence{}, provider.SanitizeError("stage", err)
 	}
 	backend := deployer.Backend
+	goal := "complete"
+	if deployer.production() {
+		goal = "promote-pending"
+	}
+	if request.OperationID == "" {
+		return lifecycle.DeploymentEvidence{}, provider.NewError("stage", 0, "INVALID_REQUEST", provider.RetryNever)
+	}
+	// A retry resumes the workflow this rotation already started; planning
+	// again would create a second deployment for the same rotation.
+	if workflowID, _, err := backend.Store.LoadLink(ctx, linkKey(request.OperationID)); err == nil {
+		result, err := backend.Call(ctx, "envbank_workflow_resume", mcpserver.Request{OperationID: workflowID})
+		result, err = deployer.drive(ctx, "stage", result, err, goal)
+		return deployer.evidence(result), err
+	} else if !errors.Is(err, ErrNotFound) {
+		return lifecycle.DeploymentEvidence{}, provider.NewError("stage", 0, "LINK_UNAVAILABLE", provider.RetrySafe)
+	}
 	snapshot, revision, err := backend.Store.Snapshot(ctx, backend.Document.Manifest.Bundle)
 	if err != nil {
 		return lifecycle.DeploymentEvidence{}, provider.NewError("stage", 0, "SNAPSHOT_UNAVAILABLE", provider.RetrySafe)
@@ -75,16 +103,29 @@ func (deployer *RotationDeployer) Stage(ctx context.Context, request lifecycle.D
 	if err != nil {
 		return lifecycle.DeploymentEvidence{}, provider.NewError("stage", 0, "PLAN_FAILED", provider.RetrySafe)
 	}
-	goal := "complete"
-	if deployer.production() {
-		goal = "promote-pending"
+	// The target must bind every requested record, or the rotation would
+	// report health for a deployment that never consumed the new value.
+	for record, want := range request.RecordRevisions {
+		deployed := false
+		for _, action := range plan.Actions {
+			if action.Record == record && action.ExpectedRecordRevision == want {
+				deployed = true
+			}
+		}
+		if !deployed {
+			return lifecycle.DeploymentEvidence{}, provider.NewError("stage", 0, "RECORD_NOT_DEPLOYED", provider.RetryNever)
+		}
 	}
+	// Starting the workflow is the first durable step; the link is recorded
+	// right after it so the workflow is never orphaned.
 	result, err := backend.Call(ctx, "envbank_workflow_start", mcpserver.Request{PlanID: plan.ID(), SourceDeploymentID: deployer.SourceDeploymentID})
-	result, err = deployer.drive(ctx, "stage", result, err, goal)
-	if err != nil {
-		return lifecycle.DeploymentEvidence{}, err
+	if err == nil && result.OperationID != "" {
+		if _, linkErr := backend.Store.SaveLink(ctx, linkKey(request.OperationID), result.OperationID, 0); linkErr != nil {
+			return deployer.evidence(result), provider.NewError("stage", 0, "LINK_UNRECORDED", provider.RetryAmbiguous)
+		}
 	}
-	return lifecycle.DeploymentEvidence{DeploymentID: result.OperationID, Status: result.Stage, At: backend.now().Format(time.RFC3339)}, nil
+	result, err = deployer.drive(ctx, "stage", result, err, goal)
+	return deployer.evidence(result), err
 }
 
 // Activate promotes a production deployment, or confirms a non-production
@@ -120,12 +161,23 @@ func (deployer *RotationDeployer) Activate(ctx context.Context, _ lifecycle.Depl
 // Rollback restores the previous production deployment. Non-production
 // scopes have nothing promoted to restore: the new deployment simply stops
 // being used once the engine quarantines its credential.
-func (deployer *RotationDeployer) Rollback(ctx context.Context, _ lifecycle.DeploymentRequest, deploymentID string) error {
+func (deployer *RotationDeployer) Rollback(ctx context.Context, request lifecycle.DeploymentRequest, deploymentID string) error {
 	if err := deployer.ready("rollback"); err != nil {
 		return provider.SanitizeError("rollback", err)
 	}
 	if !deployer.production() {
 		return nil
+	}
+	if deploymentID == "" {
+		// The engine may not have learned the workflow ID; the link knows.
+		linked, _, err := deployer.Backend.Store.LoadLink(ctx, linkKey(request.OperationID))
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return provider.NewError("rollback", 0, "LINK_UNAVAILABLE", provider.RetrySafe)
+		}
+		deploymentID = linked
 	}
 	result, err := deployer.Backend.Rollback(ctx, deploymentID)
 	_, err = deployer.drive(ctx, "rollback", result, err, "rolled-back")
