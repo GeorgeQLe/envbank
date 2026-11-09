@@ -89,13 +89,16 @@ func (SecretValue) MarshalJSON() ([]byte, error) {
 }
 
 type WriteRequest struct {
-	Operation      string `json:"operation"`
-	Target         Target `json:"target"`
-	Service        string `json:"service"`
-	ServiceID      string `json:"service_id"`
-	Name           string `json:"name"`
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
-	secret         SecretValue
+	// ExpectedMetadataRevision is a non-secret optimistic precondition. It is
+	// checked by adapters that can fingerprint metadata; it is not a provider CAS.
+	ExpectedMetadataRevision string `json:"expected_metadata_revision,omitempty"`
+	Operation                string `json:"operation"`
+	Target                   Target `json:"target"`
+	Service                  string `json:"service"`
+	ServiceID                string `json:"service_id"`
+	Name                     string `json:"name"`
+	IdempotencyKey           string `json:"idempotency_key,omitempty"`
+	secret                   SecretValue
 }
 
 func NewWriteRequest(operation string, target Target, service, serviceID, name,
@@ -149,11 +152,15 @@ type VerifyRequest struct {
 }
 
 type WriteEvidence struct {
+	MetadataRevision    string `json:"metadata_revision,omitempty"`
 	ProviderOperationID string `json:"provider_operation_id,omitempty"`
 	CommittedAt         string `json:"committed_at"`
 }
 
 func (evidence WriteEvidence) Validate() error {
+	if evidence.MetadataRevision != "" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(evidence.MetadataRevision) {
+		return errors.New("provider metadata revision invalid")
+	}
 	if evidence.ProviderOperationID != "" &&
 		(len(evidence.ProviderOperationID) > 128 || !safeCode.MatchString(evidence.ProviderOperationID)) {
 		return errors.New("provider write evidence ID is invalid")

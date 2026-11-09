@@ -137,12 +137,18 @@ func run(args []string) error {
 		return bundleCommand(args[1:])
 	case "railway":
 		return railwayCommand(args[1:])
+	case "vercel":
+		return vercelCommand(args[1:])
+	case "owner-approval":
+		return ownerApprovalCommand(args[1:])
 	case "access":
 		return accessCommand(args[1:])
 	case "cloudflare":
 		return cloudflareCommand(args[1:])
 	case "mcp":
 		return mcpCommand(args[1:])
+	case "codex-hook":
+		return codexHookCommand(args[1:])
 	case "agent-broker":
 		return agentBrokerCommand(args[1:])
 	case "agent":
@@ -189,8 +195,8 @@ Usage:
   envbank browser-deny [auth flags] NAME ORIGIN
   envbank browser-origins [auth flags] NAME
   envbank keychain-store [auth flags]
-  envbank native-host [--config PATH]
-  envbank browser-install [--config PATH] [--profile-dir PATH]
+  envbank native-host [--config PATH] [--human-fill]
+  envbank browser-install [--config PATH] [--profile-dir PATH] [--human-fill]
   envbank browser-uninstall [--delete-keychain] [--profile-dir PATH]
   envbank recovery-export --output PATH --recovery-passphrase-file PATH [auth flags]
   envbank recovery-verify --artifact PATH [recovery auth flags]
@@ -218,7 +224,20 @@ Usage:
   envbank railway apply --plan PLAN_ID [auth flags]
   envbank railway resume --operation OPERATION_ID [auth flags]
   envbank railway verify --bundle BUNDLE [auth flags]
+  envbank vercel bind --manifest PATH [auth flags]  # token from owner-controlled stdin
+  envbank vercel plan --manifest PATH [auth flags]
+  envbank vercel approve --manifest PATH --plan PLAN_ID --source-deployment ID --health-path /api/health [auth flags]
+  envbank vercel apply --manifest PATH --plan PLAN_ID [auth flags]
+  envbank vercel resume --manifest PATH --operation ID [auth flags]
+  envbank vercel status --manifest PATH --operation ID [auth flags]
+  envbank vercel rollback --manifest PATH --operation ID [auth flags]
+  envbank vercel accept --manifest PATH --plan PLAN_ID [auth flags]  # disposable Preview acceptance; see docs/vercel-acceptance.md
+  envbank owner-approval enroll [auth flags]  # owner-only, interactive; Secure Enclave key
+  envbank owner-approval status [auth flags]
   envbank mcp serve [--agent-broker-socket PATH] [--no-agent-broker]  # local stdio; workflow tools + value-free envbank_secret_* tools
+  envbank mcp serve --manifest PATH [auth flags]  # Vercel workflow backend
+  envbank codex-hook pre-tool-use|post-tool-use --gate-dir PATH  # owner-installed Codex lifecycle hook; stdin payload
+  envbank codex-hook capabilities | init-gate --gate-dir PATH   # coverage statement; gate setup (installs nothing)
 
 Auth flags:
   --config PATH           encrypted device config
@@ -321,6 +340,13 @@ func readAccessCredentials(reader io.Reader) (client.AccessCredentials, error) {
 func mcpCommand(args []string) error {
 	if len(args) == 0 || args[0] != "serve" {
 		return errors.New("mcp subcommand is required (supported: serve)")
+	}
+	// `--manifest` selects the Vercel workflow backend; otherwise the default
+	// server with the value-free agent-broker tools.
+	for _, a := range args[1:] {
+		if a == "--manifest" || a == "-manifest" || strings.HasPrefix(a, "--manifest=") || strings.HasPrefix(a, "-manifest=") {
+			return vercelMCP(args[1:])
+		}
 	}
 	return mcpServe(args[1:])
 }
@@ -1913,11 +1939,15 @@ func keychainStore(args []string) error {
 func runNativeHost(args []string) error {
 	fs := flag.NewFlagSet("native-host", flag.ContinueOnError)
 	configPath := fs.String("config", "", "encrypted device config (normally read from browser locator)")
+	humanFill := fs.Bool("human-fill", false, "explicitly enable ordinary human filling (not safe for computer use)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return errors.New("native-host accepts no positional arguments")
+	}
+	if *humanFill && *configPath == "" {
+		return errors.New("direct human-fill mode requires an explicit --config path")
 	}
 	if *configPath == "" {
 		executable, err := os.Executable()
@@ -1928,13 +1958,54 @@ func runNativeHost(args []string) error {
 		if err != nil {
 			return errors.New("browser configuration locator is unavailable; run browser-install")
 		}
-		*configPath = strings.TrimSpace(string(locator))
+		binding, err := parseBrowserLocator(locator)
+		if err != nil {
+			return err
+		}
+		*configPath = binding.Config
+		*humanFill = binding.Mode == "human"
 	}
 	if *configPath == "" {
 		return errors.New("browser configuration locator is empty")
 	}
-	host := nativehost.New(*configPath, keychain.SystemStore{})
+	host := browserNativeHost(*configPath, *humanFill)
 	return host.Run(os.Stdin, os.Stdout)
+}
+
+// A missing controller must disable legacy release too. Only an explicit local
+// human-mode selection opts out; native messages cannot change this mode.
+func browserNativeHost(configPath string, humanFill bool) *nativehost.Host {
+	if humanFill {
+		return nativehost.New(configPath, keychain.SystemStore{})
+	}
+	return nativehost.NewForComputerUse(configPath, keychain.SystemStore{}, nil)
+}
+
+type browserLocator struct {
+	Config string `json:"config"`
+	Mode   string `json:"mode"`
+}
+
+func parseBrowserLocator(raw []byte) (browserLocator, error) {
+	binding := browserLocator{Mode: "computer-use"}
+	if len(raw) == 0 || len(raw) > 64<<10 {
+		return binding, errors.New("browser configuration locator is invalid")
+	}
+	text := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(text, "{") {
+		decoder := json.NewDecoder(strings.NewReader(text))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&binding) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+			return browserLocator{}, errors.New("browser configuration locator is invalid")
+		}
+	} else {
+		// Old path-only locators do not constitute authorization for human mode.
+		binding.Config = text
+	}
+	if !filepath.IsAbs(binding.Config) || (binding.Mode != "computer-use" && binding.Mode != "human") {
+		return browserLocator{}, errors.New("browser configuration locator is invalid")
+	}
+	return binding, nil
 }
 
 const defaultExtensionID = "pgbpmecaapiknpejgdkpaifpjcnckcnk"
@@ -1947,6 +2018,7 @@ func browserInstall(args []string) error {
 	configPath := fs.String("config", defaultConfigPath(), "encrypted device config")
 	browser := fs.String("browser", "brave", "browser target: brave, google-chrome, chrome-for-testing, or chromium")
 	profileDir := fs.String("profile-dir", "", "isolated browser user-data directory for the native-host manifest")
+	humanFill := fs.Bool("human-fill", false, "explicitly install ordinary human filling (not safe for computer use)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1991,7 +2063,15 @@ func browserInstall(args []string) error {
 	if err := copyExecutable(executable, installation.binary); err != nil {
 		return err
 	}
-	if err := writePrivateFile(installation.locator, []byte(absConfig+"\n")); err != nil {
+	mode := "computer-use"
+	if *humanFill {
+		mode = "human"
+	}
+	locator, err := json.Marshal(browserLocator{Config: absConfig, Mode: mode})
+	if err != nil {
+		return err
+	}
+	if err := writePrivateFile(installation.locator, append(locator, '\n')); err != nil {
 		return err
 	}
 	manifest := struct {
@@ -2010,6 +2090,11 @@ func browserInstall(args []string) error {
 	}
 	complete = true
 	fmt.Printf("installed native host for extension %s\n", defaultExtensionID)
+	if *humanFill {
+		fmt.Println("ordinary human filling enabled; this installation is not safe for computer use")
+	} else {
+		fmt.Println("computer-use mode: secret release is disabled until a qualified controller is connected")
+	}
 	fmt.Printf("load the unpacked extension from %s\n", extensionSourcePath(executable))
 	return nil
 }
@@ -2037,7 +2122,11 @@ func browserUninstall(args []string) error {
 		if err != nil {
 			return errors.New("cannot identify the Keychain item because the browser locator is unavailable")
 		}
-		cfg, err := client.LoadConfig(strings.TrimSpace(string(raw)))
+		binding, err := parseBrowserLocator(raw)
+		if err != nil {
+			return err
+		}
+		cfg, err := client.LoadConfig(binding.Config)
 		if err != nil {
 			return err
 		}

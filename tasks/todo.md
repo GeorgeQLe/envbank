@@ -34,10 +34,12 @@ are historical branch evidence, not new physical acceptance from this audit.
 
 - [ ] Review and integrate guarded Vercel workflows and Codex lifecycle hooks:
   [PR #50](https://github.com/GeorgeQLe/envbank/pull/50),
-  `feat/protected-host-hooks` at `916a8f4`. GitHub reported the PR unmergeable
-  during this review. Resolve integration and required-check gates without
-  bypassing branch protection. Hardware owner approval, actual vendor-runtime
-  hook coverage and real-provider acceptance remain separate gates.
+  `feat/protected-host-hooks`. `main` was merged into the branch on
+  2026-11-08 to clear the conflict GitHub reported. Remaining gates are in
+  [the Vercel checklist](vercel-workflow-2026-11-03.md): owner imports
+  acceptance credentials privately, disposable Preview/Production acceptance,
+  hardware owner approval, actual vendor-runtime hook coverage and the
+  external observation controller before browser key capture.
 - [ ] Review and integrate XPC owner input: `feat/owner-input-xpc` at `482a14f`.
   The [branch evidence](https://github.com/GeorgeQLe/envbank/blob/482a14f/docs/owner-input-xpc.md)
   records one signed Chromux/broker end-to-end run using a synthetic value;

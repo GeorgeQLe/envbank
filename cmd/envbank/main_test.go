@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"net/http"
 	"os"
 	"os/exec"
@@ -10,7 +12,104 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/GeorgeQLe/envbank/internal/nativehost"
 )
+
+func TestBrowserBootstrapDefaultsToRefusalWithoutController(t *testing.T) {
+	if err := runNativeHost([]string{"--human-fill"}); err == nil || err.Error() != "direct human-fill mode requires an explicit --config path" {
+		t.Fatal("direct human selection without config was silently ignored")
+	}
+	host := browserNativeHost(filepath.Join(t.TempDir(), "missing-config"), false)
+	status, _ := host.Handle(nativehost.Request{Version: 1, ID: "status", Action: "protected_status"})
+	raw, _ := json.Marshal(status)
+	if !strings.Contains(string(raw), `"computer_use":true`) || !strings.Contains(string(raw), `"available":false`) {
+		t.Fatal("default host did not report unavailable computer-use mode")
+	}
+	for _, action := range []string{"get_for_fill", "generate_password", "allow_origin", "deny_origin"} {
+		response, _ := host.Handle(nativehost.Request{Version: 1, ID: "refusal", Action: action})
+		if response.Error != "standard credential operations are unavailable during computer use" {
+			t.Fatalf("%s reached a credential operation: %v", action, response.Error)
+		}
+	}
+	if browserNativeHost("unused-human-config", true).ComputerUse {
+		t.Fatal("explicit human-only mode was not preserved")
+	}
+}
+
+func TestBrowserLocatorModeCannotImplicitlyDowngrade(t *testing.T) {
+	for _, text := range []string{`/private/disposable/device.json`, `{"config":"/private/disposable/device.json"}`, `{"config":"/private/disposable/device.json","mode":"computer-use"}`} {
+		binding, err := parseBrowserLocator([]byte(text))
+		if err != nil || binding.Mode != "computer-use" {
+			t.Fatalf("safe/legacy locator mode: %v", err)
+		}
+	}
+	binding, err := parseBrowserLocator([]byte(`{"config":"/private/disposable/device.json","mode":"human"}`))
+	if err != nil || binding.Mode != "human" {
+		t.Fatal("explicit local human selection was not retained")
+	}
+	for _, text := range []string{"", "relative-device.json", `{"config":"/private/device","mode":"unknown"}`, `{"config":"/private/device","unrecognized":true}`, `{"config":"/private/device"} {}`} {
+		if _, err := parseBrowserLocator([]byte(text)); err == nil {
+			t.Fatal("invalid locator accepted")
+		}
+	}
+}
+
+func TestInstalledNativeHostLocatorBootstrap(t *testing.T) {
+	root := t.TempDir()
+	binaryPath := filepath.Join(root, "envbank-native-host")
+	build := exec.Command("go", "build", "-o", binaryPath, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build disposable native host: %v: %s", err, output)
+	}
+	missingConfig := filepath.Join(root, "missing-device.json")
+	for _, mode := range []string{"computer-use", "human", "legacy"} {
+		t.Run(mode, func(t *testing.T) {
+			locator, _ := json.Marshal(browserLocator{Config: missingConfig, Mode: mode})
+			if mode == "legacy" {
+				locator = []byte(missingConfig + "\n")
+			}
+			if err := os.WriteFile(filepath.Join(root, "native-config"), locator, 0600); err != nil {
+				t.Fatal(err)
+			}
+			actions := []string{"protected_status", "protected_execute"}
+			if mode != "human" {
+				actions = append(actions, "get_for_fill", "allow_origin", "deny_origin", "generate_password")
+			}
+			for _, action := range actions {
+				raw, _ := json.Marshal(nativehost.Request{Version: 1, ID: "bootstrap", Action: action, Origin: "https://fake.invalid"})
+				var input bytes.Buffer
+				_ = binary.Write(&input, binary.LittleEndian, uint32(len(raw)))
+				input.Write(raw)
+				command := exec.Command(binaryPath)
+				command.Stdin = &input
+				output, err := command.Output()
+				if err != nil || len(output) < 4 || int(binary.LittleEndian.Uint32(output[:4])) != len(output)-4 {
+					t.Fatalf("native framing for %s: %v", action, err)
+				}
+				var response nativehost.Response
+				if json.Unmarshal(output[4:], &response) != nil {
+					t.Fatal("invalid native response")
+				}
+				switch action {
+				case "protected_status":
+					status := response.Result.(map[string]any)
+					if status["computer_use"] != (mode != "human") || status["available"] != false {
+						t.Fatal("installed bootstrap selected the wrong mode")
+					}
+				case "protected_execute":
+					if response.Result.(map[string]any)["status"] != "HOST_PROTECTION_UNAVAILABLE" {
+						t.Fatal("unconfigured host did not refuse protected filling")
+					}
+				default:
+					if response.Error != "standard credential operations are unavailable during computer use" {
+						t.Fatal("installed bootstrap reached legacy credential access")
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestVersion(t *testing.T) {
 	originalVersion, originalCommit, originalBuildDate := version, commit, buildDate

@@ -30,3 +30,19 @@ part of this implementation.
 Verification: [non-secret evidence](../docs/protected-computer-use-verification-2026-11-03.json).
 Full hermetic end-to-end gate, scoped race, vet, 20 JavaScript tests and 17
 browser DOM cases passed. Actual OS/Brave confidentiality remains unqualified.
+
+
+Acceptance remediation:
+- [x] Default the CLI and new browser installations to computer-use refusal;
+  ordinary human mode requires explicit local opt-in.
+- [x] Parse private mode/config locators conservatively; legacy path-only
+  locators default to refusal when used by the updated binary.
+- [x] Stop advertising production workflow capabilities without a backend;
+  label test-lab capability reports as simulations.
+- [x] Implement the Vercel REST adapter and configured CLI/MCP workflow with
+  exact scope binding, encrypted rollout journals, signed policy, private writes,
+  deployment health gates and rollback. See [Vercel work](vercel-workflow-2026-11-03.md).
+- [ ] Qualify the implementation against disposable real Vercel targets with
+  owner-imported credentials. Synthetic tests do not qualify a real transfer.
+- [ ] Integrate the trusted controller and qualified Driver described above;
+  this cannot be replaced by an extension/page claim that capture is paused.

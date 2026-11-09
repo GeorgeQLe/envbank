@@ -229,6 +229,8 @@ func (lab *Lab) callProduction(ctx context.Context, name string, request mcpserv
 		return mcpserver.Result{BlockerCode: "POLICY_BINDING_MISMATCH"}, nil
 	}
 	switch name {
+	case "envbank_capabilities":
+		return mcpserver.Result{Stage: "simulation", Capability: "stripe:webhook-signing-secret=simulated,clerk:application-key=simulated,vercel:deployment=simulated,cloudflare:worker-version=simulated"}, nil
 	case "envbank_setup_plan":
 		return mcpserver.Result{PlanID: "plan-full-matrix", Stage: "ready", ResourceIDs: []string{"stripe-account", "clerk-application", "vercel-project", "railway-project"}}, nil
 	case "envbank_workflow_start", "envbank_rotation_run":

@@ -262,9 +262,9 @@ func (a *API) do(method, path string, request any, response any, authenticated b
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(raw, &serverError) == nil && serverError.Error != "" {
-			return fmt.Errorf("server returned %d: %s", res.StatusCode, serverError.Error)
+			return HTTPStatusError{Status: res.StatusCode, Message: serverError.Error}
 		}
-		return fmt.Errorf("server returned %d", res.StatusCode)
+		return HTTPStatusError{Status: res.StatusCode}
 	}
 	if response != nil && len(raw) != 0 {
 		if err := json.Unmarshal(raw, response); err != nil {
