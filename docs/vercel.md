@@ -83,6 +83,33 @@ Commands below omit the normal `--config` and owner-controlled auth flags:
    `envbank vercel resume --manifest PATH --operation OPERATION_ID`.
    Inspect it with the corresponding `status` command.
 
+### Standing rotation approval
+
+A per-plan approval is right for an ad-hoc deployment and wrong for
+rotation, where the owner's intent is "keep these credentials fresh in this
+target". A **standing approval** is the same signed, owner-approved policy
+with no `deployment_plan_id` and no `deployment_source_id`, and a `schedule`
+other than `manual`. It still binds the exact manifest digest, scope
+fingerprint, health path, credentials, operations and device, and it still
+expires (at most 90 days). While it is valid, the backend configured with
+that policy ID (`Backend.StandingPolicyID`) accepts every plan for that
+manifest: the owner signs once, and each rotation runs without them.
+
+The source deployment is resolved when a run starts. Production rebuilds the
+currently promoted deployment, after the usual drift check. Preview and
+custom scopes have no single current deployment, so the caller names one
+through the identifier-only `source_deployment_id` field of
+`envbank_workflow_start`; a run without it is blocked with
+`SOURCE_DEPLOYMENT_REQUIRED`. Everything else (durable intent before each
+mutation, lease, health, promotion gate, rollback) is unchanged.
+
+`vercelworkflow.RotationDeployer` adapts this workflow to the rotation
+engine's `Deployer`: `Stage` plans the current snapshot (refusing one that
+does not carry exactly the record revisions the engine just stored) and
+drives it to the promotion gate; `Activate` promotes and returns the health
+evidence; `Rollback` restores the previous production deployment. See
+[agent-driven rotation](agent-rotation.md).
+
 For an agent, start `envbank mcp serve --manifest PATH` with the existing
 owner-controlled auth configuration. This pins the backend to that manifest and
 credential scope. `envbank_setup_plan`, `envbank_workflow_start`,

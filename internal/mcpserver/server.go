@@ -51,6 +51,12 @@ type Request struct {
 	PlanID         string `json:"plan_id,omitempty"`
 	OperationID    string `json:"operation_id,omitempty"`
 	PolicyID       string `json:"policy_id,omitempty"`
+	// SourceDeploymentID names the deployment a standing approval should
+	// rebuild for non-production scopes. It is an identifier, never a value.
+	SourceDeploymentID string `json:"source_deployment_id,omitempty"`
+	// Credential names a manifest credential to rotate. It is a manifest
+	// key, never a value.
+	Credential string `json:"credential,omitempty"`
 }
 
 type Backend interface {
@@ -97,12 +103,12 @@ func productionTool(name string) ToolDefinition {
 	fields := map[string]map[string]any{
 		"envbank_capabilities":        {},
 		"envbank_setup_plan":          {"vault_id": stringField(), "bundle": stringField(), "manifest_digest": stringField(), "environment": stringField()},
-		"envbank_workflow_start":      {"vault_id": stringField(), "bundle": stringField(), "manifest_digest": stringField(), "environment": stringField(), "provider": stringField(), "plan_id": stringField(), "policy_id": stringField()},
+		"envbank_workflow_start":      {"vault_id": stringField(), "bundle": stringField(), "manifest_digest": stringField(), "environment": stringField(), "provider": stringField(), "plan_id": stringField(), "policy_id": stringField(), "source_deployment_id": stringField()},
 		"envbank_workflow_resume":     {"operation_id": stringField()},
 		"envbank_workflow_status":     {"operation_id": stringField()},
 		"envbank_deployment_rollback": {"operation_id": stringField()},
 		"envbank_rotation_due":        {"vault_id": stringField(), "bundle": stringField()},
-		"envbank_rotation_run":        {"operation_id": stringField(), "provider": stringField()},
+		"envbank_rotation_run":        {"operation_id": stringField(), "provider": stringField(), "credential": stringField()},
 		"envbank_operation_evidence":  {"operation_id": stringField()},
 		"envbank_policy_status":       {"policy_id": stringField(), "plan_id": stringField()},
 	}

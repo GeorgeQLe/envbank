@@ -377,6 +377,12 @@ func TestAcceptanceProbeRefusesOtherHeaders(t *testing.T) {
 
 type unavailableAcceptanceJournal struct{ Store }
 
+func (s unavailableAcceptanceJournal) LoadLink(context.Context, string) (string, int64, error) {
+	return "", 0, errors.New("journal unavailable")
+}
+func (s unavailableAcceptanceJournal) SaveLink(context.Context, string, string, int64) (int64, error) {
+	return 0, errors.New("journal unavailable")
+}
 func (s unavailableAcceptanceJournal) LoadDeployment(context.Context, string) (State, int64, error) {
 	return State{}, 0, errors.New("synthetic unavailable journal")
 }

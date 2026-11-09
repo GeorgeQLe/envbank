@@ -70,6 +70,9 @@ func validateLifecycle(manifest *Manifest) error {
 		if err := validateActions(path+".actions", credential.Actions); err != nil {
 			return err
 		}
+		if err := validateCredentialInputs(path, credential); err != nil {
+			return err
+		}
 	}
 
 	seenTargets := map[string]bool{}
@@ -230,4 +233,53 @@ func contains(values []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+var (
+	parameterKeyPattern   = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	alternateValuePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,62}$`)
+)
+
+// alternating lists the provider credential types whose rotation alternates
+// between upstream containers, and the parameter the alternate fills.
+var alternating = map[string]map[string]string{"neon": {"role-password": "role_name"}}
+
+func validateCredentialInputs(path string, credential Credential) error {
+	for key, value := range credential.Parameters {
+		if !parameterKeyPattern.MatchString(key) {
+			return fmt.Errorf("%s.parameters: invalid parameter name", path)
+		}
+		if len(value) == 0 || len(value) > 256 || strings.IndexFunc(value, func(r rune) bool { return r < ' ' || r == 0x7f }) >= 0 {
+			return fmt.Errorf("%s.parameters.%s: invalid parameter value", path, key)
+		}
+	}
+	parameter, alternates := alternating[credential.Provider][credential.Type]
+	if len(credential.Alternates) == 0 {
+		if alternates && credential.Mode == "automatic" {
+			return fmt.Errorf("%s.alternates: automatic %s/%s rotation needs at least two alternates", path, credential.Provider, credential.Type)
+		}
+		return nil
+	}
+	if !alternates {
+		return fmt.Errorf("%s.alternates: %s/%s does not alternate", path, credential.Provider, credential.Type)
+	}
+	if len(credential.Alternates) < 2 || len(credential.Alternates) > 4 || duplicateStrings(credential.Alternates) {
+		return fmt.Errorf("%s.alternates: two to four distinct alternates are required", path)
+	}
+	for _, alternate := range credential.Alternates {
+		if !alternateValuePattern.MatchString(alternate) {
+			return fmt.Errorf("%s.alternates: invalid alternate", path)
+		}
+	}
+	if _, fixed := credential.Parameters[parameter]; fixed {
+		return fmt.Errorf("%s.parameters.%s: chosen per rotation from alternates; do not fix it", path, parameter)
+	}
+	return nil
+}
+
+// AlternateParameter names the creation parameter a provider credential
+// type fills from its alternates, and whether it alternates at all.
+func AlternateParameter(provider, credentialType string) (string, bool) {
+	parameter, ok := alternating[provider][credentialType]
+	return parameter, ok
 }

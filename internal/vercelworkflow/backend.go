@@ -58,8 +58,18 @@ func ValidHealthPath(path string) bool {
 	u, e := url.Parse(path)
 	return e == nil && len(path) <= 256 && len(path) > 0 && path[0] == '/' && (len(path) < 2 || path[1] != '/') && !u.IsAbs() && u.Host == "" && u.RawQuery == "" && u.Fragment == "" && u.Path == path
 }
+
+// standingApproval reports whether a policy is a standing rotation approval:
+// one that names no plan or source deployment and runs on a schedule.
+func standingApproval(policy lifecycle.AutomationPolicy) bool {
+	return policy.DeploymentPlanID == "" && policy.DeploymentSourceID == "" && policy.Schedule != "" && policy.Schedule != "manual"
+}
+
 func (state State) Validate() error {
-	if state.Version != 1 || !digestID.MatchString(state.PlanID) || state.ID != OperationID(state.PlanID) || state.PolicyID != PolicyID(state.PlanID) || !digestID.MatchString(state.PolicyDigest) || !digestID.MatchString(state.ScopeFingerprint) || !deploymentID.MatchString(state.SourceDeploymentID) || !ValidHealthPath(state.HealthPath) {
+	// A per-plan approval is named after its plan; a standing approval keeps
+	// its own ID and is recognized by its shape.
+	validPolicy := state.PolicyID == PolicyID(state.PlanID) || state.PolicyID != "" && state.PolicyID == state.Approval.ID && standingApproval(state.Approval)
+	if state.Version != 1 || !digestID.MatchString(state.PlanID) || state.ID != OperationID(state.PlanID) || !validPolicy || !digestID.MatchString(state.PolicyDigest) || !digestID.MatchString(state.ScopeFingerprint) || !deploymentID.MatchString(state.SourceDeploymentID) || !ValidHealthPath(state.HealthPath) {
 		return errors.New("deployment state binding invalid")
 	}
 	if state.DeploymentID != "" && !deploymentID.MatchString(state.DeploymentID) {
@@ -92,6 +102,11 @@ type Backend struct {
 	// mutating verb requires a policy carrying a valid owner signature from
 	// exactly this key; there is no device-only/TTY fallback.
 	OwnerApprovalKey []byte
+	// StandingPolicyID, when set, names a standing rotation approval instead
+	// of the per-plan approval. A standing policy binds manifest, scope,
+	// credentials and operations for its validity window but no single plan
+	// or source deployment; the source is resolved when a run starts.
+	StandingPolicyID string
 	// Probe must return only status, never response bodies. The default is a
 	// credential-free, no-redirect GET to the owned deployment's HTTPS URL.
 	Probe func(context.Context, vercel.Deployment, string) (bool, error)
@@ -132,12 +147,25 @@ func (backend *Backend) engine() *rollout.Engine {
 	return &rollout.Engine{Adapter: backend.Adapter, Store: backend.Store, Now: backend.now}
 }
 func (backend *Backend) policy(ctx context.Context, plan rollout.ProviderPlan, operation string) (lifecycle.AutomationPolicy, error) {
-	p, _, e := backend.Store.LoadPolicy(ctx, PolicyID(plan.ID()))
+	id, standing := PolicyID(plan.ID()), false
+	if backend.StandingPolicyID != "" {
+		id, standing = backend.StandingPolicyID, true
+	}
+	p, _, e := backend.Store.LoadPolicy(ctx, id)
 	if e != nil {
 		return p, errors.New("Vercel approval unavailable")
 	}
 	scope := backend.Adapter.Scope()
-	if p.ID != PolicyID(plan.ID()) || p.DeploymentPlanID != plan.ID() || p.DeploymentScopeFingerprint != scope.Fingerprint() || !deploymentID.MatchString(p.DeploymentSourceID) || !ValidHealthPath(p.DeploymentHealthPath) || p.ApprovingDevice != backend.DeviceID || !bytes.Equal(p.PublicKey, backend.TrustedPolicyKey) {
+	if p.ID != id || p.DeploymentScopeFingerprint != scope.Fingerprint() || !ValidHealthPath(p.DeploymentHealthPath) || p.ApprovingDevice != backend.DeviceID || !bytes.Equal(p.PublicKey, backend.TrustedPolicyKey) {
+		return p, errors.New("Vercel approval binding invalid")
+	}
+	if standing {
+		// A standing approval must say so: no plan or source pin, and a
+		// schedule other than manual. It still binds the exact manifest.
+		if !standingApproval(p) || p.Bundle != plan.Bundle || p.ManifestDigest != plan.ManifestDigest {
+			return p, errors.New("Vercel standing approval binding invalid")
+		}
+	} else if p.DeploymentPlanID != plan.ID() || !deploymentID.MatchString(p.DeploymentSourceID) {
 		return p, errors.New("Vercel approval binding invalid")
 	}
 	// Device (vault transport) signature alone is never sufficient: the
@@ -250,7 +278,30 @@ func (backend *Backend) Call(ctx context.Context, name string, request mcpserver
 			if plan.Validate(backend.now()) != nil {
 				return mcpserver.Result{BlockerCode: "PLAN_EXPIRED"}, nil
 			}
-			source, sourceErr := backend.Adapter.Deployment(ctx, p.DeploymentSourceID)
+			sourceID := p.DeploymentSourceID
+			if sourceID == "" {
+				// Standing approval: resolve the source now. Production rebuilds
+				// the currently promoted deployment; other scopes have no single
+				// current deployment, so the caller must name one.
+				switch {
+				case request.SourceDeploymentID != "":
+					sourceID = request.SourceDeploymentID
+				case scope.Environment == "production":
+					current, err := backend.Adapter.CurrentDeployment(ctx)
+					if err != nil {
+						return mcpserver.Result{BlockerCode: "SOURCE_DEPLOYMENT_UNAVAILABLE"}, nil
+					}
+					sourceID = current.ID
+				default:
+					return mcpserver.Result{BlockerCode: "SOURCE_DEPLOYMENT_REQUIRED"}, nil
+				}
+				if !deploymentID.MatchString(sourceID) {
+					return mcpserver.Result{BlockerCode: "SOURCE_DEPLOYMENT_UNAVAILABLE"}, nil
+				}
+			} else if request.SourceDeploymentID != "" && request.SourceDeploymentID != sourceID {
+				return mcpserver.Result{BlockerCode: "POLICY_BINDING_MISMATCH"}, nil
+			}
+			source, sourceErr := backend.Adapter.Deployment(ctx, sourceID)
 			if sourceErr != nil || source.ReadyState != "READY" || source.CommitSHA == "" || source.Prebuilt {
 				return mcpserver.Result{BlockerCode: "SOURCE_DEPLOYMENT_UNAVAILABLE"}, nil
 			}

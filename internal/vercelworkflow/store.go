@@ -23,6 +23,11 @@ type Store interface {
 	LoadPolicy(context.Context, string) (lifecycle.AutomationPolicy, int64, error)
 	LoadDeployment(context.Context, string) (State, int64, error)
 	SaveDeployment(context.Context, State, int64) (int64, error)
+	// Links map an external operation (a rotation) to the durable workflow
+	// it started, so a retry resumes that workflow instead of planning
+	// another and a rollback can find it.
+	LoadLink(context.Context, string) (string, int64, error)
+	SaveLink(context.Context, string, string, int64) (int64, error)
 	AcquireLease(context.Context, string, string, time.Duration) (lifecycle.Lease, int64, error)
 	ReleaseLease(context.Context, lifecycle.Lease, int64) error
 }
@@ -62,6 +67,38 @@ func (store *VaultStore) LoadDeployment(_ context.Context, id string) (State, in
 		return State{}, 0, errors.New("deployment journal invalid")
 	}
 	return state, object.Revision, nil
+}
+
+type deploymentLink struct {
+	WorkflowID string `json:"workflow_id"`
+}
+
+func (store *VaultStore) LoadLink(_ context.Context, key string) (string, int64, error) {
+	object, err := store.API.GetObject(store.VaultKey, vaultobject.KindDeploymentLink, key)
+	if err != nil {
+		var status client.HTTPStatusError
+		if errors.As(err, &status) && status.Status == 404 {
+			return "", 0, ErrNotFound
+		}
+		return "", 0, errors.New("deployment link unavailable")
+	}
+	var link deploymentLink
+	decoder := json.NewDecoder(bytes.NewReader(object.Payload))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&link) != nil || decoder.Decode(&struct{}{}) != io.EOF || link.WorkflowID == "" {
+		return "", 0, errors.New("deployment link invalid")
+	}
+	return link.WorkflowID, object.Revision, nil
+}
+func (store *VaultStore) SaveLink(_ context.Context, key, workflowID string, expected int64) (int64, error) {
+	if key == "" || workflowID == "" {
+		return 0, errors.New("deployment link invalid")
+	}
+	object, err := store.API.PutObject(store.VaultKey, vaultobject.KindDeploymentLink, key, deploymentLink{WorkflowID: workflowID}, expected)
+	if err != nil {
+		return 0, errors.New("deployment link update failed")
+	}
+	return object.Revision, nil
 }
 func (store *VaultStore) SaveDeployment(_ context.Context, state State, expected int64) (int64, error) {
 	if state.Validate() != nil {

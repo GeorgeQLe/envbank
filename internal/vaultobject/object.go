@@ -30,6 +30,8 @@ const (
 	KindOperationEvidence    = "operation-evidence"
 	KindRollbackMaterial     = "rollback-material"
 	KindDeploymentOperation  = "deployment-operation"
+	KindCredentialBinding    = "credential-binding"
+	KindDeploymentLink       = "deployment-link"
 
 	MaxKindBytes    = 64
 	MaxKeyBytes     = 512

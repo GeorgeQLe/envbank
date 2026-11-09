@@ -23,6 +23,7 @@ import (
 const privateFixture = "fake-private-value-no-output-acceptance-fixture"
 
 type memoryStore struct {
+	links     map[string]string
 	plans     map[string]rollout.ProviderPlan
 	ops       map[string]rollout.Operation
 	states    map[string]State
@@ -88,6 +89,23 @@ func (s *memoryStore) Snapshot(context.Context, string) (bundle.Snapshot, int64,
 }
 func (s *memoryStore) LoadPolicy(context.Context, string) (lifecycle.AutomationPolicy, int64, error) {
 	return clone(s.policy), 1, nil
+}
+func (s *memoryStore) LoadLink(_ context.Context, key string) (string, int64, error) {
+	if s.links == nil || s.links[key] == "" {
+		return "", 0, ErrNotFound
+	}
+	return s.links[key], s.revisions["link:"+key], nil
+}
+func (s *memoryStore) SaveLink(_ context.Context, key, workflowID string, expected int64) (int64, error) {
+	if s.revisions["link:"+key] != expected {
+		return 0, errors.New("conflict")
+	}
+	if s.links == nil {
+		s.links = map[string]string{}
+	}
+	s.links[key] = workflowID
+	s.revisions["link:"+key]++
+	return s.revisions["link:"+key], nil
 }
 func (s *memoryStore) LoadDeployment(_ context.Context, id string) (State, int64, error) {
 	p, ok := s.states[id]
