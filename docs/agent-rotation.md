@@ -45,7 +45,12 @@ takes a `lifecycle.CredentialAdapter`, a `Deployer`, a `Store` and an
 
 Each transition is saved with an optimistic revision **before** its evidence
 is appended, so a crash can never replay a mutation; it can only leave a
-reporting gap. Provider errors carry their own retry class: `safe` retries
+reporting gap. A run that finds the operation in a mutating state it did not
+enter itself (`acquiring`, `staging`, `activating`, `revoking`) treats the
+earlier mutation as interrupted: credential steps stop for reconciliation,
+deployment steps roll back. Every run is fenced to its bundle lease: the
+context expires with the lease and no step starts after it, so two runners
+can never mutate the same bundle. Provider errors carry their own retry class: `safe` retries
 within the policy budget with the same idempotency key, `ambiguous` stops in
 `reconciliation-required` (a retry might mint a second secret), `never` ends
 the operation.

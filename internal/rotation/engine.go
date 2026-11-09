@@ -118,8 +118,12 @@ func (engine *Engine) Plan(ctx context.Context, input PlanInput) (lifecycle.Oper
 	if err := operation.Validate(); err != nil {
 		return lifecycle.Operation{}, err
 	}
-	if err := policy.Authorizes(binding(operation, policy, "create"), engine.now()); err != nil {
-		return lifecycle.Operation{}, ErrNotApproved
+	// Compensation (rollback, revoke) must be approved up front: a run that
+	// cannot clean up after itself must never start.
+	for _, action := range []string{"create", "stage", "activate", "verify", "rollback", "revoke"} {
+		if err := policy.Authorizes(binding(operation, policy, action), engine.now()); err != nil {
+			return lifecycle.Operation{}, ErrNotApproved
+		}
 	}
 	if _, err := engine.Store.SaveOperation(ctx, operation, 0); err != nil {
 		return lifecycle.Operation{}, fmt.Errorf("rotation operation could not be recorded: %w", err)
@@ -156,13 +160,27 @@ func (engine *Engine) Run(ctx context.Context, operationID string) (lifecycle.Op
 		}
 		return operation, fmt.Errorf("rotation lease unavailable: %w", err)
 	}
-	defer func() { _ = engine.Store.ReleaseLease(ctx, lease, leaseRevision) }()
+	defer func() { _ = engine.Store.ReleaseLease(context.WithoutCancel(ctx), lease, leaseRevision) }()
+	// Another runner may have advanced the operation between the first load
+	// and the lease; only the copy read under the lease is authoritative.
+	operation, revision, err = engine.Store.LoadOperation(ctx, operationID)
+	if err != nil {
+		return lifecycle.Operation{}, fmt.Errorf("rotation operation unavailable: %w", err)
+	}
+	leaseEnds, err := time.Parse(time.RFC3339, lease.ExpiresAt)
+	if err != nil {
+		return operation, errors.New("rotation lease expiry is invalid")
+	}
+	// No mutation may outlive the lease: once it lapses another runner could
+	// acquire it, so the whole run is fenced to the lease window.
+	ctx, cancel := context.WithDeadline(ctx, leaseEnds)
+	defer cancel()
 
 	chain, err := engine.Store.LoadEvidence(ctx, operationID, engine.PolicyKey)
 	if err != nil {
 		return operation, err
 	}
-	current := &run{operation: operation, revision: revision}
+	current := &run{operation: operation, revision: revision, leaseEnds: leaseEnds}
 	if len(chain) > 0 {
 		last := chain[len(chain)-1]
 		current.previous = &last
@@ -179,15 +197,31 @@ type run struct {
 	operation lifecycle.Operation
 	revision  int64
 	previous  *lifecycle.Evidence
+	leaseEnds time.Time
+	// entered is the last state this run transitioned into itself. A mutating
+	// state found on disk that this run did not enter was interrupted
+	// mid-mutation by an earlier run and must not be replayed.
+	entered lifecycle.State
 }
+
+var ErrLeaseExpired = errors.New("rotation lease expired before the run finished")
+
+// mutatingStates are the states in which an upstream mutation is in flight.
+var mutatingStates = map[lifecycle.State]bool{lifecycle.StateAcquiring: true, lifecycle.StateStaging: true, lifecycle.StateActivating: true, lifecycle.StateRevoking: true}
 
 // step performs one state transition. It returns done when the operation is
 // at rest.
 func (engine *Engine) step(ctx context.Context, current *run) (bool, error) {
 	operation := &current.operation
+	if !current.leaseEnds.IsZero() && !engine.now().Before(current.leaseEnds) {
+		return true, ErrLeaseExpired
+	}
 	policy, err := engine.policy(ctx, operation.PolicyID, operation.PolicyDigest)
 	if err != nil {
 		return true, err
+	}
+	if mutatingStates[operation.State] && current.entered != operation.State {
+		return engine.interrupted(ctx, current)
 	}
 	switch operation.State {
 	case lifecycle.StatePlanned:
@@ -233,6 +267,19 @@ func (engine *Engine) step(ctx context.Context, current *run) (bool, error) {
 		return true, nil
 	}
 	return true, fmt.Errorf("rotation operation is in unknown state %q", operation.State)
+}
+
+// interrupted resolves a mutation whose outcome an earlier run never
+// recorded. Credential mutations cannot be replayed (a second mint or an
+// unknown revoke), so they stop for reconciliation; deployment mutations are
+// undone by rollback, which restores the previous deployment and quarantines
+// the minted credential.
+func (engine *Engine) interrupted(ctx context.Context, current *run) (bool, error) {
+	switch current.operation.State {
+	case lifecycle.StateStaging, lifecycle.StateActivating:
+		return false, engine.move(ctx, current, lifecycle.StateRollingBack, "resume", "interrupted")
+	}
+	return true, engine.move(ctx, current, lifecycle.StateReconciliationRequired, "resume", "interrupted")
 }
 
 func (engine *Engine) acquire(ctx context.Context, current *run, policy lifecycle.AutomationPolicy) (bool, error) {
@@ -310,7 +357,7 @@ func (engine *Engine) revoke(ctx context.Context, current *run, policy lifecycle
 func (engine *Engine) retry(ctx context.Context, current *run, policy lifecycle.AutomationPolicy) (bool, error) {
 	operation := &current.operation
 	if operation.Attempts >= policy.RetryBudget {
-		return true, engine.fail(ctx, current, "retry", "budget-exhausted")
+		return engine.exhausted(ctx, current)
 	}
 	operation.Attempts++
 	switch {
@@ -324,8 +371,42 @@ func (engine *Engine) retry(ctx context.Context, current *run, policy lifecycle.
 	return false, engine.move(ctx, current, lifecycle.StateRevoking, "retry", "revoking")
 }
 
+// exhausted ends retries along the path that cleans up whatever was already
+// mutated: nothing minted ends terminally; a minted credential that never
+// became healthy is rolled back and quarantined; an interrupted revocation
+// needs reconciliation. The intermediate hop re-enters the failed step so the
+// evidence names it.
+func (engine *Engine) exhausted(ctx context.Context, current *run) (bool, error) {
+	operation := &current.operation
+	switch {
+	case operation.NewRecordRevision == 0:
+		return true, engine.move(ctx, current, lifecycle.StateTerminalFailure, "retry", "budget-exhausted")
+	case operation.DeploymentID == "":
+		if err := engine.move(ctx, current, lifecycle.StateStaging, "retry", "budget-exhausted"); err != nil {
+			return true, err
+		}
+		return false, engine.move(ctx, current, lifecycle.StateRollingBack, "stage", "budget-exhausted")
+	case operation.HealthEvidenceDigest == "":
+		if err := engine.move(ctx, current, lifecycle.StateActivating, "retry", "budget-exhausted"); err != nil {
+			return true, err
+		}
+		return false, engine.move(ctx, current, lifecycle.StateRollingBack, "activate", "budget-exhausted")
+	}
+	if err := engine.move(ctx, current, lifecycle.StateRevoking, "retry", "budget-exhausted"); err != nil {
+		return true, err
+	}
+	return true, engine.move(ctx, current, lifecycle.StateReconciliationRequired, "revoke", "budget-exhausted")
+}
+
 func (engine *Engine) rollback(ctx context.Context, current *run) (bool, error) {
 	operation := &current.operation
+	policy, err := engine.policy(ctx, operation.PolicyID, operation.PolicyDigest)
+	if err != nil {
+		return true, err
+	}
+	if err := engine.authorize(policy, *operation, "rollback"); err != nil {
+		return true, engine.move(ctx, current, lifecycle.StateTerminalFailure, "rollback", "not-approved")
+	}
 	if operation.DeploymentID != "" {
 		if err := engine.Deployer.Rollback(ctx, engine.deployment(*operation), operation.DeploymentID); err != nil {
 			return true, engine.fail(ctx, current, "rollback", "failed")
@@ -342,7 +423,11 @@ func (engine *Engine) quarantine(ctx context.Context, current *run) (bool, error
 	operation := &current.operation
 	code := "revoked"
 	if operation.NewCredentialID != "" {
-		if err := engine.Credentials.Revoke(ctx, operation.NewCredentialID); err != nil {
+		policy, err := engine.policy(ctx, operation.PolicyID, operation.PolicyDigest)
+		switch {
+		case err != nil || engine.authorize(policy, *operation, "revoke") != nil:
+			code = "revoke-not-approved"
+		case engine.Credentials.Revoke(ctx, operation.NewCredentialID) != nil:
 			code = "revoke-failed"
 		}
 	}
@@ -391,6 +476,7 @@ func (engine *Engine) move(ctx context.Context, current *run, to lifecycle.State
 		return fmt.Errorf("rotation transition to %s could not be recorded: %w", to, err)
 	}
 	current.revision = revision
+	current.entered = to
 	return engine.record(ctx, current, stage, code)
 }
 

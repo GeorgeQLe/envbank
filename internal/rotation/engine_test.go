@@ -491,3 +491,127 @@ func TestPlanRefusesUnapprovedCredentialClassOrTarget(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestInterruptedCreateIsNotReplayed(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.engine.Plan(context.Background(), h.input()); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an earlier run that died after entering acquiring.
+	operation, revision, _ := h.store.LoadOperation(context.Background(), "op-1")
+	if err := operation.Move(lifecycle.StateAcquiring, h.clock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.SaveOperation(context.Background(), operation, revision); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := h.engine.Run(context.Background(), "op-1")
+	if err != nil || resumed.State != lifecycle.StateReconciliationRequired || len(h.adapter.created) != 0 {
+		t.Fatalf("state=%s err=%v created=%d", resumed.State, err, len(h.adapter.created))
+	}
+}
+
+func TestInterruptedDeploymentStepRollsBack(t *testing.T) {
+	for _, state := range []lifecycle.State{lifecycle.StateStaging, lifecycle.StateActivating} {
+		h := newHarness(t)
+		if _, err := h.engine.Plan(context.Background(), h.input()); err != nil {
+			t.Fatal(err)
+		}
+		operation, revision, _ := h.store.LoadOperation(context.Background(), "op-1")
+		operation.State = lifecycle.StateStored
+		operation.NewRecordRevision = 2
+		operation.NewCredentialID = "role:p/b/app_b"
+		if state == lifecycle.StateActivating {
+			operation.State = lifecycle.StateStaged
+			operation.DeploymentID = "dpl_1"
+		}
+		if err := operation.Move(state, h.clock); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.store.SaveOperation(context.Background(), operation, revision); err != nil {
+			t.Fatal(err)
+		}
+		resumed, err := h.engine.Run(context.Background(), "op-1")
+		if err != nil || resumed.State != lifecycle.StateQuarantined || len(h.deployer.staged) != 0 || len(h.deployer.activated) != 0 || len(h.adapter.revoked) != 1 {
+			t.Fatalf("%s: state=%s err=%v staged=%d activated=%d revoked=%v", state, resumed.State, err, len(h.deployer.staged), len(h.deployer.activated), h.adapter.revoked)
+		}
+		if state == lifecycle.StateActivating && (len(h.deployer.rolledBack) != 1 || h.deployer.rolledBack[0] != "dpl_1") {
+			t.Fatalf("rolledBack=%v", h.deployer.rolledBack)
+		}
+	}
+}
+
+func TestPlanRequiresCompensationCapabilities(t *testing.T) {
+	for _, missing := range []string{"rollback", "revoke"} {
+		h := newHarness(t)
+		_, private, _ := ed25519.GenerateKey(rand.Reader)
+		h.engine.PolicyKey = private.Public().(ed25519.PublicKey)
+		h.engine.DevicePrivate = private
+		operations := []string{}
+		for _, action := range h.policy.Operations {
+			if action != missing {
+				operations = append(operations, action)
+			}
+		}
+		h.policy.Operations = operations
+		h.policy.PublicKey, h.policy.Signature = nil, nil
+		if err := h.policy.Sign(private); err != nil {
+			t.Fatal(err)
+		}
+		h.store.policies[h.policy.ID] = h.policy
+		if _, err := h.engine.Plan(context.Background(), h.input()); !errors.Is(err, ErrNotApproved) {
+			t.Fatalf("policy without %s accepted: %v", missing, err)
+		}
+	}
+}
+
+func TestExhaustedStageRetriesQuarantineMintedCredential(t *testing.T) {
+	h := newHarness(t)
+	safe := provider.NewError("stage", 503, "VERCEL_RESPONSE", provider.RetrySafe)
+	h.deployer.stageErrs = []error{safe, safe, safe}
+	operation := h.planAndRun(t)
+	if operation.State != lifecycle.StateQuarantined || len(h.deployer.staged) != 3 || len(h.adapter.revoked) != 1 || h.adapter.revoked[0] != "role:p/b/app_b" {
+		t.Fatalf("state=%s staged=%d revoked=%v", operation.State, len(h.deployer.staged), h.adapter.revoked)
+	}
+}
+
+func TestExhaustedRevokeRetriesRequireReconciliation(t *testing.T) {
+	h := newHarness(t)
+	safe := provider.NewError("revoke", 503, "NEON_RESPONSE", provider.RetrySafe)
+	h.adapter.revokeErrs = []error{safe, safe, safe}
+	h.planAndRun(t)
+	h.clock = h.clock.Add(16 * time.Minute)
+	operation, err := h.engine.Run(context.Background(), "op-1")
+	if err != nil || operation.State != lifecycle.StateReconciliationRequired || len(h.adapter.revoked) != 3 {
+		t.Fatalf("state=%s err=%v revoked=%d", operation.State, err, len(h.adapter.revoked))
+	}
+}
+
+type slowDeployer struct {
+	fakeDeployer
+	advance func()
+}
+
+func (deployer *slowDeployer) Stage(ctx context.Context, request lifecycle.DeploymentRequest) (lifecycle.DeploymentEvidence, error) {
+	deployer.advance()
+	return deployer.fakeDeployer.Stage(ctx, request)
+}
+
+func TestLeaseExpiryFencesTheRun(t *testing.T) {
+	h := newHarness(t)
+	slow := &slowDeployer{advance: func() { h.clock = h.clock.Add(time.Hour) }}
+	h.engine.Deployer = slow
+	h.engine.LeaseTTL = 10 * time.Minute
+	if _, err := h.engine.Plan(context.Background(), h.input()); err != nil {
+		t.Fatal(err)
+	}
+	operation, err := h.engine.Run(context.Background(), "op-1")
+	if !errors.Is(err, ErrLeaseExpired) || operation.State != lifecycle.StateStaged || len(slow.activated) != 0 {
+		t.Fatalf("state=%s err=%v activated=%d", operation.State, err, len(slow.activated))
+	}
+	// A later run, holding a fresh lease, resumes from the persisted state.
+	resumed, err := h.engine.Run(context.Background(), "op-1")
+	if err != nil || resumed.State != lifecycle.StateGracePeriod {
+		t.Fatalf("state=%s err=%v", resumed.State, err)
+	}
+}
