@@ -301,3 +301,20 @@ func TestNewRejectsUnsafeEndpointsAndCredentials(t *testing.T) {
 		t.Fatal("credential with whitespace accepted")
 	}
 }
+
+func TestAPIKeyAmbiguousScopeIsRefusedBeforeMutation(t *testing.T) {
+	adapter := newAdapter(t, func(*http.Request) (*http.Response, error) { t.Fatal("reached Neon"); return nil, nil })
+	sink, _ := lifecycle.NewSecretSink(&writer{}, "NEON_API_KEY")
+	for _, parameters := range []map[string][]string{
+		{"key_name": {"x"}, "org_id": {"org-1"}, "project_id": {"proj-a", "proj-b"}},
+		{"key_name": {"x"}, "org_id": {"org-1"}, "project_id": {""}},
+		{"key_name": {"x"}, "org_id": {"org-1", "org-2"}},
+		{"key_name": {"x"}, "org_id": {""}},
+		{"key_name": {"a", "b"}, "org_id": {"org-1"}},
+	} {
+		_, err := adapter.Create(context.Background(), lifecycle.CredentialRequest{ProviderIdentity: "acct", CredentialType: TypeAPIKey, DestinationRecord: "NEON_API_KEY", IdempotencyKey: "k", Parameters: parameters}, sink)
+		if err == nil {
+			t.Fatalf("parameters %v accepted", parameters)
+		}
+	}
+}

@@ -363,6 +363,13 @@ func (adapter *Adapter) createAPIKey(ctx context.Context, request lifecycle.Cred
 	name := single(request.Parameters, "key_name")
 	org := single(request.Parameters, "org_id")
 	project := single(request.Parameters, "project_id")
+	// A scope parameter that is present but ambiguous or empty must refuse,
+	// not silently widen the key to the whole organization.
+	for _, scope := range []string{"org_id", "project_id"} {
+		if len(request.Parameters[scope]) > 0 && single(request.Parameters, scope) == "" {
+			return lifecycle.CredentialEvidence{}, provider.NewError("create", 0, "INVALID_CONFIGURATION", provider.RetryNever)
+		}
+	}
 	if name == "" || len(name) > 64 || strings.IndexFunc(name, func(r rune) bool { return r < ' ' || r == 0x7f }) >= 0 || (org != "" && !idPattern.MatchString(org)) || (project != "" && (!idPattern.MatchString(project) || org == "")) {
 		return lifecycle.CredentialEvidence{}, provider.NewError("create", 0, "INVALID_CONFIGURATION", provider.RetryNever)
 	}

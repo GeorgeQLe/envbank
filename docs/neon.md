@@ -19,10 +19,15 @@ organization and project-scoped keys.
 
 ## Role passwords have no grace period at Neon
 
-Neon invalidates the old password as soon as the reset operation finishes.
-A single-role rotation therefore breaks the application until the deployment
-target redeploys with the new value. To rotate without downtime, use **two
-equally privileged roles** and alternate:
+Neon invalidates the old password as soon as the reset operation finishes,
+and every reset **drops the open connections on the compute endpoint**. A
+single-role rotation therefore leaves the application with an invalid
+password until the deployment target redeploys with the new value. Alternating
+**two equally privileged roles** removes that invalid-password window: the
+role the application is using keeps its password until the new deployment is
+healthy. It does not remove the connection drop; the application must
+reconnect and retry transient connection errors, as it already must for Neon
+compute suspend/resume.
 
 1. The application currently uses role A.
 2. Rotation calls `Create` for role **B**: B gets a fresh password, EnvBank
@@ -30,7 +35,9 @@ equally privileged roles** and alternate:
    health-checked.
 3. After the grace period, `Revoke` on the previous credential
    (`role:<project>/<branch>/A`) resets A's password and discards the result,
-   so the retired value stops working.
+   so the retired value stops working. This reset also drops connections on
+   the endpoint; the application, now on B, reconnects with its still-valid
+   password.
 4. The next rotation mints for A and retires B.
 
 Roles created through the Neon API are `neon_superuser` members, so two
