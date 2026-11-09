@@ -84,9 +84,10 @@ The version-2 lifecycle and hermetic testlab foundation is implemented. Live
 provider acceptance and production workflow wiring remain required before the
 rotation-engine milestone can be marked complete.
 
-- Implement a durable create/store/validate/rollout/revoke state machine.
-- Resume safely after partial failures without losing the old credential or
-  repeating irreversible operations.
+- [x] Implement a durable create/store/validate/rollout/revoke state machine
+  driver (`internal/rotation`; see [agent-driven rotation](agent-rotation.md)).
+- [x] Resume safely after partial failures without losing the old credential or
+  repeating irreversible operations (synthetic tests; live acceptance open).
 - Support provider grace periods and staged rollout.
 - Require explicit confirmation immediately before an irreversible action such
   as revoking a credential.
