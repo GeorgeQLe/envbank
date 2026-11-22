@@ -1,0 +1,21 @@
+{
+  "about": "Redirect map for /Volumes/T9 paths cited in this repo. The folders were archived to the private repo GeorgeQLe/t9-archive and removed from T9 on 2026-11-22. Records citing the old paths are left unchanged. A path /Volumes/T9/<folder>/<rest> is at <folder>/<rest> inside that folder's archive.",
+  "restore": "gh release download <tag> -R GeorgeQLe/t9-archive; verify parts against sha256; cat <tag>.tar.zst.part-* | zstd -d | tar -xf -",
+  "archivedOn": "2026-11-22",
+  "paths": {
+    "/Volumes/T9/CodexBuildExports": {
+      "release": "https://github.com/GeorgeQLe/t9-archive/releases/tag/CodexBuildExports",
+      "manifest": "https://github.com/GeorgeQLe/t9-archive/blob/main/manifests/CodexBuildExports.json",
+      "fileIndex": "https://github.com/GeorgeQLe/t9-archive/blob/main/manifests/CodexBuildExports.files.tsv",
+      "files": 3533,
+      "bytes": 3307929594,
+      "parts": [
+        {
+          "url": "https://github.com/GeorgeQLe/t9-archive/releases/download/CodexBuildExports/CodexBuildExports.tar.zst.part-aa",
+          "sha256": "8d5267b8e648d7cf3aaa91da965d127d76680b1dcd49d0ea4cb462a6a765b25c",
+          "bytes": 1109197996
+        }
+      ]
+    }
+  }
+}
